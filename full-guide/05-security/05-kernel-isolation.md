@@ -3,8 +3,11 @@
 > Four ways to shrink what a container can ask the kernel to do, shown on a
 > kind cluster where the lab host allows it: a seccomp filter built from an
 > audit log, an AppArmor profile that refuses to run a program from a writable
-> volume, and a gVisor sandbox chosen through a RuntimeClass. SELinux and the
-> Security Profiles Operator are cited, not run.
+> volume, and a gVisor sandbox chosen through a RuntimeClass. The seccomp
+> filters and the gVisor sandbox ran. On the lab's nodes AppArmor could not
+> load a profile, so the lab shows the node refusing a Pod that names one, and
+> the profile's denial is cited, not run. SELinux and the Security Profiles
+> Operator are cited, not run.
 
 **Estimated time:** ~35 min read · ~60 min hands-on (the lab is scripted)
 **Prerequisites:** [Part 05 ch.02](02-pod-security.md): the baseline's
@@ -14,9 +17,11 @@ cgroups and capabilities
 **You'll know after this:** • read a seccomp profile and say which system
 calls it allows · • run a workload under audit and read what the kernel
 logged · • enforce a profile that refuses one call, and say why an allowlist
-needs a complete audit · • explain how an AppArmor profile stops a program
+needs a complete audit · • say what happens to a Pod that names an AppArmor
+profile its node cannot load, and explain how such a profile stops a program
 running from `/tmp` (cited, not run here) · • say why a kind node cannot show
-a host-kernel escape · • select a sandbox with a RuntimeClass
+a host-kernel escape · • select a sandbox with a RuntimeClass, and read the
+sandbox's own kernel from inside the Pod
 
 <!-- tags: security, seccomp, apparmor, selinux, gvisor, runtimeclass -->
 
@@ -76,9 +81,9 @@ replacement for it.
 ## Threats and controls
 
 Each threat is something a process inside a container can do to the kernel or
-to the node. The lab shows two of these controls working, the first two rows.
-The rest are cited, and the text after the table says why none of them ran. It
-runs no kernel exploit.
+to the node. The lab shows three of these controls working: the first two rows
+and the sandbox row. The AppArmor row is partly shown, and the rest are cited.
+The text after the table says why. The lab runs no kernel exploit.
 
 | Threat | Control this chapter teaches | Where it goes deeper |
 |---|---|---|
@@ -91,10 +96,11 @@ runs no kernel exploit.
 
 The first two rows need the baseline's `seccompProfile` field and the
 `restricted` level, so the lab sets both on every hardened Pod. The third row
-needs AppArmor loaded on the node. The lab loads no profile, because a profile
-is kernel state shared with the Docker host, so that row is cited. The fourth
-and fifth rows need a runtime the lab host does not provide by default, so
-their install is described and not run here.
+needs a profile loaded on the node, and none of the lab's nodes can load one.
+The lab shows what a node does with a Pod that names a profile it does not
+hold, and cites the denial itself. The fifth row needs a runtime that a kind
+node does not ship with, so the lab installs gVisor into one node, shows a Pod
+running under it, and removes it. The fourth and sixth rows are cited.
 
 ## What a kind node can and cannot show
 
@@ -102,18 +108,26 @@ A kind node is a container. It runs systemd, containerd and the kubelet, and it
 shares the lab host's kernel. That fact sets what this lab can show truthfully.
 
 - **A profile loaded in a node is loaded into the host's kernel.** AppArmor
-  profiles are kernel state, shared by every container on the host. The lab
-  therefore loads none. An earlier version loaded one and removed it at the
-  end, but the host's policy still changed while it was loaded, so that step
-  was removed.
+  profiles are kernel state, shared by every container on the host. A load
+  from a node therefore changes the lab host's policy, outside the node's own
+  view. The lab loads none, and in the recorded run no node could have loaded
+  one (see the AppArmor section). If you do load a profile on a host you own,
+  give it a name nothing else uses, say so to whoever shares the host, and
+  remove it when you finish. An earlier version of this lab loaded one and
+  removed it at the end, but the host's policy still changed while it was
+  loaded, so that step was removed.
 - **A payload in a Pod is a process of the host's kernel.** A kernel escape
   would reach the lab host, not just the node. The lab runs no kernel exploit.
   Its payloads read `/proc`, copy busybox into a Pod's `/tmp`, run it, and ask
   for one personality call that a filter refuses. None of them reads or writes
   outside the node and the lab's own Pods.
-- **A sandbox runs on the same host.** gVisor's `runsc` is a process on the lab
-  host. It changes which kernel answers the Pod's system calls, not where the
-  process runs.
+- **A sandbox runs on the same host.** gVisor's `runsc` is a set of processes
+  on the lab host. It changes which kernel answers the Pod's system calls, not
+  where the process runs. Step 6 lists those processes on the node.
+- **A runtime install is a change to the node.** Adding `runsc` writes files
+  into one node, adds an entry to that node's containerd configuration and
+  restarts containerd there, which interrupts the Pods on that node for a
+  moment. The lab does this to one worker and puts the node back in step 7.
 
 Parts 10, 14 and 15 cover operating these controls on managed clusters, where
 the node image, the runtime and the admission policy belong to the platform
@@ -128,22 +142,29 @@ a lab cluster and links to them rather than repeating them.
 
 ### Lab header
 
-- **Tier A, partly run.** The seccomp steps ran on a kind cluster named
-  `sf-pilot`, with a node on Kubernetes v1.37.0 and containerd 2.3.4, on a Linux
-  host whose kernel is 7.0.0 with AppArmor enabled. `kubectl` is v1.37.2. The
-  lab's config names its cluster `security-lab-kernel`, so the captured node
-  name differs from the one the commands would print. The gVisor install did
-  not run, and the AppArmor steps are cited (see below). This lab has
-  not been run on macOS, which has no AppArmor.
+- **Tier A, run in two parts.** The seccomp steps (3 and 4) ran on a
+  single-node kind cluster named `sf-pilot`. The other steps (1, 2 and 5 to 7)
+  ran later on a three-node kind cluster named `sf-sched`. Both have nodes on
+  Kubernetes v1.37.0 and containerd 2.3.4, on a Linux host whose kernel is
+  7.0.0 with AppArmor enabled. `kubectl` is v1.37.2. The gVisor release is
+  `20261026.0`, and `runsc --version` printed `release-20261026.0`. The lab's
+  config names its cluster `security-lab-kernel`, so the captured node names
+  differ from the ones the commands would print. The AppArmor profile was not
+  loaded and its denial did not run (see below). This lab has not been run on
+  macOS, which has no AppArmor.
 - **Script and transcript.**
   [`labs/05-05.sh`](../examples/security-lab/labs/05-05.sh) runs the steps
   below and deletes what it creates. Its recorded output is
-  [`evidence/05-05.txt`](../examples/security-lab/evidence/05-05.txt), run with
-  `P05_RUNTIME=0`, the mode that changes no node runtime. Run it only against a
-  cluster you own. It refuses any kubectl context that is not `kind-*`.
-- **Namespaces.** Two, `kernel-attack` and `kernel-restricted`. The recorded
-  run named them `p05-05-attack` and `p05-05-restricted`; the script and the
-  transcript carry the chapter's names, and their headers say so.
+  [`evidence/05-05.txt`](../examples/security-lab/evidence/05-05.txt), two runs
+  joined at lines that say so: the seccomp part with `P05_RUNTIME=0`, the mode
+  that changes no node runtime, and the later part with `P05_SECCOMP=0` and
+  `P05_RUNTIME=1`. Run it only against a cluster you own. It refuses any
+  kubectl context that is not `kind-*`. With `P05_RUNTIME=1` it changes one
+  node's runtime, so use a cluster you can lose.
+- **Namespaces.** Two, `kernel-attack` and `kernel-restricted`. The seccomp
+  part of the recording named them `p05-05-attack` and `p05-05-restricted`;
+  the script and the transcript carry the chapter's names, and the
+  transcript's header says so. The later part used the chapter's names.
   `kernel-attack` enforces `privileged`, because one Pod in it runs unconfined.
   It holds that one marked, insecure Pod only. `kernel-restricted` enforces,
   audits and warns on `restricted`, and holds every other Pod. A namespace
@@ -153,14 +174,29 @@ a lab cluster and links to them rather than repeating them.
   `security/namespace-exceptions.yaml` at the repository root, and
   [05.09](09-running-security-on-a-platform-team.md) explains how the registry
   is kept.
-- **What did not run.** The AppArmor load, which the lab does not do (see the
-  AppArmor section). Step 6, gVisor, needs a runtime installed into the node,
-  which restarts the node's containerd and interrupts the Pods on it. Both are
-  described below and cited, not shown as results.
+- **What changed on the cluster, and what was put back.** Step 6 adds `runsc`,
+  its containerd shim and a directory of helper binaries to one worker's
+  `/usr/local/bin`, appends a `runsc` entry to that worker's containerd
+  configuration after saving a copy, restarts containerd there, and labels the
+  node. Step 7 reverses each of these, and the transcript shows the files, the
+  entry and the RuntimeClass gone. The lab installs no webhook, no CRD and no
+  chart. No AppArmor profile was loaded, on the node or on the lab host.
+- **What did not run.** Loading the AppArmor profile and seeing it deny a
+  write. No node had `apparmor_parser` or the AppArmor filesystem, and the lab
+  did not add them, because the profile would then have entered the lab
+  host's kernel policy. What the lab does show is the node refusing a Pod that
+  names a profile it does not hold. SELinux and the Security Profiles Operator
+  also did not run.
 - **What did not work the first time.** The audit step did not produce what
-  the lab wanted, and the chapter says what it produced instead. A fresh kind
-  cluster on the lab host stalled in `kubeadm init` on six attempts, so the
-  gVisor step had no node to run on.
+  the lab wanted, and the chapter says what it produced instead. When the
+  chapter was first written, a fresh kind cluster on the lab host stalled in
+  `kubeadm init` on six attempts. The later steps ran on a cluster that
+  already existed. The first gVisor attempt requested `runsc`, its shim and
+  their checksum files as separate downloads from the release directory and
+  got HTTP 404 for all four. The install page now describes one tarball,
+  `gvisor.tar.zstd`, that holds `runsc`, the shim and a directory of helper
+  binaries, and the lab uses it. The transcript is the third gVisor install: a
+  trial and an earlier recording ran first, and each was removed.
 
 ### Step 1: the node shares the lab host's kernel
 
@@ -189,9 +225,11 @@ selinux-absent
 
 The kernel is the host's, and AppArmor is enabled in it (`Y`). The node does
 not expose the AppArmor filesystem, so no profile can be loaded into it from
-the node, and the lab does not try. The node has no SELinux filesystem, so
-this lab cannot show SELinux labels. Both results are why the AppArmor and
-SELinux parts below are cited, not run, on this cluster.
+the node, and the lab does not try to change that. The node has no SELinux
+filesystem, so this lab cannot show SELinux labels. Both results are why the
+profile load and the SELinux part below are cited, not run, on this cluster.
+The node in this capture is the control-plane node of the three-node cluster.
+The AppArmor section asks every node.
 
 ### Seccomp, first: RuntimeDefault against Unconfined
 
@@ -586,7 +624,7 @@ The workload still runs, and the call the audit was looking for returns `EPERM`.
 The filter is installed (`Seccomp: 2`), and the Pod has no capability to
 undo it.
 
-### AppArmor: a profile the node cannot load on this cluster
+### AppArmor: a profile no node here can load, and what the node does instead
 
 AppArmor confines a process by path. A profile is compiled by
 `apparmor_parser` and written into the kernel through the AppArmor filesystem.
@@ -599,28 +637,124 @@ emptyDir. `/dev/shm` is a tmpfs that the runtime mounts. Both are writable,
 which is why they matter: `readOnlyRootFilesystem` does not stop a binary
 being copied into a writable path and run from there.
 
-The lab does not load this profile. A profile is kernel state, and the kernel
-is the Docker host's, so a load from the node would change the host's policy.
-Step 5 runs read-only checks instead: whether the node exposes the AppArmor
-filesystem, and whether it has `apparmor_parser`. The expected result on a node
-that exposes both is a refusal from the policy for a copy of busybox run from
-`/tmp`, and a `DENIED` record in the kernel log. That result is cited, not
-shown, because the captured node has neither.
+Loading that profile needs two things on the node: `apparmor_parser` and the
+AppArmor filesystem. Step 1 showed the filesystem missing from the control-plane
+node. Now ask every node for the parser, and try to run it on a worker. Pick the
+worker first. On a single-node cluster, use `NODE` instead.
+
+```sh
+WORKER=$(kubectl get nodes -l '!node-role.kubernetes.io/control-plane' \
+  -o jsonpath='{.items[0].metadata.name}')
+for n in $(kubectl get nodes -o name | cut -d/ -f2); do
+  docker exec "$n" sh -c 'command -v apparmor_parser || echo apparmor_parser-absent'
+done
+docker exec "$WORKER" apparmor_parser --version
+```
 
 <!-- gate: output -->
 
 ```
-apparmor-securityfs-absent
 apparmor_parser-absent
+apparmor_parser-absent
+apparmor_parser-absent
+OCI runtime exec failed: exec failed: unable to start container process: exec: "apparmor_parser": executable file not found in $PATH
 ```
 
-The kind config in the repository,
-[`kind/kernel-cluster.yaml`](../examples/security-lab/kind/kernel-cluster.yaml),
-mounts no host filesystem, so this lab cannot show the profile on a node. The
-mechanism stands on the AppArmor tutorial. That page states that the field has
-been stable since Kubernetes 1.31, and that a profile must be loaded on every
-node where a Pod can land. What the kubelet does with a Pod whose profile is
-missing is covered there, and this lab did not reach that point.
+None of the three nodes has the parser, and the last command is the real error
+from asking for it. The lab did not add the parser or mount the filesystem in
+a node. A profile loaded from a node goes into the lab host's kernel policy,
+outside the node's own view, and the lab leaves that policy alone. Nothing was
+loaded, on a node or on the host. Had it been, the rule is a profile name that
+nothing else on the host uses, and removal as soon as the demonstration ends,
+with the chapter saying so plainly.
+
+What the lab can show is what a node does with a Pod that names a profile it
+does not hold. This is the baseline Pod with one more field, in the
+`restricted` namespace. `Localhost` is the type that names a profile loaded on
+the node, and `no-tmp-exec` is the name the profile file declares.
+
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: apparmor
+  namespace: kernel-restricted
+spec:
+  automountServiceAccountToken: false
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 65532
+    runAsGroup: 65532
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: app
+      image: busybox@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662 # busybox:1.36
+      command: ["sleep", "3600"]
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop: ["ALL"]
+        appArmorProfile:
+          type: Localhost
+          localhostProfile: no-tmp-exec
+      resources:
+        requests:
+          cpu: 10m
+          memory: 16Mi
+        limits:
+          memory: 64Mi
+      volumeMounts:
+        - name: tmp
+          mountPath: /tmp
+  volumes:
+    - name: tmp
+      emptyDir: {}
+```
+
+Save it as `apparmor.yaml` and apply it. The Pod will never be Ready, so wait
+for its phase to become `Failed`, then read the reason, the message and the
+events that name which component said what.
+
+```sh
+kubectl apply -f apparmor.yaml
+kubectl -n kernel-restricted wait --for=jsonpath='{.status.phase}'=Failed pod/apparmor --timeout=120s
+kubectl -n kernel-restricted get pod apparmor -o jsonpath='{.status.reason}{"\n"}{.status.message}{"\n"}'
+kubectl -n kernel-restricted get events --field-selector involvedObject.name=apparmor --sort-by=.metadata.creationTimestamp -o jsonpath='{range .items[*]}{.reportingComponent}{" "}{.reason}{"\n"}{end}'
+```
+
+<!-- gate: output -->
+
+```
+pod/apparmor created
+pod/apparmor condition met
+AppArmor
+Pod was rejected: Cannot enforce AppArmor: AppArmor is not enabled on the host
+default-scheduler Scheduled
+kubelet AppArmor
+```
+
+The API server admitted the Pod: `restricted` allows a `Localhost` profile, and
+the apply succeeded. The scheduler placed it. Then the node's kubelet refused
+it, and the Pod ended in phase `Failed` with the reason `AppArmor`. It did not
+run, and it did not fall back to running unconfined. That is the behaviour to
+want from a control you rely on: a node that cannot enforce the profile
+refuses the Pod instead of starting it without the profile.
+
+Two limits on that result. Step 1 showed the kernel parameter at `Y` and the
+AppArmor filesystem absent from the node. The message says AppArmor is not
+enabled on the host, which fits the missing filesystem, but the lab did not
+find out which check the kubelet makes. And the refusal says nothing about the
+profile's rules. What the profile does to a process is the expected result on
+a node that has both pieces: a copy of busybox run from `/tmp` is refused, and
+the kernel log holds a `DENIED` record. That result is cited, not shown,
+because no node here could load the profile.
+
+The mechanism stands on the [AppArmor
+tutorial](https://kubernetes.io/docs/tutorials/security/apparmor/). That page
+states that the field has been stable since Kubernetes 1.31, and that a
+profile must be loaded on every node where a Pod can land.
 
 ### SELinux: cited, not run
 
@@ -633,7 +767,7 @@ constraints](https://kubernetes.io/docs/concepts/security/linux-kernel-security-
 page. Distributions that enable SELinux by default are the ones where the
 field matters in practice.
 
-### gVisor: a sandboxed runtime through a RuntimeClass: not run
+### gVisor: a sandboxed runtime through a RuntimeClass
 
 The other kind of boundary changes which kernel answers. gVisor's `runsc`
 runs a user-space kernel for the Pod, so most of the Pod's system calls are
@@ -642,24 +776,231 @@ runtime. Its `handler` is the name containerd maps to a runtime binary, so a
 Pod selects the sandbox with `runtimeClassName` and the cluster-scoped
 RuntimeClass decides which handler runs it.
 
-Step 6 of the script installs gVisor into a throwaway node. It fetches the
-release tarball and its SHA-512 checksum from the upstream bucket, verifies
-the checksum, copies `runsc`, its shim and its sidecar binaries into the node,
-adds a `runsc` entry to the node's containerd configuration, restarts
-containerd, and then runs a Pod through a RuntimeClass with `handler: runsc`.
-The Pod reports a kernel of its own. Step 6 did not run. Installing it means
-restarting the node's containerd, which would interrupt every Pod on that
-node, so the captured run did not do it. A fresh kind node has also stalled in
-`kubeadm init` on the lab host. The install is described in the [gVisor
-install guide](https://gvisor.dev/docs/user_guide/install/), and the sandbox's
-cost is stated in the [Linux kernel security
+A kind node does not ship with `runsc`, so the lab installs it into the one
+worker from the previous section. The [gVisor install
+page](https://gvisor.dev/docs/user_guide/install/) says it needs Linux 5.6 or
+later, and the lab host's kernel is 7.0.0. The lab pins release `20261026.0`
+and checks the tarball's SHA-512 twice: against the file published beside it,
+and against a digest written into the lab script. Both come from the same
+bucket, so the checks catch a damaged download. They do not prove the release
+is genuine. Work in a new, empty directory, because an archive you downloaded
+is data until you have checked it.
+
+```sh
+GVISOR_RELEASE=20261026.0
+ARCH=$(docker exec "$WORKER" uname -m)
+GVISOR_SHA512=e6aa030fb8379fe92b53e9b8b696419e0dce8a3bbcc7d4c1cf76b2ea3d6569eabd7360e694deda6ccbdcd77095b3e82ca0f90a3d8fd13a3e5d6b11cd29fe4649
+URL=https://storage.googleapis.com/gvisor/releases/release/$GVISOR_RELEASE/$ARCH
+curl -fsSLO "$URL/gvisor.tar.zstd" -O "$URL/gvisor.tar.zstd.sha512"
+sha512sum -c gvisor.tar.zstd.sha512
+echo "$GVISOR_SHA512  gvisor.tar.zstd" | sha512sum -c -
+tar --zstd -tf gvisor.tar.zstd
+```
+
+<!-- gate: output -->
+
+```
+gvisor.tar.zstd: OK
+gvisor.tar.zstd: OK
+containerd-shim-runsc-v1
+runsc
+gvisor-bin/
+gvisor-bin/checkpointgofer
+gvisor-bin/gvisor-proc-umounter
+gvisor-bin/gvisor-sentry-prewarmer
+gvisor-bin/gvisor_sentry
+gvisor-bin/runsc-fd-parking
+gvisor-bin/runsc-metric-server
+```
+
+The digest above is for the `x86_64` build. On another architecture, take the
+digest from that architecture's published file and check it the same way.
+Extract the tarball, then stream the three items into the node's
+`/usr/local/bin`. `runsc` looks for `gvisor-bin/` next to its own binary, so
+the three move together. Save the node's containerd configuration first, so
+that cleanup can restore it. The `--no-same-owner` flag matters: a `tar` run
+as root in the node otherwise keeps the numeric owner of the machine that made
+the archive.
+
+```sh
+mkdir gvisor-dist && tar --zstd -xf gvisor.tar.zstd -C gvisor-dist
+docker exec "$WORKER" cp -p /etc/containerd/config.toml /etc/containerd/config.toml.lab-backup
+tar -C gvisor-dist -cf - runsc containerd-shim-runsc-v1 gvisor-bin \
+  | docker exec -i "$WORKER" tar --no-same-owner -C /usr/local/bin -xf -
+docker exec "$WORKER" /usr/local/bin/runsc --version | head -1
+```
+
+<!-- gate: output -->
+
+```
+runsc version release-20261026.0
+```
+
+Then tell that node's containerd that a handler named `runsc` exists. This is
+the node's configuration, not the cluster's, so it is done on the node, and it
+needs a containerd restart. The restart interrupts the Pods on that node for a
+moment. The lab also labels the node. A label is how a cluster records which
+nodes have a runtime, and `example.com` is a placeholder prefix.
+
+```toml
+# appended to /etc/containerd/config.toml in the worker
+[plugins."io.containerd.grpc.v1.cri".containerd.runtimes.runsc]
+  runtime_type = "io.containerd.runsc.v1"
+```
+
+```sh
+printf '\n[plugins."io.containerd.grpc.v1.cri".containerd.runtimes.runsc]\n  runtime_type = "io.containerd.runsc.v1"\n' \
+  | docker exec -i "$WORKER" sh -c 'cat >> /etc/containerd/config.toml'
+docker exec "$WORKER" tail -3 /etc/containerd/config.toml
+docker exec "$WORKER" systemctl restart containerd
+kubectl wait --for=condition=Ready node/"$WORKER" --timeout=240s
+kubectl label node "$WORKER" example.com/runsc=installed
+```
+
+<!-- gate: output -->
+
+```
+[plugins."io.containerd.grpc.v1.cri".containerd.runtimes.runsc]
+  runtime_type = "io.containerd.runsc.v1"
+node/sf-sched-worker condition met
+node/sf-sched-worker labeled
+```
+
+The RuntimeClass names the handler. Its `scheduling.nodeSelector` is merged
+into the node selector of every Pod that uses the class, as the
+[RuntimeClass](https://kubernetes.io/docs/concepts/containers/runtime-class/)
+page describes, so those Pods land only on nodes that carry the label. Without
+it, a Pod could be scheduled to a node that has no `runsc`. The Pod below is
+the baseline plus `runtimeClassName`.
+
+```yaml
+apiVersion: node.k8s.io/v1
+kind: RuntimeClass
+metadata:
+  name: gvisor
+handler: runsc
+scheduling:
+  nodeSelector:
+    example.com/runsc: installed
+```
+
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: gvisor
+  namespace: kernel-restricted
+spec:
+  runtimeClassName: gvisor
+  automountServiceAccountToken: false
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 65532
+    runAsGroup: 65532
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: app
+      image: busybox@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662 # busybox:1.36
+      command: ["sleep", "3600"]
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop: ["ALL"]
+      resources:
+        requests:
+          cpu: 10m
+          memory: 16Mi
+        limits:
+          memory: 64Mi
+      volumeMounts:
+        - name: tmp
+          mountPath: /tmp
+  volumes:
+    - name: tmp
+      emptyDir: {}
+```
+
+Save them as `runtimeclass.yaml` and `gvisor.yaml`, apply both, and wait for
+the Pod.
+
+```sh
+kubectl apply -f runtimeclass.yaml
+kubectl apply -f gvisor.yaml
+kubectl -n kernel-restricted wait --for=condition=Ready pod/gvisor --timeout=240s
+```
+
+<!-- gate: output -->
+
+```
+runtimeclass.node.k8s.io/gvisor created
+pod/gvisor created
+pod/gvisor condition met
+```
+
+Ask the Pod which kernel it is running on, and ask the node the same
+question.
+
+```sh
+kubectl -n kernel-restricted get pod gvisor -o jsonpath='{.spec.runtimeClassName}{"\n"}'
+kubectl -n kernel-restricted exec gvisor -- sh -c 'uname -r; cat /proc/version; dmesg | head -3'
+docker exec "$WORKER" uname -r
+```
+
+<!-- gate: output -->
+
+```
+gvisor
+4.19.0-gvisor
+Linux version 4.19.0-gvisor #1 SMP Sun Jan 10 15:06:54 PST 2016
+[   0.000000] Starting gVisor...
+[   0.417457] Politicking the oom killer...
+[   0.730007] Granting licence to kill(2)...
+7.0.0-38-generic
+```
+
+The Pod reports a kernel of its own, `4.19.0-gvisor`, and `dmesg` shows the
+sandbox's start-up log. The node reports the lab host's kernel,
+`7.0.0-38-generic`. That is the boundary: the Pod's system calls are answered
+by a different kernel from the one that runs the node. Two more checks. The
+first lists the sandbox's processes on the node, which shows the sandbox is
+ordinary processes of the lab host's kernel. `ps` shows the first 15
+characters of a process name, so `runsc-fd-parkin` is `runsc-fd-parking`. The
+second repeats the seccomp check from earlier steps inside the sandbox.
+
+```sh
+docker exec "$WORKER" sh -c 'ps -eo comm | grep -E "^(runsc|gvisor_sentry)" | sort | uniq -c'
+kubectl -n kernel-restricted exec gvisor -- sh -c 'grep "^Seccomp:" /proc/self/status | tr "\t" " "; setarch linux64 -R /bin/true 2>&1; echo exit=$?'
+```
+
+<!-- gate: output -->
+
+```
+     16 gvisor_sentry
+      2 runsc
+      1 runsc-fd-parkin
+Seccomp: 0
+linux64: personality(0x40000): Invalid argument
+exit=1
+```
+
+Inside the sandbox `/proc/self/status` reports `Seccomp: 0`, although the
+Pod's spec asks for `RuntimeDefault`. The personality call, which succeeded in
+the unconfined Pod and got `EPERM` from the default filter, now gets `EINVAL`,
+an answer neither earlier Pod gave. That is what a different kernel answering
+looks like. The lab did not look into why the spec's filter does not show up in
+the sandbox. The lesson is narrower: the `Seccomp:` line from the earlier steps
+cannot judge a sandboxed Pod, so do not read it as proof that the baseline's
+filter is absent or present there.
+
+Two limits hold even when a sandbox runs. The sandbox is still a set of
+processes on the lab host, so it changes which kernel answers the Pod's calls,
+not where the process lives. And a sandbox does not replace the baseline. A
+Pod that runs as root inside a sandbox still holds whatever the sandbox grants
+it. The sandbox's cost is stated in the [Linux kernel security
 constraints](https://kubernetes.io/docs/concepts/security/linux-kernel-security-constraints/)
 page: sandboxes "require more compute resources on your nodes".
-
-Two limits hold even when a sandbox runs. The sandbox is still a process on the
-lab host, so it changes which kernel answers the Pod's calls, not where the
-process lives. And a sandbox does not replace the baseline. A Pod that runs as
-root inside a sandbox still holds whatever the sandbox grants it.
 
 ### Security Profiles Operator: cited, not run
 
@@ -673,14 +1014,58 @@ files, which is the mechanism the Operator automates.
 
 ### Clean up
 
-The lab deletes its namespaces and removes the seccomp profiles it copied into
-the node. It prints what remains.
+The lab deletes its namespaces and the RuntimeClass, removes the node label,
+deletes the `runsc` files it copied into the worker, puts back the containerd
+configuration it saved, and restarts containerd there. It also removes the
+seccomp profiles it copied into the node of the seccomp part. The lab installed
+no webhook, no CRD and no chart, so none of those remains to remove.
+
+```sh
+kubectl delete ns kernel-attack kernel-restricted --wait=true
+kubectl delete runtimeclass gvisor --ignore-not-found
+```
 
 <!-- gate: output -->
 
 ```
 namespace "kernel-attack" deleted
 namespace "kernel-restricted" deleted
+runtimeclass.node.k8s.io "gvisor" deleted
+```
+
+```sh
+kubectl label node "$WORKER" example.com/runsc-
+docker exec "$WORKER" rm -rf /usr/local/bin/runsc /usr/local/bin/containerd-shim-runsc-v1 /usr/local/bin/gvisor-bin
+docker exec "$WORKER" mv /etc/containerd/config.toml.lab-backup /etc/containerd/config.toml
+docker exec "$WORKER" systemctl restart containerd
+kubectl wait --for=condition=Ready node/"$WORKER" --timeout=240s
+```
+
+<!-- gate: output -->
+
+```
+node/sf-sched-worker unlabeled
+node/sf-sched-worker condition met
+```
+
+Then check what remains of the install. The first two numbers count `runsc` or
+gVisor files in `/usr/local/bin` and `runsc` entries in the containerd
+configuration. The node holds its two original configuration files, and the
+cluster holds no RuntimeClass.
+
+```sh
+docker exec "$WORKER" sh -c 'ls /usr/local/bin | grep -c -E "runsc|gvisor"; grep -c runsc /etc/containerd/config.toml; ls /etc/containerd'
+kubectl get runtimeclass
+```
+
+<!-- gate: output -->
+
+```
+0
+0
+config.toml
+cri-base.json
+No resources found
 ```
 
 ## How it works under the hood
@@ -705,6 +1090,10 @@ namespace "kernel-restricted" deleted
   under the profile is confined by path rules, and a `deny` rule overrides an
   `allow` rule. The `file,` rule in the lab profile allows everything, and the
   two `deny` lines take back execute under `/tmp` and `/dev/shm`.
+- **The kubelet refuses a Pod it cannot confine.** In the lab the API server
+  admitted the Pod and the scheduler placed it. Then the kubelet on the node
+  refused it, and the Pod ended in phase `Failed` with the reason `AppArmor`.
+  The events name the two components: `default-scheduler` and `kubelet`.
 - **The kubelet resolves a `Localhost` path.** The path is relative to the
   kubelet's seccomp root, `/var/lib/kubelet/seccomp`, and the kubelet hands the
   file to containerd, which applies it through runc. A missing file is found
@@ -746,6 +1135,8 @@ runtimeClassName: <runtimeclass name>
 | Is this process filtered? | `grep "^Seccomp:" /proc/self/status`: `2` means a filter is installed |
 | Is AppArmor available on the node? | `test -d /sys/kernel/security/apparmor` inside the node |
 | Which AppArmor profiles are loaded? | `cat /sys/kernel/security/apparmor/profiles` inside the node |
+| Did the node accept the profile? | `kubectl get pod <pod> -o jsonpath='{.status.reason}'`: `AppArmor` means the node refused the Pod |
+| Which kernel answers this Pod? | `kubectl exec <pod> -- uname -r`, against `uname -r` in the node |
 | Would the namespace admit this Pod? | `kubectl apply --dry-run=server -f pod.yaml` |
 
 ## Test your understanding
@@ -791,6 +1182,36 @@ runtimeClassName: <runtimeclass name>
    Pod names that profile in `securityContext.appArmorProfile`. This part is
    cited, not run on this cluster, so the claim rests on the profile and the
    AppArmor tutorial.
+
+   </details>
+
+4. **A Pod in a `restricted` namespace names an AppArmor `Localhost` profile
+   that its node has not loaded. What happens, and why is that the behaviour
+   you want?**
+   <details><summary>Show answer</summary>
+
+   Admission lets it through, because `restricted` allows a `Localhost`
+   profile, and the scheduler places it. The kubelet on the node then refuses
+   it: in the lab the Pod ended in phase `Failed` with the reason `AppArmor`
+   and the message "Cannot enforce AppArmor". It did not start without the
+   profile. A control that fails open leaves a workload unconfined while the
+   manifest looks protected, so the refusal is what lets you trust the field.
+   The profile has to be loaded on every node where the Pod can land.
+
+   </details>
+
+5. **Inside the gVisor Pod, `grep Seccomp: /proc/self/status` prints
+   `Seccomp: 0`, although the spec sets `RuntimeDefault`. A teammate concludes
+   the Pod runs with no seccomp filter. What do you tell them?**
+   <details><summary>Show answer</summary>
+
+   The line is read from the sandbox's kernel, not the host's, and the lab saw
+   `0` there without finding out why. So the line cannot show that the filter
+   is absent, and it cannot show that it is present. The check that worked for
+   ordinary Pods does not carry over to a sandboxed one. Keep the baseline
+   field set, because admission still checks it, and judge the sandbox by what
+   it does: its own kernel, shown by `uname -r`, answers the Pod's system
+   calls.
 
    </details>
 

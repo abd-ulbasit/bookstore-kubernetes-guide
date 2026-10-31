@@ -1,17 +1,39 @@
-# Transcript for 05-security/05-kernel-isolation.md, run with P05_RUNTIME=0.
+# Transcript for 05-security/05-kernel-isolation.md.
 #
-# Namespace substitution: the lab ran its two namespaces as p05-05-attack and
-# p05-05-restricted. They appear below as kernel-attack and kernel-restricted,
-# the names the chapter uses. The exceptions registry reads Pod Security labels
-# from transcripts, and it registers the chapter's namespace, not a lab name.
-# That rename is the only edit to the recorded lines.
-## node: sf-pilot-control-plane, kubectl v1.37.2
+# Two recorded runs of labs/05-05.sh, joined into one file at the lines that
+# start with "## ====".
+#
+# Run 1, the later one, is a three-node kind cluster whose nodes run Kubernetes
+# v1.37.0 and containerd 2.3.4. It ran with P05_SECCOMP=0 and P05_RUNTIME=1 and
+# covers steps 1 and 2, then steps 5 to 7. gVisor release 20261026.0 went onto
+# one worker node only, and step 7 took it off again. The namespaces in run 1
+# carry the chapter's names, so nothing in it is renamed. The checksum lines
+# read as they do on Linux: the client that ran the script had no sha512sum,
+# and the script put a one-line stand-in for shasum -a 512 on its PATH. In the
+# command lines, $WORKER, $GVISOR_RELEASE, $ARCH and $GVISOR_SHA512 are the
+# script's variables. Their values are sf-sched-worker, 20261026.0, x86_64 and
+# the digest pinned in the script.
+#
+# Run 2, the earlier one, is a single-node kind cluster, run with
+# P05_RUNTIME=0. It covers steps 3 and 4, and the removal of the seccomp
+# profiles it copied into its node. The namespace substitution: run 2 named
+# its two namespaces p05-05-attack and p05-05-restricted. They appear below as
+# kernel-attack and kernel-restricted, the names the chapter uses. The
+# exceptions registry reads Pod Security labels from transcripts, and it
+# registers the chapter's namespace, not a lab name. That rename is the only
+# edit to the recorded lines.
+#
+# The lab's kind config names its cluster security-lab-kernel, so the node
+# names below, sf-sched-* in run 1 and sf-pilot-* in run 2, differ from the
+# ones the commands would print on that cluster.
+
+## node: sf-sched-control-plane, kubectl v1.37.2
 
 ## step 1: the node shares the lab host kernel, and sees AppArmor
-$ docker exec sf-pilot-control-plane uname -r
-docker exec sf-pilot-control-plane cat /sys/module/apparmor/parameters/enabled
-docker exec sf-pilot-control-plane sh -c 'test -d /sys/kernel/security/apparmor && echo apparmor-securityfs-present || echo apparmor-securityfs-absent'
-docker exec sf-pilot-control-plane sh -c 'test -e /sys/fs/selinux && echo selinux-present || echo selinux-absent'
+$ docker exec sf-sched-control-plane uname -r
+docker exec sf-sched-control-plane cat /sys/module/apparmor/parameters/enabled
+docker exec sf-sched-control-plane sh -c 'test -d /sys/kernel/security/apparmor && echo apparmor-securityfs-present || echo apparmor-securityfs-absent'
+docker exec sf-sched-control-plane sh -c 'test -e /sys/fs/selinux && echo selinux-present || echo selinux-absent'
 7.0.0-38-generic
 Y
 apparmor-securityfs-absent
@@ -29,6 +51,8 @@ namespace/kernel-attack created
 namespace/kernel-attack labeled
 namespace/kernel-restricted created
 namespace/kernel-restricted labeled
+
+## ==== join: steps 3 and 4 and their cleanup were recorded in run 2, on an earlier single-node cluster
 
 ## step 3: seccomp Unconfined against RuntimeDefault, for one personality call
 $ kubectl apply -f unconfined.yaml
@@ -100,14 +124,6 @@ workload-ok
 linux64: personality(0x40000): Operation not permitted
 exit=1
 
-## step 5: AppArmor: read-only checks, nothing loaded. A profile would enter the host kernel.
-$ docker exec $NODE sh -c 'test -d /sys/kernel/security/apparmor && echo apparmor-securityfs-present || echo apparmor-securityfs-absent'
-docker exec $NODE sh -c 'command -v apparmor_parser || echo apparmor_parser-absent'
-apparmor-securityfs-absent
-apparmor_parser-absent
-
-## step 6: gVisor: not installed. Its install restarts the node containerd, which would interrupt the Pods on the node.
-
 ## step 7: cleanup: the namespaces, the RuntimeClass and the seccomp profiles
 $ kubectl delete ns kernel-attack kernel-restricted --wait=true
 kubectl delete runtimeclass gvisor --ignore-not-found
@@ -115,4 +131,116 @@ docker exec sf-pilot-control-plane rm -f /var/lib/kubelet/seccomp/profiles/audit
 namespace "kernel-attack" deleted
 namespace "kernel-restricted" deleted
 
-## not run in this lab: Security Profiles Operator (cited in the chapter).
+## ==== join: run 1 continues
+
+## step 5: AppArmor: no node can load a profile, and the kubelet refuses a Pod that names one
+$ for n in $(kubectl get nodes -o name | cut -d/ -f2); do docker exec "$n" sh -c 'command -v apparmor_parser || echo apparmor_parser-absent'; done
+docker exec $WORKER apparmor_parser --version
+apparmor_parser-absent
+apparmor_parser-absent
+apparmor_parser-absent
+OCI runtime exec failed: exec failed: unable to start container process: exec: "apparmor_parser": executable file not found in $PATH
+
+## step 5a: a Pod that names a Localhost profile no node holds
+$ kubectl apply -f apparmor.yaml
+kubectl -n kernel-restricted wait --for=jsonpath='{.status.phase}'=Failed pod/apparmor --timeout=120s
+kubectl -n kernel-restricted get pod apparmor -o jsonpath='{.status.reason}{"\n"}{.status.message}{"\n"}'
+kubectl -n kernel-restricted get events --field-selector involvedObject.name=apparmor --sort-by=.metadata.creationTimestamp -o jsonpath='{range .items[*]}{.reportingComponent}{" "}{.reason}{"\n"}{end}'
+pod/apparmor created
+pod/apparmor condition met
+AppArmor
+Pod was rejected: Cannot enforce AppArmor: AppArmor is not enabled on the host
+default-scheduler Scheduled
+kubelet AppArmor
+
+## step 6: SELinux and sandboxed runtimes: gVisor, through a RuntimeClass
+## SELinux is not run here: step 1 shows the node has no SELinux filesystem.
+## runtime node: sf-sched-worker, gVisor release 20261026.0 for x86_64
+
+$ URL=https://storage.googleapis.com/gvisor/releases/release/$GVISOR_RELEASE/$ARCH
+curl -fsSLO "$URL/gvisor.tar.zstd" -O "$URL/gvisor.tar.zstd.sha512"
+sha512sum -c gvisor.tar.zstd.sha512
+echo "$GVISOR_SHA512  gvisor.tar.zstd" | sha512sum -c -
+tar --zstd -tf gvisor.tar.zstd
+gvisor.tar.zstd: OK
+gvisor.tar.zstd: OK
+containerd-shim-runsc-v1
+runsc
+gvisor-bin/
+gvisor-bin/checkpointgofer
+gvisor-bin/gvisor-proc-umounter
+gvisor-bin/gvisor-sentry-prewarmer
+gvisor-bin/gvisor_sentry
+gvisor-bin/runsc-fd-parking
+gvisor-bin/runsc-metric-server
+
+$ tar -C gvisor-dist -cf - runsc containerd-shim-runsc-v1 gvisor-bin | docker exec -i $WORKER tar --no-same-owner -C /usr/local/bin -xf -
+docker exec $WORKER /usr/local/bin/runsc --version | head -1
+runsc version release-20261026.0
+
+## step 6a: the node learns the runtime: a containerd entry, a restart, a node label
+$ docker exec $WORKER tail -3 /etc/containerd/config.toml
+docker exec $WORKER systemctl restart containerd
+kubectl wait --for=condition=Ready node/$WORKER --timeout=240s
+kubectl label node $WORKER example.com/runsc=installed
+
+[plugins."io.containerd.grpc.v1.cri".containerd.runtimes.runsc]
+  runtime_type = "io.containerd.runsc.v1"
+node/sf-sched-worker condition met
+node/sf-sched-worker labeled
+
+## step 6b: a RuntimeClass and a Pod that selects it
+$ kubectl apply -f runtimeclass.yaml
+kubectl apply -f gvisor.yaml
+kubectl -n kernel-restricted wait --for=condition=Ready pod/gvisor --timeout=240s
+runtimeclass.node.k8s.io/gvisor created
+pod/gvisor created
+pod/gvisor condition met
+
+## step 6c: the Pod reports a kernel of its own; the node reports the lab host kernel
+$ kubectl -n kernel-restricted get pod gvisor -o jsonpath='{.spec.runtimeClassName}{"\n"}'
+kubectl -n kernel-restricted exec gvisor -- sh -c 'uname -r; cat /proc/version; dmesg | head -3'
+docker exec $WORKER uname -r
+gvisor
+4.19.0-gvisor
+Linux version 4.19.0-gvisor #1 SMP Sun Jan 10 15:06:54 PST 2016
+[   0.000000] Starting gVisor...
+[   0.417457] Politicking the oom killer...
+[   0.730007] Granting licence to kill(2)...
+7.0.0-38-generic
+
+## step 6d: the sandbox is processes on the node, and a seccomp check reads differently inside it
+$ docker exec $WORKER sh -c 'ps -eo comm | grep -E "^(runsc|gvisor_sentry)" | sort | uniq -c'
+kubectl -n kernel-restricted exec gvisor -- sh -c 'grep "^Seccomp:" /proc/self/status | tr "\t" " "; setarch linux64 -R /bin/true 2>&1; echo exit=$?'
+     16 gvisor_sentry
+      2 runsc
+      1 runsc-fd-parkin
+Seccomp: 0
+linux64: personality(0x40000): Invalid argument
+exit=1
+
+## step 7: cleanup: the namespaces, the RuntimeClass, the node label, the profiles and the runtime install
+$ kubectl delete ns kernel-attack kernel-restricted --wait=true
+kubectl delete runtimeclass gvisor --ignore-not-found
+namespace "kernel-attack" deleted
+namespace "kernel-restricted" deleted
+runtimeclass.node.k8s.io "gvisor" deleted
+
+$ kubectl label node $WORKER example.com/runsc-
+docker exec $WORKER rm -rf /usr/local/bin/runsc /usr/local/bin/containerd-shim-runsc-v1 /usr/local/bin/gvisor-bin
+docker exec $WORKER mv /etc/containerd/config.toml.lab-backup /etc/containerd/config.toml
+docker exec $WORKER systemctl restart containerd
+kubectl wait --for=condition=Ready node/$WORKER --timeout=240s
+node/sf-sched-worker unlabeled
+node/sf-sched-worker condition met
+
+## step 7a: what remains of the install
+$ docker exec $WORKER sh -c 'ls /usr/local/bin | grep -c -E "runsc|gvisor"; grep -c runsc /etc/containerd/config.toml; ls /etc/containerd'
+kubectl get runtimeclass
+0
+0
+config.toml
+cri-base.json
+No resources found
+
+## not run in this lab: AppArmor profile load and denial, SELinux, Security Profiles Operator (cited in the chapter).
