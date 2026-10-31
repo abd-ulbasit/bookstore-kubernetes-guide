@@ -1,10 +1,10 @@
 {{/*
   All 10 NetworkPolicies (raw-manifests 60-networkpolicy.yaml): flip the ns to
   default-DENY then ALLOW only the edges the app needs. NetworkPolicy is a
-  built-in kind so this defaults ON (networkPolicy.enabled). ENFORCEMENT still
-  needs a policy CNI (kindnet is a SILENT no-op — Calico/Cilium enforce; see
-  ch.06). Namespace names (kube-system / ingress-nginx / monitoring) are
-  parameterized for portability.
+  built-in kind so this defaults ON (networkPolicy.enabled). ENFORCEMENT needs
+  a CNI that implements it: the default CNI of kind v0.33.0 (kindnet) does, and
+  the runtime gate relies on that. Namespace names (kube-system / ingress-nginx
+  / monitoring) are parameterized for portability.
 */}}
 {{- if .Values.networkPolicy.enabled }}
 {{- $np := .Values.networkPolicy }}
@@ -91,26 +91,46 @@ spec:
       ports:
         - { protocol: TCP, port: 8080 }
 ---
-# 5) catalog -> postgres (catalog reads the books table).
+# 5) The data tier: who may open a connection to postgres (:5432) and to
+#    redis (:6379). One policy selects both pods and each rule names its own
+#    port, so a rule reaches the one pod that listens on it. Clients: catalog,
+#    orders, db-migrate and cleanup for postgres; catalog for redis.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
-  name: allow-catalog-to-postgres
+  name: allow-data-tier-ingress
   namespace: {{ $ns }}
   labels:
     {{- include "bookstore.commonLabels" . | nindent 4 }}
 spec:
   podSelector:
-    matchLabels:
-      app: postgres
+    matchExpressions:
+      - key: app
+        operator: In
+        values: ["postgres", "redis"]
   policyTypes: ["Ingress"]
   ingress:
     - from:
         - podSelector:
             matchLabels:
               app: catalog
+        - podSelector:
+            matchLabels:
+              app: orders
+        - podSelector:
+            matchLabels:
+              app: db-migrate
+        - podSelector:
+            matchLabels:
+              app: cleanup
       ports:
         - { protocol: TCP, port: 5432 }
+    - from:
+        - podSelector:
+            matchLabels:
+              app: catalog
+      ports:
+        - { protocol: TCP, port: 6379 }
 ---
 # 6) orders -> rabbitmq (publishes) AND payments-worker -> rabbitmq (consumes).
 apiVersion: networking.k8s.io/v1
@@ -136,7 +156,9 @@ spec:
       ports:
         - { protocol: TCP, port: 5672 }
 ---
-# 7) Egress side of the backend edges (catalog->postgres, orders->rabbitmq).
+# 7) Egress side of the backend edges: catalog, orders and the db-migrate and
+#    cleanup batch Pods open connections to postgres, redis and rabbitmq.
+#    Each destination still decides who it admits (rules 5 and 6).
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -149,7 +171,7 @@ spec:
     matchExpressions:
       - key: app
         operator: In
-        values: ["catalog", "orders"]
+        values: ["catalog", "orders", "db-migrate", "cleanup"]
   policyTypes: ["Egress"]
   egress:
     - to:
@@ -158,6 +180,12 @@ spec:
               app: postgres
       ports:
         - { protocol: TCP, port: 5432 }
+    - to:
+        - podSelector:
+            matchLabels:
+              app: redis
+      ports:
+        - { protocol: TCP, port: 6379 }
     - to:
         - podSelector:
             matchLabels:

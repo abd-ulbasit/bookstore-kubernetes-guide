@@ -7,10 +7,11 @@
 # that direction is permitted.
 #
 # !!! CNI REQUIREMENT !!!  NetworkPolicy is enforced by the CNI, not the API
-# server. kind's default CNI (kindnet) does NOT enforce NetworkPolicy — these
-# objects apply cleanly but are a SILENT NO-OP there. To actually see
-# enforcement, run a policy-enforcing CNI (Calico or Cilium); ch.06 documents
-# installing Calico on kind. (Managed EKS/GKE/AKS: enable the policy plugin.)
+# server. The default CNI of kind v0.33.0 (kindnet) enforces it: the runtime
+# gate (G4) deploys these policies on that cluster, and an edge with no allow
+# shows up as a connection timeout. A CNI that does not enforce (an older kind,
+# a managed cluster without its policy plugin) accepts these objects and
+# ignores them, which looks the same until something depends on them.
 #
 # !!! DNS EGRESS !!!  default-deny egress also blocks DNS. Every Pod that
 # resolves a Service name needs egress to kube-dns/CoreDNS (UDP+TCP 53) or the
@@ -27,6 +28,8 @@
 #   storefront app: storefront (11-)  catalog         app: catalog        (10-)
 #   orders     app: orders     (14-)  postgres        app: postgres       (20-)
 #   rabbitmq   app: rabbitmq   (13-)  payments-worker app: payments-worker (19-)
+#   redis      app: redis      (12-)  db-migrate      app: db-migrate     (21-)
+#   cleanup    app: cleanup    (22-)
 #   ingress-nginx + monitoring namespaces matched by ns label below
 #
 # Part 06 ch.04 increment (additive — all 8 prior policies are unchanged
@@ -141,28 +144,58 @@ spec:
       ports:
         - { protocol: TCP, port: 8080 }
 ---
-# 5) catalog -> postgres (catalog reads the books table). Ingress rule ON
-#    postgres allowing catalog; the matching egress allowance for catalog is
-#    rule 7 (egress is also default-denied, so BOTH sides must permit it).
+# 5) The data tier: who may open a connection to postgres (:5432) and to
+#    redis (:6379). Ingress rules ON the two data pods. The matching egress
+#    allowance for each client is rule 7 (egress is also default-denied, so
+#    BOTH sides must permit it).
+#      postgres :5432  catalog (books table), orders (INSERT), the db-migrate
+#                      Job and the cleanup CronJob (both run psql)
+#      redis    :6379  catalog (the cache; REDIS_ADDR is set from Part 03)
+#    One policy selects both pods, and each rule names its own port. Only
+#    postgres listens on 5432 and only redis on 6379, so a rule reaches
+#    exactly one of them.
+#    The first version of this file admitted only catalog to postgres and
+#    nobody to redis. That held while the services ran without a database,
+#    and broke the moment orders, db-migrate and the cache were wired in
+#    (Part 03): orders and the migration Job could not reach postgres and
+#    catalog could not reach redis. The runtime gate (G4) found it, because it
+#    starts every workload on a cluster that enforces these policies.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
-  name: allow-catalog-to-postgres
+  name: allow-data-tier-ingress
   namespace: bookstore
   labels:
     app.kubernetes.io/part-of: bookstore
 spec:
   podSelector:
-    matchLabels:
-      app: postgres
+    matchExpressions:
+      - key: app
+        operator: In
+        values: ["postgres", "redis"]
   policyTypes: ["Ingress"]
   ingress:
     - from:
         - podSelector:
             matchLabels:
               app: catalog
+        - podSelector:
+            matchLabels:
+              app: orders
+        - podSelector:
+            matchLabels:
+              app: db-migrate
+        - podSelector:
+            matchLabels:
+              app: cleanup
       ports:
         - { protocol: TCP, port: 5432 }
+    - from:
+        - podSelector:
+            matchLabels:
+              app: catalog
+      ports:
+        - { protocol: TCP, port: 6379 }
 ---
 # 6) orders -> rabbitmq (orders PUBLISHES order events) AND
 #    payments-worker -> rabbitmq (payments-worker CONSUMES them). Both speak
@@ -193,9 +226,13 @@ spec:
         - { protocol: TCP, port: 5672 }
 ---
 # 7) Egress side of the backend edges. default-deny egress (rule 1) also
-#    blocks catalog->postgres and orders->rabbitmq unless the SOURCE Pod is
-#    granted egress too. (DNS egress is rule 2; this adds the data-plane
-#    egress for the two backend callers.)
+#    blocks every connection to the data tier and the broker unless the SOURCE
+#    Pod is granted egress too. (DNS egress is rule 2; this adds the data-plane
+#    egress for the Pods that open connections: catalog, orders and the two
+#    batch Pods that run psql, db-migrate and cleanup.) The source grants a
+#    superset on purpose. Each destination still decides who it admits (rules
+#    5 and 6), so orders can reach redis here but redis refuses it, and the
+#    batch Pods are granted the broker here but the broker refuses them.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -208,7 +245,7 @@ spec:
     matchExpressions:
       - key: app
         operator: In
-        values: ["catalog", "orders"]
+        values: ["catalog", "orders", "db-migrate", "cleanup"]
   policyTypes: ["Egress"]
   egress:
     - to:
@@ -217,6 +254,12 @@ spec:
               app: postgres
       ports:
         - { protocol: TCP, port: 5432 }
+    - to:
+        - podSelector:
+            matchLabels:
+              app: redis
+      ports:
+        - { protocol: TCP, port: 6379 }
     - to:
         - podSelector:
             matchLabels:
