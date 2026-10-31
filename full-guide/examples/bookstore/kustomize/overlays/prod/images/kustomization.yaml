@@ -26,9 +26,9 @@ images:
 - digest: sha256:eaa26ada0a2e1575026a5e71e74572ed0bfdde80f50012e91a7be28f0de16ced
   name: bookstore/catalog
   newName: ghcr.io/abd-ulbasit/bookstore-catalog
-- name: bookstore/orders
-  newName: registry.example.com/bookstore/orders
-  newTag: 1.0.0
+- digest: sha256:78ad1a65b9647607b5903035685a864882f8f38f85a45c21d86089f4f7371caf
+  name: bookstore/orders
+  newName: ghcr.io/abd-ulbasit/bookstore-orders
 - name: bookstore/payments-worker
   newName: registry.example.com/bookstore/payments-worker
   newTag: 1.0.0
