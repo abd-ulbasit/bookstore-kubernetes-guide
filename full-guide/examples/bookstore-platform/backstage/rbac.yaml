@@ -3,8 +3,14 @@
 #
 #   1. Read workloads cluster-wide for the kubernetes plugin. No secrets, no
 #      writes, no exec, no logs.
-#   2. Create, read and patch Argo CD Applications in argocd, which the
-#      scaffolder's last step uses. No delete, and nothing else in argocd.
+#   2. Create and read Argo CD Applications in argocd, which the scaffolder's
+#      last step uses. No patch and no delete, and nothing else in argocd.
+#
+# What this file does NOT do: RBAC cannot constrain spec.project. The grant
+# above lets the ServiceAccount create an Application in any project, and the
+# bookstore-tenants AppProject bounds only the Applications that name it. A
+# ValidatingAdmissionPolicy that pins spec.project is required, and this
+# chapter does not ship it. The chapter's threat table names the gap.
 #
 # The scaffolder cannot create tenants or touch Secrets, because its grant
 # does not reach them. Add a resource here only when a plugin needs it.
@@ -54,7 +60,7 @@ metadata:
 rules:
   - apiGroups: ["argoproj.io"]
     resources: ["applications"]
-    verbs: ["create", "get", "patch"]
+    verbs: ["create", "get"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding

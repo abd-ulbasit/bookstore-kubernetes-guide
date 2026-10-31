@@ -117,10 +117,11 @@ regions); `user_id` is NOT OK in any of the three. Logs may carry
 
 | Threat | Control in this chapter | Deeper |
 |---|---|---|
-| A credential lands in a span attribute | The collector's `attributes/redact` processor deletes authorization and cookie headers before export | [Part 06 ch.02](../06-production-readiness/02-logging.md) for personal data in log bodies |
+| A credential lands in a span attribute | The collector's `attributes/redact` processor deletes authorization, cookie, API-key and Set-Cookie headers before export | [Part 06 ch.02](../06-production-readiness/02-logging.md) for personal data in log bodies |
 | Default Grafana admin password (`prom-operator` in the chart) | Grafana reads its admin login from a Secret that External Secrets fills; the install never sets a password | [13.06](06-payments-and-event-sourcing.md) for External Secrets |
-| Node agent with host access (node-exporter renders `hostNetwork` and `hostPID`) | Node-exporter is off; no chapter in this Part reads node metrics | [Part 05 ch.02](../05-security/02-pod-security.md) for the Pod Security levels |
-| Cross-tenant reads through a shared dashboard | Dashboard variables filter; a per-tenant proxy enforces access | [13.02](02-tenancy-and-crossplane-onboarding.md) |
+| Node agent with host access (node-exporter renders `hostNetwork` and `hostPID`) | Node-exporter is off. ch.13.10 consumes two of its series and says what is missing | [Part 05 ch.02](../05-security/02-pod-security.md) for the Pod Security levels |
+| The Grafana sidecar reads Secrets across the cluster | The sidecar's Role lists ConfigMaps in `prometheus-system` and names no Secrets; a `can-i` check shows it | [Part 05 ch.01](../05-security/01-authn-authz-rbac.md) |
+| Cross-tenant reads through a shared dashboard | Dashboard variables filter. Nothing here restricts reads: Loki runs with `auth_enabled=false`, and Tempo and Prometheus have no auth. The backends are platform-only by convention until a NetworkPolicy is written (see What this chapter does not build) | [Part 02 ch.06](../02-networking/06-network-policies.md) |
 
 ## Diagrams
 
@@ -278,6 +279,9 @@ metadata:
 
 Save the block as `namespaces.yaml` and apply it:
 
+```sh
+kubectl apply -f namespaces.yaml
+```
 
 Grafana's admin login comes from a Secret that External Secrets fills from
 the vault ([13.06](06-payments-and-event-sourcing.md)). The chart's default
@@ -302,24 +306,56 @@ spec:
   data:
     - secretKey: admin-user
       remoteRef:
-        key: kv/bookstore-platform/grafana-admin
+        key: bookstore-platform/grafana-admin
         property: user
     - secretKey: admin-password
       remoteRef:
-        key: kv/bookstore-platform/grafana-admin
+        key: bookstore-platform/grafana-admin
         property: password
 ```
 
-Save it as `grafana-admin-externalsecret.yaml` and apply it:
+The store reads the `secret` KV v2 mount (ch.13.06), so the key is relative to
+that mount. Seed the Vault path before the ExternalSecret syncs. The password
+is generated and never printed:
+
+```sh
+kubectl -n vault exec -i vault-0 -- sh -c '
+  export VAULT_TOKEN=<admin token>
+  vault kv put -mount=secret bookstore-platform/grafana-admin \
+    user=admin password="$(head -c 24 /dev/urandom | base64)"
+'
+```
+
+Save the ExternalSecret as `grafana-admin-externalsecret.yaml` and apply it:
 
 ```sh
 kubectl apply -f grafana-admin-externalsecret.yaml
 ```
 
 Install with the hardening values. Node-exporter is off because the chart
-renders it with `hostNetwork` and `hostPID`, and nothing in this Part reads
-node metrics. Grafana and its sidecars run with the RuntimeDefault seccomp
-profile, and their root filesystem is read-only:
+renders it with `hostNetwork` and `hostPID`, which `restricted` forbids. OpenCost
+in ch.13.10 reads two of its series, so that chapter reports the gap. Grafana
+and its sidecars run with the RuntimeDefault seccomp profile, and their root
+filesystem is read-only. The sidecars read ConfigMaps in this namespace only,
+through the Role below, which names no Secrets:
+
+```yaml
+# grafana-sidecar-role.yaml: the only read the Grafana sidecars need
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: grafana-sidecar
+  namespace: prometheus-system
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "watch", "list"]
+```
+
+```sh
+kubectl apply -f grafana-sidecar-role.yaml
+```
+
 
 ```sh
 KUBE_PROMETHEUS_STACK_VERSION="62.7.0"
@@ -344,14 +380,45 @@ helm install kube-prometheus-stack prometheus-community/kube-prometheus-stack \
   --set 'grafana.sidecar.securityContext.readOnlyRootFilesystem=true' \
   --set 'grafana.sidecar.securityContext.capabilities.drop[0]=ALL' \
   --set 'grafana.sidecar.dashboards.enabled=true' \
-  --set 'grafana.sidecar.datasources.enabled=true'
+  --set 'grafana.sidecar.datasources.enabled=true' \
+  --set 'grafana.rbac.namespaced=true' \
+  --set 'grafana.rbac.useExistingRole=grafana-sidecar' \
+  --set 'grafana.sidecar.dashboards.resource=configmap' \
+  --set 'grafana.sidecar.datasources.resource=configmap' \
+  --set 'grafana.sidecar.dashboards.searchNamespace=prometheus-system' \
+  --set 'grafana.sidecar.datasources.searchNamespace=prometheus-system' \
+  --set 'alertmanager.serviceAccount.automountServiceAccountToken=false' \
+  --set 'alertmanager.alertmanagerSpec.automountServiceAccountToken=false' \
+  --set 'kube-state-metrics.metricLabelsAllowlist[0]=namespaces=[bookstore-platform.example.com/tenant]' \
+  --set 'kube-state-metrics.metricLabelsAllowlist[1]=pods=[bookstore-platform.example.com/class]'
 ```
 
 `enableRemoteWriteReceiver` lets the collector push metrics with
-remote_write (step 5). The Grafana sidecars watch ConfigMaps in every
-namespace, and kube-state-metrics, the operator and the admission Jobs call
-the API, so those workloads keep their token mounted, each under its own
-ServiceAccount. Everything else is off the API.
+remote_write (step 5). Token mounts, by ServiceAccount:
+
+- Grafana keeps its token for the sidecars, which list ConfigMaps in
+  `prometheus-system` only. Without `rbac.namespaced` and the two `searchNamespace`
+  values, the chart's ClusterRole would list ConfigMaps and Secrets in every
+  namespace.
+- Prometheus keeps its token, because Kubernetes service discovery needs it.
+  Its ClusterRole names no Secrets.
+- kube-state-metrics and the operator keep theirs. Their ClusterRoles read
+  Secrets, which their charts grant. This chapter keeps those grants and checks
+  them below.
+- Alertmanager's token is off, because it makes no API calls.
+
+The check below shows what the Grafana sidecar can read. The Prometheus
+ClusterRole names no Secrets, and the chart's `helm template` output in the
+transcript shows the Alertmanager token off.
+
+```sh
+kubectl auth can-i list configmaps -n prometheus-system \
+  --as=system:serviceaccount:prometheus-system:kube-prometheus-stack-grafana
+kubectl auth can-i list secrets -n prometheus-system \
+  --as=system:serviceaccount:prometheus-system:kube-prometheus-stack-grafana
+kubectl auth can-i list configmaps -A \
+  --as=system:serviceaccount:prometheus-system:kube-prometheus-stack-grafana
+```
 
 What landed: Prometheus, Alertmanager, Grafana and kube-state-metrics, all
 wired by the Prometheus Operator. Grafana's sidecar watches for ConfigMaps
@@ -419,6 +486,7 @@ helm install loki grafana/loki \
   -n loki-system --wait \
   --set 'deploymentMode=Distributed' \
   --set 'loki.auth_enabled=false' \
+  --set 'rbac.namespaced=true' \
   --set 'serviceAccount.automountServiceAccountToken=false' \
   --set 'loki.podSecurityContext.seccompProfile.type=RuntimeDefault' \
   --set 'gateway.podSecurityContext.seccompProfile.type=RuntimeDefault' \
@@ -434,7 +502,9 @@ helm install loki grafana/loki \
 
 Loki v3+ requires a `schemaConfig` even on a fresh cluster; the chart
 errors loudly without it. Production wires real S3 creds via ESO.
-Loki's components do not call the API, so they get no token. The canary
+Loki's components do not call the API, so they get no token. `rbac.namespaced=true`
+removes the chart's ClusterRole and ClusterRoleBinding, which would otherwise
+read ConfigMaps and Secrets across the cluster. The canary
 is a DaemonSet that writes test lines from every node. It is optional, so
 it is off here, and the test pod runs only on `helm test`.
 
@@ -472,9 +542,12 @@ kubectl apply -f examples/bookstore-platform/observability/alertmanager-routes.y
 
 The collector image is the contrib build 0.153.0, pinned by digest on
 GHCR. The tag sits in the file as a comment. Its `attributes/redact`
-processor deletes authorization and cookie headers from spans and logs
-before they leave the node. The collector config passes
-`otelcol-contrib validate` in that image.
+processor deletes the authorization, cookie and API-key request headers and
+the Set-Cookie response header from spans before export. This chapter's lab
+did not send a span through the processor, so the claim rests on the
+processor's configuration and on `otelcol-contrib validate`, which the config
+passes in that image. Send a span with those headers through the collector
+before you rely on it.
 
 Illustrative output, not captured:
 
@@ -716,6 +789,19 @@ traceparent if Stripe echoes a correlation id).
 > alerts; the legacy "threshold for 5 min" alert is the
 > lagging-indicator anti-pattern named here.
 
+### What this chapter does not build
+
+- **NetworkPolicy for the telemetry namespaces.** Loki runs with
+  `auth_enabled=false`, Tempo and Prometheus have no auth, and the collector's
+  OTLP receivers listen on `0.0.0.0`. Nothing here restricts which pods can
+  reach them, so a tenant pod could read or write another tenant's logs,
+  traces or metrics. The platform team owns the default-deny policies and the
+  allows for these namespaces. Write them before any tenant gets a pod on
+  this cluster, and prove a denied request, the way
+  [ch.13.10](10-cost-opencost-per-tenant-finops.md) does for its namespace.
+- **Tenant-scoped telemetry reads.** Grafana's dashboard variables filter a
+  view; they do not restrict who can open it.
+
 ## Quick Reference
 
 ```sh
@@ -733,6 +819,7 @@ helm repo update
 # Namespaces first (restricted), then one install per stack with the
 # hardening flags from steps 1 to 4.
 kubectl apply -f namespaces.yaml
+kubectl apply -f grafana-sidecar-role.yaml
 kubectl apply -f grafana-admin-externalsecret.yaml
 
 # Apply the platform pieces
@@ -806,9 +893,9 @@ Checklist (the observability story closed when all seven are yes):
    <details><summary>Show answer</summary>
 
    Chart 62.7.0 renders node-exporter with `hostNetwork` and `hostPID`.
-   Pod Security `restricted` forbids both, and no chapter in this Part
-   reads node metrics, so the feature is off rather than given a
-   privileged namespace. The chart's default Grafana password is
+   Pod Security `restricted` forbids both, so the feature is off rather
+   than given a privileged namespace. ch.13.10 reads two of its series,
+   and that chapter says what is missing while it is off. The chart's default Grafana password is
    `prom-operator`. The install sets `grafana.admin.existingSecret`, so
    the password comes from the `grafana-admin` Secret that External Secrets
    fills from the vault. The chart values carry no password.

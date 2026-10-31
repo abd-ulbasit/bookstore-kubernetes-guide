@@ -14,9 +14,15 @@
 #   EXPECTED. ch.13.12 installs Chaos Mesh first.
 #
 # Blast radius: every experiment names one namespace and uses mode: one.
+# Each namespace it names must carry the annotation
+# chaos-mesh.org/inject=enabled (the controller's enableFilterNamespace
+# setting, ch.13.12 section 0).
 #
-# Apply (against the STAGING cluster only):
-#   kubectl --context kind-bookstore-platform-staging apply \
+# Creating this Workflow starts it at once. Create it only in a staging
+# cluster, after the PodChaos in ch.13.12 section 4 has run by hand. The
+# topology in ch.13.03 has no staging cluster, so STAGING_CONTEXT names one
+# that you run:
+#   kubectl --context "$STAGING_CONTEXT" apply \
 #     -f examples/bookstore-platform/runbooks/chaos-experiments.yaml
 ---
 apiVersion: v1

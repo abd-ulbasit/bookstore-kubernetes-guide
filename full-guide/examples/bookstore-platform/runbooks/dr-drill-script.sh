@@ -122,17 +122,19 @@ if [[ "$DRY_RUN" == "false" ]]; then
 fi
 
 # --------------------------------------------------------------------
-# Phase 5: verify the checkout flow
+# Phase 5: verify the promoted primary accepts writes
 # --------------------------------------------------------------------
-log "PHASE 5: verify checkout against $TARGET_REGION"
+log "PHASE 5: verify $TARGET_REGION primary accepts a write"
 VERIFY_START=$(date +%s)
 VERIFIED=0
 for i in 1 2 3; do
-  # TLS is verified against the edge CA exported in ch.13.07.
-  STATUS=$(curl -s --cacert "${EDGE_CA:-edge-ca.crt}" -o /dev/null -w "%{http_code}" \
-    "${GATEWAY_URL:-https://localhost:8443/static/index.html}" 2>/dev/null || echo "000")
-  log "Verify attempt $i: HTTP $STATUS"
-  if [[ "$STATUS" == "200" ]]; then
+  # txid_current() needs a transaction ID, which a standby cannot assign,
+  # so it answers "t" only on a primary that accepts writes. It writes nothing.
+  WRITE_OK=$(kubectl --context "kind-bookstore-platform-$TARGET_REGION" \
+    -n cnpg-system exec bookstore-platform-cnpg-1 -- \
+    psql -U postgres -At -c "SELECT txid_current() > 0;" 2>/dev/null || echo "refused")
+  log "Verify attempt $i: write probe on primary = $WRITE_OK"
+  if [[ "$WRITE_OK" == "t" ]]; then
     VERIFIED=1
     break
   fi
@@ -144,6 +146,8 @@ done
 # --------------------------------------------------------------------
 END_TIME=$(date +%s)
 RTO_ACTUAL=$(( END_TIME - START_TIME ))
+# RPO here is the replication lag read before promotion: an upper bound on
+# the data at risk, not a count of writes that were lost.
 RPO_ACTUAL=$REPLICATION_LAG
 HUMAN_ACTION_TIME=$(( END_TIME - START_TIME ))  # approximated in dry-run
 
@@ -174,7 +178,7 @@ cat > "$DRILL_LOG" <<EOF
 - Phase 2 (promote CNPG): LSN $PROMOTED_LSN
 - Phase 3 (ApplicationSet flip): see drill log
 - Phase 4 (DNS update): see drill log
-- Phase 5 (verify checkout): see drill log
+- Phase 5 (promoted primary accepts writes): see drill log
 
 ## Findings
 - TODO: fill in during the drill.

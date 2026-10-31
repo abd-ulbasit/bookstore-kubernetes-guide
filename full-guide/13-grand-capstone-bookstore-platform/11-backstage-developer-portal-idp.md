@@ -122,8 +122,8 @@ it proxies, so its threats are about what it can reach.
 | Threat | Control in this chapter | Deeper |
 |---|---|---|
 | A repo claims another team's Component, or defines a Group, User or Template that the policy trusts | Repos add only Components, APIs and Resources. Groups, Users, Systems and Templates come from the platform location. `catalog-info.yaml` falls under the owning team's CODEOWNERS | [Part 13 ch.04](04-real-auth-keycloak-irsa-istio-jwt.md) |
-| Template runs use the backend's identity, not the submitter's | The policy denies by default. The `backstage` ServiceAccount may create, get and patch Applications in `argocd`. The `bookstore-tenants` project limits them to `bookstore-platform-*`. The form cannot create a tenant | [Part 13 ch.02](02-tenancy-and-crossplane-onboarding.md); break-glass in [ch.01](01-bookstore-2-from-toy-to-platform.md) and [ch.12](12-day-2-runbook-on-call-dr-chaos.md) |
-| Backstage tokens reach more than a viewer needs | The Argo CD token is a read-only account's. The PagerDuty key is read-only. The GitHub App holds only the permissions it needs. Credentials come from External Secrets | [Part 13 ch.06](06-payments-and-event-sourcing.md) |
+| Template runs use the backend's identity, not the submitter's | Not yet enforced. A permission policy that denies by default must ship before the form is open to developers (see Permission framework below). The `backstage` ServiceAccount may create and read Applications in `argocd`. RBAC cannot pin `spec.project`, so the `bookstore-tenants` project binds only the Applications that name it. An admission policy that pins the project is required and is not shipped here. The form cannot create a tenant | [Part 13 ch.02](02-tenancy-and-crossplane-onboarding.md); break-glass in [ch.01](01-bookstore-2-from-toy-to-platform.md) and [ch.12](12-day-2-runbook-on-call-dr-chaos.md) |
+| Backstage tokens reach more than a viewer needs | The Argo CD account is read-only in its policy (the fragment in the prerequisites). The PagerDuty key is read-only. The GitHub App holds only the permissions it needs. Credentials come from External Secrets | [Part 13 ch.06](06-payments-and-event-sourcing.md) |
 | The backend's cluster identity reads Secrets or writes workloads | The kubernetes plugin reads pods, services, Deployments and ReplicaSets, and nothing else. Hands-on section 7 checks the grants | [Part 13 ch.01](01-bookstore-2-from-toy-to-platform.md) |
 
 ## Diagrams
@@ -223,12 +223,43 @@ WHEN WHICH:
 ### 0. Prerequisites
 
 - ch.13.04 ran — Keycloak is up; the `backstage` client is registered.
-- ch.13.03 ran — Argo CD is up, with a local account for Backstage that
-  has the `apiKey` capability and a read-only role.
+- ch.13.03 ran: Argo CD is up. ch.13.03 creates no Backstage account, so
+  add the one below first.
 - Crossplane is up; `BookstoreTenant` XRD + Composition exist (ch.13.02),
   and at least one tenant is onboarded.
 - A GitHub App installed on the org, with only the repository permissions
   Backstage needs (see Tokens, below).
+
+**The Argo CD account for Backstage.** Add the account and its read-only
+policy to the Argo CD Helm values from ch.13.03, then sync Argo CD. The
+fragment:
+
+```yaml
+configs:
+  cm:
+    accounts.backstage: apiKey
+  rbac:
+    policy.csv: |
+      g, backstage, role:backstage-reader
+      p, role:backstage-reader, applications, get, */*, allow
+      p, role:backstage-reader, projects, get, *, allow
+```
+
+Create the token once, logged in to Argo CD as an admin, and store it in Vault
+(the External Secret in step 2 reads it):
+
+```sh
+argocd account generate-token --account backstage
+```
+
+Check the grant with the Argo CD CLI. The commands and their output are
+illustrative: this lab does not run Argo CD.
+
+```sh
+argocd account can-i get applications '*/*'           # yes
+argocd account can-i delete applications '*/*'        # no
+argocd account can-i get clusters '*'                 # no
+```
 
 ### 1. Install Backstage through Argo CD
 
@@ -262,25 +293,11 @@ published under `docker.io/bitnami`, so the Application pins the older tag
 under `bitnamilegacy` by digest. Production points at the CNPG cluster from
 ch.13.06 instead.
 
-Verify. Illustrative output, not captured (the lab has no Backstage image):
-
-```sh
-kubectl -n backstage get pod,svc
-# NAME                             READY   STATUS    RESTARTS   AGE
-# pod/backstage-7c8d9-abc12        1/1     Running   0          30s
-# pod/backstage-postgresql-0       1/1     Running   0          30s
-#
-# NAME                                 TYPE        CLUSTER-IP        PORT(S)
-# service/backstage                    ClusterIP   10.96.123.45      7007/TCP
-# service/backstage-postgresql         ClusterIP   10.96.123.46      5432/TCP
-
-kubectl -n backstage port-forward svc/backstage 7007:7007
-# Open http://localhost:7007 — sign in via Keycloak.
-```
-
 ### 2. Apply the rest of the Backstage manifests
 
-Apply them in this order. Each file says what it is for.
+Apply them in this order. Each file says what it is for. The Application in
+step 1 is already running, so its pods wait in `CreateContainerConfigError`
+until the ConfigMap and the Secrets below exist.
 
 ```sh
 # Credentials from Vault, through the vault-bookstore-platform
@@ -306,6 +323,22 @@ kubectl apply -f examples/bookstore-platform/backstage/tech-docs-config.yaml
 The scaffolder template and the catalog-info template are not applied. Backstage
 registers the template from the platform location in `catalog.locations`, and
 each service repo gets its own `catalog-info.yaml` from the skeleton.
+
+Verify after step 2. Illustrative output, not captured (the lab has no Backstage image):
+
+```sh
+kubectl -n backstage get pod,svc
+# NAME                             READY   STATUS    RESTARTS   AGE
+# pod/backstage-7c8d9-abc12        1/1     Running   0          30s
+# pod/backstage-postgresql-0       1/1     Running   0          30s
+#
+# NAME                                 TYPE        CLUSTER-IP        PORT(S)
+# service/backstage                    ClusterIP   10.96.123.45      7007/TCP
+# service/backstage-postgresql         ClusterIP   10.96.123.46      5432/TCP
+
+kubectl -n backstage port-forward svc/backstage 7007:7007
+# Open http://localhost:7007 and sign in via Keycloak.
+```
 
 ### 3. Seed the catalog from existing services
 
@@ -511,8 +544,11 @@ set of actions:
 - `publish:github:pull-request` — open a PR.
 - `catalog:register` — add the new entity to the catalog.
 - `kubernetes:apply` — apply a manifest (v2 uses this for the Argo CD
-  Application).
-- `fs:rename`, `fs:delete`, `roadiehq:utils:*` — small file ops.
+  Application). It is not built in: the custom image must bundle the
+  Kubernetes scaffolder module that provides it.
+- `fs:rename`, `fs:delete`, `roadiehq:utils:*`: small file ops. The
+  `roadiehq:utils` actions come from a separate module, which the image must
+  also bundle.
 
 Plugins can add custom actions. The template in this chapter uses only the
 built-in ones.
@@ -536,10 +572,12 @@ signed-in user can read. Same shape for the Prometheus plugin
 
 **Permission framework: who may run what.** Backstage's permission
 framework decides each request in a `permissionPolicy`, a backend module
-that the platform team writes and reviews like code. Backstage ships an
-allow-all policy, so until that module replaces it, `permission.enabled:
-true` changes nothing. The module must deny by default, and allow a template
-run only when the submitter's group is the owner the form names. Groups come
+that the platform team writes and reviews like code. Backstage's default is an
+allow-all policy. This chapter does not replace it: `permission.enabled: true`
+turns the framework on and changes nothing else. The module that must deny by
+default, and allow a template run only when the submitter's group is the owner
+the form names, is the next piece of work. Until it ships, the form is for the
+platform team only. Groups come
 from the Keycloak claims over OIDC (ch.13.04).
 
 **The catalog-info.yaml discovery flow.** Backstage's
@@ -563,9 +601,9 @@ belongs to one person, does not expire on its own, and carries that person's
 reach. Have CI refuse any app-config change that brings a PAT back.
 
 Running a template is privilege. The backend creates the repo and the
-Application with its own identity, not the submitter's. The policy decides who
-may run the template; the RBAC and the AppProject decide what the run can
-touch. Change a template only through a reviewed pull request, because one
+Application with its own identity, not the submitter's. The policy, when it
+ships, decides who may run the template; RBAC and the AppProject limit what
+the run can touch, subject to the project gap named in the threat table. Change a template only through a reviewed pull request, because one
 edit changes what the backend does on every later run.
 
 ## Production notes
@@ -663,8 +701,8 @@ Checklist (the developer portal closed when all seven are yes):
       creates a new repo and an ArgoCD Application in an existing tenant.
 - [ ] TechDocs renders for at least one service.
 - [ ] Argo CD plugin shows sync status on the Component's CI/CD tab.
-- [ ] A deny-by-default permission policy is installed, and a developer
-      can scaffold only for their own team.
+- [ ] Not done in this chapter: a deny-by-default permission policy. The
+      form stays with the platform team until it exists.
 - [ ] `kubectl auth can-i --list` (section 7) shows reads only in
       `backstage`, and create, get and patch on Applications in `argocd`.
 
@@ -689,14 +727,14 @@ Checklist (the developer portal closed when all seven are yes):
 3. **A submitter runs the template with a tenant owned by another team. Which control stops the Application, and what is left if that control is missing?**
    <details><summary>Show answer</summary>
 
-   The permission policy stops the run. It must deny by default and check that
-   the submitter's group owns the tenant. Backstage ships an allow-all policy,
-   so with no policy module nothing stops the run. Behind the policy, the
-   `backstage` ServiceAccount can still create and patch Applications in
-   `argocd`, and the `bookstore-tenants` project accepts any
-   `bookstore-platform-*` namespace. A missing policy therefore leaves every
-   tenant reachable from one form. The RBAC and the project limit the blast
-   radius. They do not decide ownership.
+   The permission policy is what stops the run, and this chapter does not
+   ship it. The policy must deny by default and check that the submitter's
+   group owns the tenant. Backstage's default is allow-all, so as built, nothing
+   stops the run. Behind the policy, the `backstage` ServiceAccount can create
+   an Application in any project, because RBAC cannot pin `spec.project`. The
+   `bookstore-tenants` project binds only the Applications that name it. Two
+   gaps therefore remain, the policy and the admission check on the project,
+   and neither RBAC nor the project decides ownership.
 
    </details>
 
