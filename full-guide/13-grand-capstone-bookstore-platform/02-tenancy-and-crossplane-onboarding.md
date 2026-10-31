@@ -252,11 +252,9 @@ kubectl config use-context kind-bookstore-platform-us-east
 # Pinned versions. Bump deliberately, not silently. Crossplane 2.x serves
 # the v2 XRD in section 2; the 1.x chart does not.
 CROSSPLANE_CHART_VERSION="2.4.3"
-# Packages pin by digest. The tags stay in comments for the reader.
-PROV_KUBERNETES_TAG="v1.4.1"
-PROV_KUBERNETES_DIGEST="sha256:19bac959b88d49fee4f1b2cc76a085210a4663aff04a9d1a307ac7339e2ae82a"
-FN_PT_TAG="v0.8.2"   # matches Part 11 ch.10
-FN_PT_DIGEST="sha256:c05a9add149bfa6fd0e6fc485e669d60a5d50c2f816b8303af4d5a89586795d0"
+# Packages pin by digest, written out in each manifest below so that every
+# manifest is complete as shown. The digests are provider-kubernetes v1.4.1 and
+# function-patch-and-transform v0.8.2 (the version Part 11 ch.10 uses).
 
 # Label the namespace before the install: enforce baseline, and warn and audit
 # at restricted so the gap stays visible (section 1 explains why).
@@ -316,7 +314,7 @@ apiVersion: pkg.crossplane.io/v1
 kind: Provider
 metadata: { name: provider-kubernetes }
 spec:
-  package: xpkg.crossplane.io/crossplane-contrib/provider-kubernetes@${PROV_KUBERNETES_DIGEST}
+  package: xpkg.crossplane.io/crossplane-contrib/provider-kubernetes@sha256:19bac959b88d49fee4f1b2cc76a085210a4663aff04a9d1a307ac7339e2ae82a
   runtimeConfigRef: { name: provider-kubernetes }
 EOF
 kubectl wait --for=condition=Healthy provider/provider-kubernetes --timeout=300s
@@ -329,7 +327,7 @@ apiVersion: pkg.crossplane.io/v1
 kind: Function
 metadata: { name: function-patch-and-transform }
 spec:
-  package: xpkg.crossplane.io/crossplane-contrib/function-patch-and-transform@${FN_PT_DIGEST}
+  package: xpkg.crossplane.io/crossplane-contrib/function-patch-and-transform@sha256:c05a9add149bfa6fd0e6fc485e669d60a5d50c2f816b8303af4d5a89586795d0
 EOF
 kubectl wait --for=condition=Healthy function/function-patch-and-transform --timeout=180s
 
@@ -394,8 +392,8 @@ source shows this:
 [`runtime.go`](https://github.com/crossplane/crossplane/blob/v2.4.3/internal/controller/pkg/runtime/runtime.go)
 falls back to the revision name only when the template leaves the name empty.
 Once the provider is Healthy, confirm that its pod runs as that
-ServiceAccount. The answer should be `provider-kubernetes`. The lab run could
-not capture it, because the lab has no Crossplane:
+ServiceAccount. The answer should be `provider-kubernetes`. The lab run did
+not install this chapter's provider, so it could not capture that answer:
 
 ```sh
 kubectl -n crossplane-system get pods \
@@ -579,13 +577,16 @@ another name held the role. Keep the binding on `provider-kubernetes` alone,
 and treat any second subject on that ClusterRole as a change to this policy as
 well.
 
-The two `Provider` and `DeploymentRuntimeConfig` objects in the install block
-were not run on a cluster. The lab has no Crossplane, so a server dry run
-refuses both kinds for want of their CRDs. The captured run checked the two
-manifests against the CRD schemas at Crossplane v2.4.3 instead, with a local
-script, and a misspelt field and a wrong type each fail that check. A schema
-check shows the manifests are well formed. It does not show the pod running
-as `provider-kubernetes`; the `jsonpath` check above does, on a real install.
+The `DeploymentRuntimeConfig` and `Provider` in the install block were
+server-dry-run, under stand-in names, on a lab cluster that has Crossplane
+v2.4.3 installed by another run. The API server accepted both. A local script
+also checked them against the CRD schemas at v2.4.3, and a misspelt field and
+a wrong type each fail that script. Neither check installs the provider, so
+the lab did not see this chapter's pod run as `provider-kubernetes`. It did
+see the mechanism. That other install sets
+`serviceAccountTemplate.metadata.name` in its `DeploymentRuntimeConfig`, and
+its provider pod runs as that ServiceAccount, not under a generated name. Run
+the `jsonpath` check above on your own install.
 
 ### 2. Apply the XRD + Composition
 
@@ -820,11 +821,9 @@ is documented in Production notes.
 ```sh
 # Install Crossplane + provider-kubernetes + function-patch-and-transform
 CROSSPLANE_CHART_VERSION="2.4.3"
-# Packages pin by digest. The tags stay in comments for the reader.
-PROV_KUBERNETES_TAG="v1.4.1"
-PROV_KUBERNETES_DIGEST="sha256:19bac959b88d49fee4f1b2cc76a085210a4663aff04a9d1a307ac7339e2ae82a"
-FN_PT_TAG="v0.8.2"   # matches Part 11 ch.10
-FN_PT_DIGEST="sha256:c05a9add149bfa6fd0e6fc485e669d60a5d50c2f816b8303af4d5a89586795d0"
+# Packages pin by digest, written out in each manifest below so that every
+# manifest is complete as shown. The digests are provider-kubernetes v1.4.1 and
+# function-patch-and-transform v0.8.2 (the version Part 11 ch.10 uses).
 
 kubectl create namespace crossplane-system
 kubectl label namespace crossplane-system \
@@ -836,11 +835,19 @@ helm install crossplane crossplane-stable/crossplane \
   --version "$CROSSPLANE_CHART_VERSION" -n crossplane-system \
   -f crossplane-values.yaml --wait
 kubectl apply -f - <<EOF
+apiVersion: pkg.crossplane.io/v1beta1
+kind: DeploymentRuntimeConfig
+metadata: { name: provider-kubernetes }
+spec:
+  serviceAccountTemplate:
+    metadata: { name: provider-kubernetes }
+---
 apiVersion: pkg.crossplane.io/v1
 kind: Provider
 metadata: { name: provider-kubernetes }
 spec:
-  package: xpkg.crossplane.io/crossplane-contrib/provider-kubernetes@${PROV_KUBERNETES_DIGEST}
+  package: xpkg.crossplane.io/crossplane-contrib/provider-kubernetes@sha256:19bac959b88d49fee4f1b2cc76a085210a4663aff04a9d1a307ac7339e2ae82a
+  runtimeConfigRef: { name: provider-kubernetes }
 EOF
 kubectl wait --for=condition=Healthy provider/provider-kubernetes --timeout=300s
 # Then the scoped ClusterRole and binding from section 1 (not cluster-admin).
@@ -849,7 +856,7 @@ apiVersion: pkg.crossplane.io/v1
 kind: Function
 metadata: { name: function-patch-and-transform }
 spec:
-  package: xpkg.crossplane.io/crossplane-contrib/function-patch-and-transform@${FN_PT_DIGEST}
+  package: xpkg.crossplane.io/crossplane-contrib/function-patch-and-transform@sha256:c05a9add149bfa6fd0e6fc485e669d60a5d50c2f816b8303af4d5a89586795d0
 EOF
 kubectl wait --for=condition=Healthy function/function-patch-and-transform --timeout=180s
 
