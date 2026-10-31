@@ -250,7 +250,9 @@ access. OpenCost's metrics page lists `node_cpu_seconds_total`,
 from other exporters. With node-exporter off, those inputs are absent: the
 idle share of node cost is not split out. The per-tenant rule uses allocation
 and node price, which do not depend on them. Turning node-exporter on needs a
-namespace with a host-access exemption ([Part 05 ch.02](../05-security/02-pod-security.md)).
+namespace of its own with a host-access exemption, which [Part 06
+ch.01](../06-production-readiness/01-observability-metrics.md) section 2 sets
+up ([Part 05 ch.02](../05-security/02-pod-security.md) has the levels).
 
 ### 2. Apply the platform cost manifests
 

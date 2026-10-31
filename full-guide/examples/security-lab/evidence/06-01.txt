@@ -2,38 +2,65 @@
 # Tier A: a kind cluster, Kubernetes v1.37.0 node, kubectl v1.37.2, Helm v4.1.4.
 # Node runtime: containerd v2.3.4. Host: Linux, Ubuntu 26.04.1 LTS, kernel
 # 7.0.0, Docker 29.8.2 on a remote engine. Not run on macOS.
-# Recorded by running the chapter's commands in order against a shared kind
-# lab cluster. The cluster's node is shown as sf-pilot-control-plane, so the
-# chapter's output comes from a lab cluster with different node names.
+# Recorded in two sessions by running the chapter's commands against shared
+# kind lab clusters. Steps 1, 3 to 9, 11, 13 and 16 ran in the first session
+# on a single-node cluster, shown as sf-pilot-control-plane, so the chapter's
+# output comes from a lab cluster with different node names. Steps 2, 14 and
+# 15 ran in the second session on a three-node cluster of the same versions
+# (sf-sched-control-plane and two workers). The second cluster had about 3 GiB
+# of host memory to spare and a slow disk.
 #
-# Namespace substitution: the chapter's bookstore, metrics-server and probe
-# namespaces ran as p06-01-bookstore, p06-01-metrics-server and p06-01-probe.
-# The chapter's monitoring namespace ran under a lab name too, and appears
-# below as monitoring: the exceptions registry reads Pod Security labels from
-# transcripts, and it registers the chapter's namespace, not a lab name. That
-# one rename is the only edit to the recorded lines. The manifests were copied
+# Namespace substitution: in the first session the chapter's bookstore,
+# metrics-server and probe namespaces ran as p06-01-bookstore,
+# p06-01-metrics-server and p06-01-probe. The stand-in namespace of step 9
+# ran under a lab name too, and appears below as monitoring: the exceptions
+# registry reads Pod Security labels from transcripts, and it registers the
+# chapter's namespaces, not lab names. That one rename is the only edit to
+# the recorded lines apart from the removals below. The manifests were copied
 # with the namespace name swapped; the files under examples/ are unchanged.
+# Steps 2, 14 and 15 used the chapter's own names, monitoring and
+# node-exporter, with no substitution.
+#
+# Removed from the first recording: it installed and dry-ran the chart with
+# node-exporter inside a monitoring namespace that was exempt from the
+# restricted level. The chapter no longer shows that arrangement, because a
+# component that needs privilege now gets a namespace of its own, so these
+# lines were taken out: the old step 2 (the install), steps 10, 10b and 10c
+# (the dry runs of that layout), step 12 (the CRD removal after it), the old
+# steps 14 and 15 (replaced by the new ones), the CRD listing at the end of
+# step 11, and the one command in step 9 that gave the stand-in namespace
+# that exempt level. The stand-in Pods in step 9 carry the restricted
+# settings, so the result does not depend on that label. The git history
+# keeps the first recording. Step 6b ran with the chart's CRDs still in
+# place from that first install attempt.
+# Helm's UPDATED column in step 2c showed the local time zone after the
+# time; the zone is left out.
 #
 # What did not work the first time:
-# - The kube-prometheus-stack install (step 2) failed while the lab cluster's
-#   control plane was restarting. The attempt was rolled back and its CRDs
-#   removed. The monitoring stack never ran in this transcript, so there is no
-#   captured Prometheus, Grafana or node-exporter output. Steps 9 and 10 use
-#   stand-in pods and a server-side dry run instead.
+# - The first design put node-exporter in the monitoring namespace, exempt
+#   from the restricted level. Its install failed while the first lab
+#   cluster's control plane was restarting, and was rolled back. That
+#   recording is the one removed above.
+# - The install of the new layout (step 2) did not finish either. Helm gave
+#   up on Grafana after eight minutes, kube-state-metrics was in
+#   CrashLoopBackOff, and the API server restarted twice (its restart count
+#   went from 15 to 17) while the install ran, so the run was stopped and
+#   removed (steps 2c and 2d), with the CRDs and the kubelet Service that the
+#   operator creates in kube-system. Step 2b shows the state it was stopped
+#   in. Because of this there is no captured Prometheus target list and no
+#   captured Grafana login attempt, and the chapter labels both not run.
+#   Step 14 is a server-side dry run of the new layout instead.
 # - The first Bookstore apply (step 3) failed while the API server did not
 #   answer; the chain was applied again with retries.
 # - metrics-server with its default verification refused the kubelet
 #   certificate on kind (step 1). That refusal is the expected result. The
 #   insecure flag is not the fix.
-# - While metrics-server's APIService was unavailable, the monitoring namespace
-#   could not finish deleting (step 8).
-# - The first dry run included the chart's test hook, which needs a
-#   ServiceAccount that a dry run does not create. Step 10b leaves it out with
-#   --skip-tests. The restricted warning named node-exporter's missing seccomp
-#   profile, which step 10c fixes.
+# - While metrics-server's APIService was unavailable, the monitoring
+#   namespace could not finish deleting (step 8).
 #
-# Step 14 applied only the chart's CRD manifests, so the admission gate can judge
-# the CRD-backed blocks. No operator ran, and step 15 removed the CRDs again.
+# Step 14 applied the chart's CRD manifests so the dry run, and the admission
+# gate, can judge the CRD-backed blocks. No operator ran, and step 15 removed
+# the CRDs again.
 # Namespace label read-back: the --show-labels listing of the two lab namespaces is
 # left out, because the registry gate reads labels from transcripts and that
 # listing carries labels that no command in the transcript attaches. The labels
@@ -75,32 +102,125 @@ $ kubectl -n p06-01-metrics-server logs deploy/metrics-server --tail=3
 E1031 01:17:58.628753       1 scraper.go:149] "Failed to scrape node" err="Get \"https://172.18.0.2:10250/metrics/resource\": tls: failed to verify certificate: x509: cannot validate certificate for 172.18.0.2 because it doesn't contain any IP SANs" node="sf-pilot-control-plane"
 I1031 01:18:02.971570       1 server.go:192] "Failed probe" probe="metric-storage-ready" err="no metrics to serve"
 I1031 01:18:12.972316       1 server.go:192] "Failed probe" probe="metric-storage-ready" err="no metrics to serve"
-## step 2: kube-prometheus-stack, an install that did not finish
+## step 2: kube-prometheus-stack, installed for real: monitoring at restricted, node-exporter in its own namespace
+$ helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
+"prometheus-community" already exists with the same configuration, skipping
+$ helm repo update prometheus-community
+Hang tight while we grab the latest from your chart repositories...
+...Successfully got an update from the "prometheus-community" chart repository
+Update Complete. ⎈Happy Helming!⎈
 $ kubectl create namespace monitoring
 namespace/monitoring created
-$ kubectl label namespace monitoring pod-security.kubernetes.io/enforce=privileged pod-security.kubernetes.io/audit=restricted pod-security.kubernetes.io/warn=restricted
+$ kubectl label namespace monitoring pod-security.kubernetes.io/enforce=restricted pod-security.kubernetes.io/audit=restricted pod-security.kubernetes.io/warn=restricted
 namespace/monitoring labeled
+$ kubectl create namespace node-exporter
+namespace/node-exporter created
+$ kubectl label namespace node-exporter pod-security.kubernetes.io/enforce=privileged pod-security.kubernetes.io/audit=restricted pod-security.kubernetes.io/warn=restricted
+namespace/node-exporter labeled
 $ kubectl -n monitoring create secret generic grafana-admin --from-literal=admin-user=admin --from-literal=admin-password="$(openssl rand -base64 24)"
 secret/grafana-admin created
+# monitoring-values.yaml: written with the heredoc shown in the chapter
+$ helm template kube-prometheus-stack prometheus-community/kube-prometheus-stack --version 92.16.1 --namespace monitoring --values monitoring-values.yaml --skip-tests > kps.yaml
+$ grep -E '^  namespace: ' kps.yaml | sort | uniq -c
+   5   namespace: kube-system
+ 103   namespace: monitoring
+   4   namespace: node-exporter
+$ awk '/^# Source:/ {src=$3} /^  namespace: node-exporter$/ {print src}' kps.yaml
+kube-prometheus-stack/charts/prometheus-node-exporter/templates/serviceaccount.yaml
+kube-prometheus-stack/charts/prometheus-node-exporter/templates/service.yaml
+kube-prometheus-stack/charts/prometheus-node-exporter/templates/daemonset.yaml
+kube-prometheus-stack/charts/prometheus-node-exporter/templates/servicemonitor.yaml
+$ grep -c '^  admin-password:' kps.yaml
+0
+$ helm template kube-prometheus-stack prometheus-community/kube-prometheus-stack --version 92.16.1 --namespace monitoring --skip-tests | grep -c '^  admin-password:'
+1
+$ grep -E '^kind: (DaemonSet|Deployment|StatefulSet)$' kps.yaml | sort | uniq -c
+   1 kind: DaemonSet
+   3 kind: Deployment
 $ helm install kube-prometheus-stack prometheus-community/kube-prometheus-stack --version 92.16.1 --namespace monitoring --values monitoring-values.yaml --wait --timeout 8m
-I1031 06:29:29.525849   82171 warnings.go:107] "Warning: would violate PodSecurity \"restricted:latest\": host namespaces (hostNetwork=true), restricted volume types (volumes \"proc\", \"sys\", \"root\" use restricted volume type \"hostPath\"), seccompProfile (pod or container \"node-exporter\" must set securityContext.seccompProfile.type to \"RuntimeDefault\" or \"Localhost\")"
-I1031 06:32:46.570838   82171 request.go:752] "Waited before sending request" delay="1.014927416s" reason="retries: 1, retry-after: 1s - retry-reason: due to retryable error, error: Get \"https://127.0.0.1:<api-port>/api/v1/namespaces/monitoring/secrets?allowWatchBookmarks=true&resourceVersion=89560&timeoutSeconds=408&watch=true\": EOF" verb="GET" URL="https://127.0.0.1:<api-port>/api/v1/namespaces/monitoring/secrets?allowWatchBookmarks=true&resourceVersion=89560&timeoutSeconds=408&watch=true"
-I1031 06:32:56.770740   82171 request.go:752] "Waited before sending request" delay="1.942295917s" reason="retries: 4, retry-after: 1s - retry-reason: due to retryable error, error: Get \"https://127.0.0.1:<api-port>/apis/rbac.authorization.k8s.io/v1/clusterrolebindings?allowWatchBookmarks=true&resourceVersion=89560&timeoutSeconds=466&watch=true\": EOF" verb="GET" URL="https://127.0.0.1:<api-port>/apis/rbac.authorization.k8s.io/v1/clusterrolebindings?allowWatchBookmarks=true&resourceVersion=89560&timeoutSeconds=466&watch=true"
-E1031 06:33:02.725464   82171 request.go:1196] "Unexpected error when reading response body" err="context canceled"
-E1031 06:33:02.725476   82171 request.go:1196] "Unexpected error when reading response body" err="context canceled"
-E1031 06:33:02.725546   82171 request.go:1196] "Unexpected error when reading response body" err="context canceled"
-E1031 06:33:02.725765   82171 request.go:1196] "Unexpected error when reading response body" err="context canceled"
-E1031 06:33:02.725617   82171 request.go:1196] "Unexpected error when reading response body" err="context canceled"
-E1031 06:33:02.725646   82171 request.go:1196] "Unexpected error when reading response body" err="context canceled"
-E1031 06:33:02.725917   82171 request.go:1196] "Unexpected error when reading response body" err="context canceled"
-E1031 06:33:02.725674   82171 request.go:1196] "Unexpected error when reading response body" err="context canceled"
-E1031 06:33:02.725741   82171 request.go:1196] "Unexpected error when reading response body" err="context canceled"
-E1031 06:33:02.725832   82171 request.go:1196] "Unexpected error when reading response body" err="context canceled"
-Error: INSTALLATION FAILED: services is forbidden: User "kubernetes-admin" cannot watch resource "services" in API group "" in the namespace "monitoring" - error from a previous attempt: EOF
-$ helm uninstall kube-prometheus-stack --namespace monitoring --no-hooks
+I1031 17:11:31.890334   59522 warnings.go:107] "Warning: would violate PodSecurity \"restricted:latest\": host namespaces (hostNetwork=true), restricted volume types (volumes \"proc\", \"sys\", \"root\" use restricted volume type \"hostPath\")"
+Error: INSTALLATION FAILED: resource Deployment/monitoring/kube-prometheus-stack-grafana not ready. status: InProgress, message: Available: 0/1
+context deadline exceeded
+## step 2b: what happened to that install: Grafana did not become ready in 8 minutes and the control plane restarted
+# Before the install the kube-system restart counts were kube-apiserver 15, kube-controller-manager 37, kube-scheduler 39. The install printed the Helm error above after eight minutes, and the API server then answered 'Unable to connect to the server: EOF' and, after it came back, Forbidden for a while, as it did in the first run.
+$ kubectl --request-timeout=60s -n kube-system get pods | grep -E 'NAME|kube-apiserver|kube-controller-manager|kube-scheduler|etcd'
+NAME                                             READY   STATUS    RESTARTS         AGE
+etcd-sf-sched-control-plane                      1/1     Running   0                9h
+kube-apiserver-sf-sched-control-plane            1/1     Running   17 (60s ago)     9h
+kube-controller-manager-sf-sched-control-plane   1/1     Running   38 (4m1s ago)    9h
+kube-scheduler-sf-sched-control-plane            0/1     Running   40 (3m54s ago)   9h
+$ kubectl --request-timeout=60s -n monitoring get pods
+NAME                                                        READY   STATUS             RESTARTS      AGE
+alertmanager-kube-prometheus-stack-alertmanager-0           2/2     Running            0             11m
+kube-prometheus-stack-grafana-57d9867647-jmfnk              2/3     Running            1 (45s ago)   12m
+kube-prometheus-stack-kube-state-metrics-78dc75b868-d62m8   0/1     CrashLoopBackOff   5 (68s ago)   12m
+kube-prometheus-stack-operator-dbf7f9444-p2826              1/1     Running            0             12m
+prometheus-kube-prometheus-stack-prometheus-0               2/2     Running            0             11m
+$ kubectl --request-timeout=60s -n node-exporter get pods
+NAME                                                   READY   STATUS    RESTARTS   AGE
+kube-prometheus-stack-prometheus-node-exporter-b6cbm   1/1     Running   0          12m
+kube-prometheus-stack-prometheus-node-exporter-jm6d5   1/1     Running   0          12m
+kube-prometheus-stack-prometheus-node-exporter-wf8kh   1/1     Running   0          12m
+$ kubectl --request-timeout=60s get events -A --field-selector reason=FailedCreate
+No resources found
+## step 2c: stop and remove it, because the control plane was restarting
+$ helm list -n monitoring --failed
+NAME                 	NAMESPACE 	REVISION	UPDATED                             	STATUS	CHART                        	APP VERSION
+kube-prometheus-stack	monitoring	1       	2026-10-31 17:11:00.726121	failed	kube-prometheus-stack-92.16.1	v0.94.2    
+$ helm uninstall kube-prometheus-stack --namespace monitoring --timeout 5m
 release "kube-prometheus-stack" uninstalled
-$ kubectl delete namespace monitoring --wait=false
+$ kubectl --request-timeout=120s delete namespace monitoring node-exporter --timeout=4m
 namespace "monitoring" deleted
+namespace "node-exporter" deleted
+$ kubectl --request-timeout=120s delete crd alertmanagerconfigs.monitoring.coreos.com alertmanagers.monitoring.coreos.com podmonitors.monitoring.coreos.com probes.monitoring.coreos.com prometheusagents.monitoring.coreos.com prometheuses.monitoring.coreos.com prometheusrules.monitoring.coreos.com scrapeconfigs.monitoring.coreos.com servicemonitors.monitoring.coreos.com thanosrulers.monitoring.coreos.com
+customresourcedefinition.apiextensions.k8s.io "alertmanagerconfigs.monitoring.coreos.com" deleted
+customresourcedefinition.apiextensions.k8s.io "alertmanagers.monitoring.coreos.com" deleted
+customresourcedefinition.apiextensions.k8s.io "podmonitors.monitoring.coreos.com" deleted
+customresourcedefinition.apiextensions.k8s.io "probes.monitoring.coreos.com" deleted
+customresourcedefinition.apiextensions.k8s.io "prometheusagents.monitoring.coreos.com" deleted
+customresourcedefinition.apiextensions.k8s.io "prometheuses.monitoring.coreos.com" deleted
+customresourcedefinition.apiextensions.k8s.io "prometheusrules.monitoring.coreos.com" deleted
+customresourcedefinition.apiextensions.k8s.io "scrapeconfigs.monitoring.coreos.com" deleted
+customresourcedefinition.apiextensions.k8s.io "servicemonitors.monitoring.coreos.com" deleted
+customresourcedefinition.apiextensions.k8s.io "thanosrulers.monitoring.coreos.com" deleted
+## step 2d: nothing of the install is left
+$ kubectl --request-timeout=60s get validatingwebhookconfigurations,mutatingwebhookconfigurations
+No resources found
+$ kubectl --request-timeout=60s get crd -o name | wc -l
+       0
+$ kubectl --request-timeout=60s get clusterrole,clusterrolebinding -o name | grep -c -E 'kube-prometheus-stack|prometheus-node-exporter'
+0
+$ kubectl --request-timeout=60s -n kube-system get svc,servicemonitor -o name 2>&1 | grep -c kube-prometheus-stack
+1
+$ kubectl --request-timeout=60s get namespace
+NAME                 STATUS   AGE
+default              Active   9h
+gate-baseline        Active   7h35m
+gate-privileged      Active   7h36m
+gate-restricted      Active   7h36m
+kube-node-lease      Active   9h
+kube-public          Active   9h
+kube-system          Active   9h
+local-path-storage   Active   9h
+$ kubectl --request-timeout=60s -n kube-system get pods | grep -E 'NAME|kube-apiserver|kube-controller-manager|kube-scheduler|etcd'
+NAME                                             READY   STATUS    RESTARTS         AGE
+etcd-sf-sched-control-plane                      1/1     Running   0                9h
+kube-apiserver-sf-sched-control-plane            1/1     Running   17 (99s ago)     9h
+kube-controller-manager-sf-sched-control-plane   1/1     Running   38 (4m40s ago)   9h
+kube-scheduler-sf-sched-control-plane            1/1     Running   40 (4m33s ago)   9h
+# The Prometheus operator, not Helm, creates the kubelet Service in kube-system, so helm uninstall leaves it. The count above is that Service; it is deleted here.
+$ kubectl --request-timeout=60s -n kube-system get svc,endpoints,endpointslices -o name | grep prometheus
+Warning: v1 Endpoints is deprecated in v1.33+; use discovery.k8s.io/v1 EndpointSlice
+service/kube-prometheus-stack-kubelet
+endpoints/kube-prometheus-stack-kubelet
+endpointslice.discovery.k8s.io/kube-prometheus-stack-kubelet-rq69n
+$ kubectl --request-timeout=60s -n kube-system delete service kube-prometheus-stack-kubelet
+service "kube-prometheus-stack-kubelet" deleted from kube-system namespace
+$ kubectl --request-timeout=60s -n kube-system get svc,endpoints,endpointslices -o name | grep -c prometheus
+Warning: v1 Endpoints is deprecated in v1.33+; use discovery.k8s.io/v1 EndpointSlice
+0
+$ kubectl --request-timeout=60s get validatingwebhookconfigurations,mutatingwebhookconfigurations,crd,namespace -o name | grep -E 'monitoring|node-exporter|webhook|admission' | wc -l
+       0
 ## step 3: the Bookstore, in the lab namespace p06-01-bookstore (the chapter's names with the lab substitution)
 $ kubectl apply -f 00-namespace.yaml
 namespace/p06-01-bookstore created
@@ -599,10 +719,9 @@ http_requests_total{code="200",handler="readyz"} 20
 $ helm uninstall metrics-server -n p06-01-metrics-server
 release "metrics-server" uninstalled
 ## step 9: rule 10 selects by namespace AND label; stand-in pods in the monitoring namespace (no Prometheus runs here)
+# The first recording also labelled this lab namespace here; that command is left out (see the header).
 $ kubectl create namespace monitoring
 namespace/monitoring created
-$ kubectl label namespace monitoring pod-security.kubernetes.io/enforce=privileged pod-security.kubernetes.io/audit=restricted pod-security.kubernetes.io/warn=restricted
-namespace/monitoring labeled
 $ kubectl -n monitoring create serviceaccount standin
 serviceaccount/standin created
 $ kubectl run prometheus-standin -n monitoring --labels=app.kubernetes.io/name=prometheus --rm -i --restart=Never --image=... --overrides=...
@@ -619,263 +738,61 @@ curl: (28) Connection timed out after 5002 milliseconds
 pod "grafana-standin" deleted from monitoring namespace
 pod monitoring/grafana-standin terminated (Error)
 rc=28
-## step 10: server-side dry run of the chart rendered with the pinned version and the monitoring values (nothing is created)
-$ helm template kube-prometheus-stack prometheus-community/kube-prometheus-stack --version 92.16.1 --namespace monitoring --values monitoring-values.yaml | kubectl apply --dry-run=server -f -
-serviceaccount/kube-prometheus-stack-grafana created (server dry run)
-serviceaccount/kube-prometheus-stack-kube-state-metrics created (server dry run)
-serviceaccount/kube-prometheus-stack-prometheus-node-exporter created (server dry run)
-serviceaccount/kube-prometheus-stack-alertmanager created (server dry run)
-serviceaccount/kube-prometheus-stack-operator created (server dry run)
-serviceaccount/kube-prometheus-stack-prometheus created (server dry run)
-secret/alertmanager-kube-prometheus-stack-alertmanager created (server dry run)
-secret/kube-prometheus-stack-prometheus-token created (server dry run)
-configmap/kube-prometheus-stack-grafana-config-dashboards created (server dry run)
-configmap/kube-prometheus-stack-grafana created (server dry run)
-configmap/kube-prometheus-stack-grafana-datasource created (server dry run)
-configmap/kube-prometheus-stack-alertmanager-overview created (server dry run)
-configmap/kube-prometheus-stack-apiserver created (server dry run)
-configmap/kube-prometheus-stack-cluster-total created (server dry run)
-configmap/kube-prometheus-stack-controller-manager created (server dry run)
-configmap/kube-prometheus-stack-etcd created (server dry run)
-configmap/kube-prometheus-stack-grafana-overview created (server dry run)
-configmap/kube-prometheus-stack-k8s-coredns created (server dry run)
-configmap/kube-prometheus-stack-k8s-resources-cluster created (server dry run)
-configmap/kube-prometheus-stack-k8s-resources-multicluster created (server dry run)
-configmap/kube-prometheus-stack-k8s-resources-namespace created (server dry run)
-configmap/kube-prometheus-stack-k8s-resources-node created (server dry run)
-configmap/kube-prometheus-stack-k8s-resources-nodes-overview created (server dry run)
-configmap/kube-prometheus-stack-k8s-resources-pod created (server dry run)
-configmap/kube-prometheus-stack-k8s-resources-workload created (server dry run)
-configmap/kube-prometheus-stack-k8s-resources-workloads-namespace created (server dry run)
-configmap/kube-prometheus-stack-kubelet created (server dry run)
-configmap/kube-prometheus-stack-namespace-by-pod created (server dry run)
-configmap/kube-prometheus-stack-namespace-by-workload created (server dry run)
-configmap/kube-prometheus-stack-node-cluster-rsrc-use created (server dry run)
-configmap/kube-prometheus-stack-node-rsrc-use created (server dry run)
-configmap/kube-prometheus-stack-nodes-aix created (server dry run)
-configmap/kube-prometheus-stack-nodes-darwin created (server dry run)
-configmap/kube-prometheus-stack-nodes created (server dry run)
-configmap/kube-prometheus-stack-persistentvolumesusage created (server dry run)
-configmap/kube-prometheus-stack-pod-total created (server dry run)
-configmap/kube-prometheus-stack-prometheus created (server dry run)
-configmap/kube-prometheus-stack-proxy created (server dry run)
-configmap/kube-prometheus-stack-scheduler created (server dry run)
-configmap/kube-prometheus-stack-workload-total created (server dry run)
-clusterrole.rbac.authorization.k8s.io/kube-prometheus-stack-grafana-clusterrole created (server dry run)
-clusterrole.rbac.authorization.k8s.io/kube-prometheus-stack-kube-state-metrics created (server dry run)
-clusterrole.rbac.authorization.k8s.io/kube-prometheus-stack-operator created (server dry run)
-clusterrole.rbac.authorization.k8s.io/kube-prometheus-stack-prometheus created (server dry run)
-clusterrolebinding.rbac.authorization.k8s.io/kube-prometheus-stack-grafana-clusterrolebinding created (server dry run)
-clusterrolebinding.rbac.authorization.k8s.io/kube-prometheus-stack-kube-state-metrics created (server dry run)
-clusterrolebinding.rbac.authorization.k8s.io/kube-prometheus-stack-operator created (server dry run)
-clusterrolebinding.rbac.authorization.k8s.io/kube-prometheus-stack-prometheus created (server dry run)
-service/kube-prometheus-stack-grafana created (server dry run)
-service/kube-prometheus-stack-kube-state-metrics created (server dry run)
-service/kube-prometheus-stack-prometheus-node-exporter created (server dry run)
-service/kube-prometheus-stack-alertmanager created (server dry run)
-service/kube-prometheus-stack-coredns created (server dry run)
-service/kube-prometheus-stack-kube-controller-manager created (server dry run)
-service/kube-prometheus-stack-kube-etcd created (server dry run)
-service/kube-prometheus-stack-kube-proxy created (server dry run)
-service/kube-prometheus-stack-kube-scheduler created (server dry run)
-service/kube-prometheus-stack-operator created (server dry run)
-service/kube-prometheus-stack-prometheus created (server dry run)
-Warning: would violate PodSecurity "restricted:latest": host namespaces (hostNetwork=true), restricted volume types (volumes "proc", "sys", "root" use restricted volume type "hostPath"), seccompProfile (pod or container "node-exporter" must set securityContext.seccompProfile.type to "RuntimeDefault" or "Localhost")
-daemonset.apps/kube-prometheus-stack-prometheus-node-exporter created (server dry run)
-deployment.apps/kube-prometheus-stack-grafana created (server dry run)
-deployment.apps/kube-prometheus-stack-kube-state-metrics created (server dry run)
-deployment.apps/kube-prometheus-stack-operator created (server dry run)
-mutatingwebhookconfiguration.admissionregistration.k8s.io/kube-prometheus-stack-admission created (server dry run)
-validatingwebhookconfiguration.admissionregistration.k8s.io/kube-prometheus-stack-admission created (server dry run)
-alertmanager.monitoring.coreos.com/kube-prometheus-stack-alertmanager created (server dry run)
-prometheus.monitoring.coreos.com/kube-prometheus-stack-prometheus created (server dry run)
-prometheusrule.monitoring.coreos.com/kube-prometheus-stack-alertmanager.rules created (server dry run)
-prometheusrule.monitoring.coreos.com/kube-prometheus-stack-config-reloaders created (server dry run)
-prometheusrule.monitoring.coreos.com/kube-prometheus-stack-etcd created (server dry run)
-prometheusrule.monitoring.coreos.com/kube-prometheus-stack-general.rules created (server dry run)
-prometheusrule.monitoring.coreos.com/kube-prometheus-stack-k8s.rules.container-cpu-usage-seconds-tot created (server dry run)
-prometheusrule.monitoring.coreos.com/kube-prometheus-stack-k8s.rules.container-memory-cache created (server dry run)
-prometheusrule.monitoring.coreos.com/kube-prometheus-stack-k8s.rules.container-memory-rss created (server dry run)
-prometheusrule.monitoring.coreos.com/kube-prometheus-stack-k8s.rules.container-memory-swap created (server dry run)
-prometheusrule.monitoring.coreos.com/kube-prometheus-stack-k8s.rules.container-memory-working-set-by created (server dry run)
-prometheusrule.monitoring.coreos.com/kube-prometheus-stack-k8s.rules.container-resource created (server dry run)
-prometheusrule.monitoring.coreos.com/kube-prometheus-stack-k8s.rules.pod-owner created (server dry run)
-prometheusrule.monitoring.coreos.com/kube-prometheus-stack-kube-apiserver-availability.rules created (server dry run)
-prometheusrule.monitoring.coreos.com/kube-prometheus-stack-kube-apiserver-burnrate.rules created (server dry run)
-prometheusrule.monitoring.coreos.com/kube-prometheus-stack-kube-apiserver-histogram.rules created (server dry run)
-prometheusrule.monitoring.coreos.com/kube-prometheus-stack-kube-apiserver-slos created (server dry run)
-prometheusrule.monitoring.coreos.com/kube-prometheus-stack-kube-prometheus-general.rules created (server dry run)
-prometheusrule.monitoring.coreos.com/kube-prometheus-stack-kube-prometheus-node-recording.rules created (server dry run)
-prometheusrule.monitoring.coreos.com/kube-prometheus-stack-kube-scheduler.rules created (server dry run)
-prometheusrule.monitoring.coreos.com/kube-prometheus-stack-kube-state-metrics created (server dry run)
-prometheusrule.monitoring.coreos.com/kube-prometheus-stack-kubelet.rules created (server dry run)
-prometheusrule.monitoring.coreos.com/kube-prometheus-stack-kubernetes-apps created (server dry run)
-prometheusrule.monitoring.coreos.com/kube-prometheus-stack-kubernetes-resources created (server dry run)
-prometheusrule.monitoring.coreos.com/kube-prometheus-stack-kubernetes-storage created (server dry run)
-prometheusrule.monitoring.coreos.com/kube-prometheus-stack-kubernetes-system-apiserver created (server dry run)
-prometheusrule.monitoring.coreos.com/kube-prometheus-stack-kubernetes-system-controller-manager created (server dry run)
-prometheusrule.monitoring.coreos.com/kube-prometheus-stack-kubernetes-system-kube-proxy created (server dry run)
-prometheusrule.monitoring.coreos.com/kube-prometheus-stack-kubernetes-system-kubelet created (server dry run)
-prometheusrule.monitoring.coreos.com/kube-prometheus-stack-kubernetes-system-scheduler created (server dry run)
-prometheusrule.monitoring.coreos.com/kube-prometheus-stack-kubernetes-system created (server dry run)
-prometheusrule.monitoring.coreos.com/kube-prometheus-stack-node-exporter.rules created (server dry run)
-prometheusrule.monitoring.coreos.com/kube-prometheus-stack-node-exporter created (server dry run)
-prometheusrule.monitoring.coreos.com/kube-prometheus-stack-node-network created (server dry run)
-prometheusrule.monitoring.coreos.com/kube-prometheus-stack-node.rules created (server dry run)
-prometheusrule.monitoring.coreos.com/kube-prometheus-stack-prometheus-operator created (server dry run)
-prometheusrule.monitoring.coreos.com/kube-prometheus-stack-prometheus created (server dry run)
-servicemonitor.monitoring.coreos.com/kube-prometheus-stack-grafana created (server dry run)
-servicemonitor.monitoring.coreos.com/kube-prometheus-stack-kube-state-metrics created (server dry run)
-servicemonitor.monitoring.coreos.com/kube-prometheus-stack-prometheus-node-exporter created (server dry run)
-servicemonitor.monitoring.coreos.com/kube-prometheus-stack-alertmanager created (server dry run)
-servicemonitor.monitoring.coreos.com/kube-prometheus-stack-coredns created (server dry run)
-servicemonitor.monitoring.coreos.com/kube-prometheus-stack-apiserver created (server dry run)
-servicemonitor.monitoring.coreos.com/kube-prometheus-stack-kube-controller-manager created (server dry run)
-servicemonitor.monitoring.coreos.com/kube-prometheus-stack-kube-etcd created (server dry run)
-servicemonitor.monitoring.coreos.com/kube-prometheus-stack-kube-proxy created (server dry run)
-servicemonitor.monitoring.coreos.com/kube-prometheus-stack-kube-scheduler created (server dry run)
-servicemonitor.monitoring.coreos.com/kube-prometheus-stack-kubelet created (server dry run)
-servicemonitor.monitoring.coreos.com/kube-prometheus-stack-operator created (server dry run)
-servicemonitor.monitoring.coreos.com/kube-prometheus-stack-prometheus created (server dry run)
-serviceaccount/kube-prometheus-stack-grafana-test created (server dry run)
-serviceaccount/kube-prometheus-stack-admission created (server dry run)
-configmap/kube-prometheus-stack-grafana-test created (server dry run)
-clusterrole.rbac.authorization.k8s.io/kube-prometheus-stack-admission created (server dry run)
-clusterrolebinding.rbac.authorization.k8s.io/kube-prometheus-stack-admission created (server dry run)
-role.rbac.authorization.k8s.io/kube-prometheus-stack-admission created (server dry run)
-rolebinding.rbac.authorization.k8s.io/kube-prometheus-stack-admission created (server dry run)
-job.batch/kube-prometheus-stack-admission-create created (server dry run)
-job.batch/kube-prometheus-stack-admission-patch created (server dry run)
-Error from server (Forbidden): error when creating "ksp-rendered.yaml": pods "kube-prometheus-stack-grafana-test" is forbidden: error looking up service account monitoring/kube-prometheus-stack-grafana-test: serviceaccount "kube-prometheus-stack-grafana-test" not found
-rc=1
-## step 10b: the same dry run with the chart's test hook left out (helm test is not part of install)
+## step 11: list what the policy and the labels look like, then remove the lab namespaces
+$ kubectl get networkpolicy -n p06-01-bookstore
+NAME                           POD-SELECTOR                                 AGE
+allow-backend-egress           app in (catalog,cleanup,db-migrate,orders)   2m56s
+allow-data-tier-ingress        app in (postgres,redis)                      2m56s
+allow-dns-egress               <none>                                       2m57s
+allow-ingress-to-http-tiers    app in (catalog,orders,storefront)           2m57s
+allow-monitoring-scrape        app in (catalog,orders,payments-worker)      2m56s
+allow-orders-to-rabbitmq       app=rabbitmq                                 2m56s
+allow-payments-worker-egress   app=payments-worker                          2m56s
+allow-storefront-egress        app=storefront                               2m56s
+allow-storefront-to-apis       app in (catalog,orders)                      2m56s
+default-deny-all               <none>                                       2m57s
+$ kubectl get namespace p06-01-probe p06-01-metrics-server --no-headers
+p06-01-probe            Active   3m24s
+p06-01-metrics-server   Active   29m
+$ kubectl delete namespace p06-01-probe --wait=false
+namespace "p06-01-probe" deleted
+$ kubectl delete namespace monitoring --wait=false
+namespace "monitoring" deleted
+$ kubectl delete namespace p06-01-bookstore --wait=false
+namespace "p06-01-bookstore" deleted
+$ kubectl delete namespace p06-01-metrics-server --wait=false
+namespace "p06-01-metrics-server" deleted
+## step 13: pin check with helm show chart (the chart versions the chapter names)
+$ helm show chart prometheus-community/kube-prometheus-stack --version 92.16.1
+appVersion: v0.94.2
+name: kube-prometheus-stack
+version: 92.16.1
+$ helm show chart metrics-server/metrics-server --version 3.14.0
+appVersion: 0.9.0
+name: metrics-server
+version: 3.14.0
+## step 14: server-side dry run of the chart rendered with the pinned version and the monitoring values (nothing is created)
+# Recorded in a second session, after the install in step 2 was removed. The chart's CRDs are applied first, because the Prometheus and ServiceMonitor kinds need them (step 15 removes them again).
+$ kubectl create namespace monitoring
+namespace/monitoring created
+$ kubectl label namespace monitoring pod-security.kubernetes.io/enforce=restricted pod-security.kubernetes.io/audit=restricted pod-security.kubernetes.io/warn=restricted
+namespace/monitoring labeled
+$ kubectl create namespace node-exporter
+namespace/node-exporter created
+$ kubectl label namespace node-exporter pod-security.kubernetes.io/enforce=privileged pod-security.kubernetes.io/audit=restricted pod-security.kubernetes.io/warn=restricted
+namespace/node-exporter labeled
+$ helm show crds prometheus-community/kube-prometheus-stack --version 92.16.1 | kubectl apply --server-side --force-conflicts -f -
+customresourcedefinition.apiextensions.k8s.io/alertmanagerconfigs.monitoring.coreos.com serverside-applied
+customresourcedefinition.apiextensions.k8s.io/alertmanagers.monitoring.coreos.com serverside-applied
+customresourcedefinition.apiextensions.k8s.io/podmonitors.monitoring.coreos.com serverside-applied
+customresourcedefinition.apiextensions.k8s.io/probes.monitoring.coreos.com serverside-applied
+customresourcedefinition.apiextensions.k8s.io/prometheusagents.monitoring.coreos.com serverside-applied
+customresourcedefinition.apiextensions.k8s.io/prometheuses.monitoring.coreos.com serverside-applied
+customresourcedefinition.apiextensions.k8s.io/prometheusrules.monitoring.coreos.com serverside-applied
+customresourcedefinition.apiextensions.k8s.io/scrapeconfigs.monitoring.coreos.com serverside-applied
+customresourcedefinition.apiextensions.k8s.io/servicemonitors.monitoring.coreos.com serverside-applied
+customresourcedefinition.apiextensions.k8s.io/thanosrulers.monitoring.coreos.com serverside-applied
 $ helm template kube-prometheus-stack prometheus-community/kube-prometheus-stack --version 92.16.1 --namespace monitoring --values monitoring-values.yaml --skip-tests | kubectl apply --dry-run=server -f -
-serviceaccount/kube-prometheus-stack-grafana created (server dry run)
-serviceaccount/kube-prometheus-stack-kube-state-metrics created (server dry run)
-serviceaccount/kube-prometheus-stack-prometheus-node-exporter created (server dry run)
-serviceaccount/kube-prometheus-stack-alertmanager created (server dry run)
-serviceaccount/kube-prometheus-stack-operator created (server dry run)
-serviceaccount/kube-prometheus-stack-prometheus created (server dry run)
-secret/alertmanager-kube-prometheus-stack-alertmanager created (server dry run)
-secret/kube-prometheus-stack-prometheus-token created (server dry run)
-configmap/kube-prometheus-stack-grafana-config-dashboards created (server dry run)
-configmap/kube-prometheus-stack-grafana created (server dry run)
-configmap/kube-prometheus-stack-grafana-datasource created (server dry run)
-configmap/kube-prometheus-stack-alertmanager-overview created (server dry run)
-configmap/kube-prometheus-stack-apiserver created (server dry run)
-configmap/kube-prometheus-stack-cluster-total created (server dry run)
-configmap/kube-prometheus-stack-controller-manager created (server dry run)
-configmap/kube-prometheus-stack-etcd created (server dry run)
-configmap/kube-prometheus-stack-grafana-overview created (server dry run)
-configmap/kube-prometheus-stack-k8s-coredns created (server dry run)
-configmap/kube-prometheus-stack-k8s-resources-cluster created (server dry run)
-configmap/kube-prometheus-stack-k8s-resources-multicluster created (server dry run)
-configmap/kube-prometheus-stack-k8s-resources-namespace created (server dry run)
-configmap/kube-prometheus-stack-k8s-resources-node created (server dry run)
-configmap/kube-prometheus-stack-k8s-resources-nodes-overview created (server dry run)
-configmap/kube-prometheus-stack-k8s-resources-pod created (server dry run)
-configmap/kube-prometheus-stack-k8s-resources-workload created (server dry run)
-configmap/kube-prometheus-stack-k8s-resources-workloads-namespace created (server dry run)
-configmap/kube-prometheus-stack-kubelet created (server dry run)
-configmap/kube-prometheus-stack-namespace-by-pod created (server dry run)
-configmap/kube-prometheus-stack-namespace-by-workload created (server dry run)
-configmap/kube-prometheus-stack-node-cluster-rsrc-use created (server dry run)
-configmap/kube-prometheus-stack-node-rsrc-use created (server dry run)
-configmap/kube-prometheus-stack-nodes-aix created (server dry run)
-configmap/kube-prometheus-stack-nodes-darwin created (server dry run)
-configmap/kube-prometheus-stack-nodes created (server dry run)
-configmap/kube-prometheus-stack-persistentvolumesusage created (server dry run)
-configmap/kube-prometheus-stack-pod-total created (server dry run)
-configmap/kube-prometheus-stack-prometheus created (server dry run)
-configmap/kube-prometheus-stack-proxy created (server dry run)
-configmap/kube-prometheus-stack-scheduler created (server dry run)
-configmap/kube-prometheus-stack-workload-total created (server dry run)
-clusterrole.rbac.authorization.k8s.io/kube-prometheus-stack-grafana-clusterrole created (server dry run)
-clusterrole.rbac.authorization.k8s.io/kube-prometheus-stack-kube-state-metrics created (server dry run)
-clusterrole.rbac.authorization.k8s.io/kube-prometheus-stack-operator created (server dry run)
-clusterrole.rbac.authorization.k8s.io/kube-prometheus-stack-prometheus created (server dry run)
-clusterrolebinding.rbac.authorization.k8s.io/kube-prometheus-stack-grafana-clusterrolebinding created (server dry run)
-clusterrolebinding.rbac.authorization.k8s.io/kube-prometheus-stack-kube-state-metrics created (server dry run)
-clusterrolebinding.rbac.authorization.k8s.io/kube-prometheus-stack-operator created (server dry run)
-clusterrolebinding.rbac.authorization.k8s.io/kube-prometheus-stack-prometheus created (server dry run)
-service/kube-prometheus-stack-grafana created (server dry run)
-service/kube-prometheus-stack-kube-state-metrics created (server dry run)
-service/kube-prometheus-stack-prometheus-node-exporter created (server dry run)
-service/kube-prometheus-stack-alertmanager created (server dry run)
-service/kube-prometheus-stack-coredns created (server dry run)
-service/kube-prometheus-stack-kube-controller-manager created (server dry run)
-service/kube-prometheus-stack-kube-etcd created (server dry run)
-service/kube-prometheus-stack-kube-proxy created (server dry run)
-service/kube-prometheus-stack-kube-scheduler created (server dry run)
-service/kube-prometheus-stack-operator created (server dry run)
-service/kube-prometheus-stack-prometheus created (server dry run)
-Warning: would violate PodSecurity "restricted:latest": host namespaces (hostNetwork=true), restricted volume types (volumes "proc", "sys", "root" use restricted volume type "hostPath"), seccompProfile (pod or container "node-exporter" must set securityContext.seccompProfile.type to "RuntimeDefault" or "Localhost")
-daemonset.apps/kube-prometheus-stack-prometheus-node-exporter created (server dry run)
-deployment.apps/kube-prometheus-stack-grafana created (server dry run)
-deployment.apps/kube-prometheus-stack-kube-state-metrics created (server dry run)
-deployment.apps/kube-prometheus-stack-operator created (server dry run)
-mutatingwebhookconfiguration.admissionregistration.k8s.io/kube-prometheus-stack-admission created (server dry run)
-validatingwebhookconfiguration.admissionregistration.k8s.io/kube-prometheus-stack-admission created (server dry run)
-alertmanager.monitoring.coreos.com/kube-prometheus-stack-alertmanager created (server dry run)
-prometheus.monitoring.coreos.com/kube-prometheus-stack-prometheus created (server dry run)
-prometheusrule.monitoring.coreos.com/kube-prometheus-stack-alertmanager.rules created (server dry run)
-prometheusrule.monitoring.coreos.com/kube-prometheus-stack-config-reloaders created (server dry run)
-prometheusrule.monitoring.coreos.com/kube-prometheus-stack-etcd created (server dry run)
-prometheusrule.monitoring.coreos.com/kube-prometheus-stack-general.rules created (server dry run)
-prometheusrule.monitoring.coreos.com/kube-prometheus-stack-k8s.rules.container-cpu-usage-seconds-tot created (server dry run)
-prometheusrule.monitoring.coreos.com/kube-prometheus-stack-k8s.rules.container-memory-cache created (server dry run)
-prometheusrule.monitoring.coreos.com/kube-prometheus-stack-k8s.rules.container-memory-rss created (server dry run)
-prometheusrule.monitoring.coreos.com/kube-prometheus-stack-k8s.rules.container-memory-swap created (server dry run)
-prometheusrule.monitoring.coreos.com/kube-prometheus-stack-k8s.rules.container-memory-working-set-by created (server dry run)
-prometheusrule.monitoring.coreos.com/kube-prometheus-stack-k8s.rules.container-resource created (server dry run)
-prometheusrule.monitoring.coreos.com/kube-prometheus-stack-k8s.rules.pod-owner created (server dry run)
-prometheusrule.monitoring.coreos.com/kube-prometheus-stack-kube-apiserver-availability.rules created (server dry run)
-prometheusrule.monitoring.coreos.com/kube-prometheus-stack-kube-apiserver-burnrate.rules created (server dry run)
-prometheusrule.monitoring.coreos.com/kube-prometheus-stack-kube-apiserver-histogram.rules created (server dry run)
-prometheusrule.monitoring.coreos.com/kube-prometheus-stack-kube-apiserver-slos created (server dry run)
-prometheusrule.monitoring.coreos.com/kube-prometheus-stack-kube-prometheus-general.rules created (server dry run)
-prometheusrule.monitoring.coreos.com/kube-prometheus-stack-kube-prometheus-node-recording.rules created (server dry run)
-prometheusrule.monitoring.coreos.com/kube-prometheus-stack-kube-scheduler.rules created (server dry run)
-prometheusrule.monitoring.coreos.com/kube-prometheus-stack-kube-state-metrics created (server dry run)
-prometheusrule.monitoring.coreos.com/kube-prometheus-stack-kubelet.rules created (server dry run)
-prometheusrule.monitoring.coreos.com/kube-prometheus-stack-kubernetes-apps created (server dry run)
-prometheusrule.monitoring.coreos.com/kube-prometheus-stack-kubernetes-resources created (server dry run)
-prometheusrule.monitoring.coreos.com/kube-prometheus-stack-kubernetes-storage created (server dry run)
-prometheusrule.monitoring.coreos.com/kube-prometheus-stack-kubernetes-system-apiserver created (server dry run)
-prometheusrule.monitoring.coreos.com/kube-prometheus-stack-kubernetes-system-controller-manager created (server dry run)
-prometheusrule.monitoring.coreos.com/kube-prometheus-stack-kubernetes-system-kube-proxy created (server dry run)
-prometheusrule.monitoring.coreos.com/kube-prometheus-stack-kubernetes-system-kubelet created (server dry run)
-prometheusrule.monitoring.coreos.com/kube-prometheus-stack-kubernetes-system-scheduler created (server dry run)
-prometheusrule.monitoring.coreos.com/kube-prometheus-stack-kubernetes-system created (server dry run)
-prometheusrule.monitoring.coreos.com/kube-prometheus-stack-node-exporter.rules created (server dry run)
-prometheusrule.monitoring.coreos.com/kube-prometheus-stack-node-exporter created (server dry run)
-prometheusrule.monitoring.coreos.com/kube-prometheus-stack-node-network created (server dry run)
-prometheusrule.monitoring.coreos.com/kube-prometheus-stack-node.rules created (server dry run)
-prometheusrule.monitoring.coreos.com/kube-prometheus-stack-prometheus-operator created (server dry run)
-prometheusrule.monitoring.coreos.com/kube-prometheus-stack-prometheus created (server dry run)
-servicemonitor.monitoring.coreos.com/kube-prometheus-stack-grafana created (server dry run)
-servicemonitor.monitoring.coreos.com/kube-prometheus-stack-kube-state-metrics created (server dry run)
-servicemonitor.monitoring.coreos.com/kube-prometheus-stack-prometheus-node-exporter created (server dry run)
-servicemonitor.monitoring.coreos.com/kube-prometheus-stack-alertmanager created (server dry run)
-servicemonitor.monitoring.coreos.com/kube-prometheus-stack-coredns created (server dry run)
-servicemonitor.monitoring.coreos.com/kube-prometheus-stack-apiserver created (server dry run)
-servicemonitor.monitoring.coreos.com/kube-prometheus-stack-kube-controller-manager created (server dry run)
-servicemonitor.monitoring.coreos.com/kube-prometheus-stack-kube-etcd created (server dry run)
-servicemonitor.monitoring.coreos.com/kube-prometheus-stack-kube-proxy created (server dry run)
-servicemonitor.monitoring.coreos.com/kube-prometheus-stack-kube-scheduler created (server dry run)
-servicemonitor.monitoring.coreos.com/kube-prometheus-stack-kubelet created (server dry run)
-servicemonitor.monitoring.coreos.com/kube-prometheus-stack-operator created (server dry run)
-servicemonitor.monitoring.coreos.com/kube-prometheus-stack-prometheus created (server dry run)
-serviceaccount/kube-prometheus-stack-admission created (server dry run)
-clusterrole.rbac.authorization.k8s.io/kube-prometheus-stack-admission created (server dry run)
-clusterrolebinding.rbac.authorization.k8s.io/kube-prometheus-stack-admission created (server dry run)
-role.rbac.authorization.k8s.io/kube-prometheus-stack-admission created (server dry run)
-rolebinding.rbac.authorization.k8s.io/kube-prometheus-stack-admission created (server dry run)
-job.batch/kube-prometheus-stack-admission-create created (server dry run)
-job.batch/kube-prometheus-stack-admission-patch created (server dry run)
-rc=0
-## step 10c: values file revised after the warning: seccomp RuntimeDefault for node-exporter
-$ helm template ... --skip-tests | kubectl apply --dry-run=server -f -
 serviceaccount/kube-prometheus-stack-grafana created (server dry run)
 serviceaccount/kube-prometheus-stack-kube-state-metrics created (server dry run)
 serviceaccount/kube-prometheus-stack-prometheus-node-exporter created (server dry run)
@@ -999,79 +916,11 @@ role.rbac.authorization.k8s.io/kube-prometheus-stack-admission created (server d
 rolebinding.rbac.authorization.k8s.io/kube-prometheus-stack-admission created (server dry run)
 job.batch/kube-prometheus-stack-admission-create created (server dry run)
 job.batch/kube-prometheus-stack-admission-patch created (server dry run)
-rc=0
-## step 11: list what the policy and the labels look like, then remove the lab namespaces
-$ kubectl get networkpolicy -n p06-01-bookstore
-NAME                           POD-SELECTOR                                 AGE
-allow-backend-egress           app in (catalog,cleanup,db-migrate,orders)   2m56s
-allow-data-tier-ingress        app in (postgres,redis)                      2m56s
-allow-dns-egress               <none>                                       2m57s
-allow-ingress-to-http-tiers    app in (catalog,orders,storefront)           2m57s
-allow-monitoring-scrape        app in (catalog,orders,payments-worker)      2m56s
-allow-orders-to-rabbitmq       app=rabbitmq                                 2m56s
-allow-payments-worker-egress   app=payments-worker                          2m56s
-allow-storefront-egress        app=storefront                               2m56s
-allow-storefront-to-apis       app in (catalog,orders)                      2m56s
-default-deny-all               <none>                                       2m57s
-$ kubectl get namespace p06-01-probe p06-01-metrics-server --no-headers
-p06-01-probe            Active   3m24s
-p06-01-metrics-server   Active   29m
-$ kubectl delete namespace p06-01-probe --wait=false
-namespace "p06-01-probe" deleted
-$ kubectl delete namespace monitoring --wait=false
+## step 15: remove what step 14 created: both namespaces and the chart's CRDs (no operator ran)
+$ kubectl --request-timeout=120s delete namespace monitoring node-exporter --timeout=4m
 namespace "monitoring" deleted
-$ kubectl delete namespace p06-01-bookstore --wait=false
-namespace "p06-01-bookstore" deleted
-$ kubectl delete namespace p06-01-metrics-server --wait=false
-namespace "p06-01-metrics-server" deleted
-$ kubectl get crd -o name
-customresourcedefinition.apiextensions.k8s.io/accesscontrolpolicies.hub.traefik.io
-customresourcedefinition.apiextensions.k8s.io/aiservices.hub.traefik.io
-customresourcedefinition.apiextensions.k8s.io/alertmanagerconfigs.monitoring.coreos.com
-customresourcedefinition.apiextensions.k8s.io/alertmanagers.monitoring.coreos.com
-customresourcedefinition.apiextensions.k8s.io/apiauths.hub.traefik.io
-customresourcedefinition.apiextensions.k8s.io/apibundles.hub.traefik.io
-customresourcedefinition.apiextensions.k8s.io/apicatalogitems.hub.traefik.io
-customresourcedefinition.apiextensions.k8s.io/apiplans.hub.traefik.io
-customresourcedefinition.apiextensions.k8s.io/apiportalauths.hub.traefik.io
-customresourcedefinition.apiextensions.k8s.io/apiportals.hub.traefik.io
-customresourcedefinition.apiextensions.k8s.io/apiratelimits.hub.traefik.io
-customresourcedefinition.apiextensions.k8s.io/apis.hub.traefik.io
-customresourcedefinition.apiextensions.k8s.io/apiversions.hub.traefik.io
-customresourcedefinition.apiextensions.k8s.io/backendtlspolicies.gateway.networking.k8s.io
-customresourcedefinition.apiextensions.k8s.io/contentitems.hub.traefik.io
-customresourcedefinition.apiextensions.k8s.io/gatewayclasses.gateway.networking.k8s.io
-customresourcedefinition.apiextensions.k8s.io/gateways.gateway.networking.k8s.io
-customresourcedefinition.apiextensions.k8s.io/grpcroutes.gateway.networking.k8s.io
-customresourcedefinition.apiextensions.k8s.io/httproutes.gateway.networking.k8s.io
-customresourcedefinition.apiextensions.k8s.io/ingressroutes.traefik.io
-customresourcedefinition.apiextensions.k8s.io/ingressroutetcps.traefik.io
-customresourcedefinition.apiextensions.k8s.io/ingressrouteudps.traefik.io
-customresourcedefinition.apiextensions.k8s.io/listenersets.gateway.networking.k8s.io
-customresourcedefinition.apiextensions.k8s.io/managedapplications.hub.traefik.io
-customresourcedefinition.apiextensions.k8s.io/managedsubscriptions.hub.traefik.io
-customresourcedefinition.apiextensions.k8s.io/middlewares.traefik.io
-customresourcedefinition.apiextensions.k8s.io/middlewaretcps.traefik.io
-customresourcedefinition.apiextensions.k8s.io/podmonitors.monitoring.coreos.com
-customresourcedefinition.apiextensions.k8s.io/probes.monitoring.coreos.com
-customresourcedefinition.apiextensions.k8s.io/prometheusagents.monitoring.coreos.com
-customresourcedefinition.apiextensions.k8s.io/prometheuses.monitoring.coreos.com
-customresourcedefinition.apiextensions.k8s.io/prometheusrules.monitoring.coreos.com
-customresourcedefinition.apiextensions.k8s.io/referencegrants.gateway.networking.k8s.io
-customresourcedefinition.apiextensions.k8s.io/scrapeconfigs.monitoring.coreos.com
-customresourcedefinition.apiextensions.k8s.io/serverstransports.traefik.io
-customresourcedefinition.apiextensions.k8s.io/serverstransporttcps.traefik.io
-customresourcedefinition.apiextensions.k8s.io/servicemonitors.monitoring.coreos.com
-customresourcedefinition.apiextensions.k8s.io/tcproutes.gateway.networking.k8s.io
-customresourcedefinition.apiextensions.k8s.io/thanosrulers.monitoring.coreos.com
-customresourcedefinition.apiextensions.k8s.io/tlsoptions.traefik.io
-customresourcedefinition.apiextensions.k8s.io/tlsroutes.gateway.networking.k8s.io
-customresourcedefinition.apiextensions.k8s.io/tlsstores.traefik.io
-customresourcedefinition.apiextensions.k8s.io/traefikservices.traefik.io
-customresourcedefinition.apiextensions.k8s.io/udproutes.gateway.networking.k8s.io
-customresourcedefinition.apiextensions.k8s.io/uplinks.hub.traefik.io
-## step 12: remove the monitoring CRDs this run created (no operator ran)
-$ kubectl delete crd alertmanagerconfigs.monitoring.coreos.com alertmanagers.monitoring.coreos.com podmonitors.monitoring.coreos.com probes.monitoring.coreos.com prometheusagents.monitoring.coreos.com prometheuses.monitoring.coreos.com prometheusrules.monitoring.coreos.com scrapeconfigs.monitoring.coreos.com servicemonitors.monitoring.coreos.com thanosrulers.monitoring.coreos.com --wait=false
+namespace "node-exporter" deleted
+$ kubectl --request-timeout=120s delete crd alertmanagerconfigs.monitoring.coreos.com alertmanagers.monitoring.coreos.com podmonitors.monitoring.coreos.com probes.monitoring.coreos.com prometheusagents.monitoring.coreos.com prometheuses.monitoring.coreos.com prometheusrules.monitoring.coreos.com scrapeconfigs.monitoring.coreos.com servicemonitors.monitoring.coreos.com thanosrulers.monitoring.coreos.com
 customresourcedefinition.apiextensions.k8s.io "alertmanagerconfigs.monitoring.coreos.com" deleted
 customresourcedefinition.apiextensions.k8s.io "alertmanagers.monitoring.coreos.com" deleted
 customresourcedefinition.apiextensions.k8s.io "podmonitors.monitoring.coreos.com" deleted
@@ -1082,40 +931,21 @@ customresourcedefinition.apiextensions.k8s.io "prometheusrules.monitoring.coreos
 customresourcedefinition.apiextensions.k8s.io "scrapeconfigs.monitoring.coreos.com" deleted
 customresourcedefinition.apiextensions.k8s.io "servicemonitors.monitoring.coreos.com" deleted
 customresourcedefinition.apiextensions.k8s.io "thanosrulers.monitoring.coreos.com" deleted
-## step 13: pin check with helm show chart (the chart versions the chapter names)
-$ helm show chart prometheus-community/kube-prometheus-stack --version 92.16.1
-appVersion: v0.94.2
-name: kube-prometheus-stack
-version: 92.16.1
-$ helm show chart metrics-server/metrics-server --version 3.14.0
-appVersion: 0.9.0
-name: metrics-server
-version: 3.14.0
-## step 14: install only the chart's CRDs (no operator) so the admission gate can judge the CRD-backed blocks
-$ kubectl apply --server-side --force-conflicts -f <chart-crds-dir>
-customresourcedefinition.apiextensions.k8s.io/alertmanagerconfigs.monitoring.coreos.com serverside-applied
-customresourcedefinition.apiextensions.k8s.io/alertmanagers.monitoring.coreos.com serverside-applied
-customresourcedefinition.apiextensions.k8s.io/podmonitors.monitoring.coreos.com serverside-applied
-customresourcedefinition.apiextensions.k8s.io/probes.monitoring.coreos.com serverside-applied
-customresourcedefinition.apiextensions.k8s.io/prometheusagents.monitoring.coreos.com serverside-applied
-customresourcedefinition.apiextensions.k8s.io/prometheuses.monitoring.coreos.com serverside-applied
-customresourcedefinition.apiextensions.k8s.io/prometheusrules.monitoring.coreos.com serverside-applied
-customresourcedefinition.apiextensions.k8s.io/scrapeconfigs.monitoring.coreos.com serverside-applied
-customresourcedefinition.apiextensions.k8s.io/servicemonitors.monitoring.coreos.com serverside-applied
-customresourcedefinition.apiextensions.k8s.io/thanosrulers.monitoring.coreos.com serverside-applied
-## step 15: remove the CRDs that step 14 applied (no operator ran)
-$ kubectl delete crd alertmanagerconfigs.monitoring.coreos.com alertmanagers.monitoring.coreos.com podmonitors.monitoring.coreos.com probes.monitoring.coreos.com prometheusagents.monitoring.coreos.com prometheuses.monitoring.coreos.com prometheusrules.monitoring.coreos.com scrapeconfigs.monitoring.coreos.com servicemonitors.monitoring.coreos.com thanosrulers.monitoring.coreos.com
-customresourcedefinition.apiextensions.k8s.io "alertmanagerconfigs.monitoring.coreos.com" deleted
-customresourcedefinition.apiextensions.k8s.io "alertmanagers.monitoring.coreos.com" deleted
-customresourcedefinition.apiextensions.k8s.io "podmonitors.monitoring.coreos.com" deleted
-customresourcedefinition.apiextensions.k8s.io "probes.monitoring.coreos.com" deleted
-customresourcedefinition.apiextensions.k8s.io "prometheusagents.monitoring.coreos.com" deleted
-customresourcedefinition.apiextensions.k8s.io "prometheuses.monitoring.coreos.com" deleted
-customresourcedefinition.apiextensions.k8s.io "prometheusrules.monitoring.coreos.com" deleted
-customresourcedefinition.apiextensions.k8s.io "scrapeconfigs.monitoring.coreos.com" deleted
-customresourcedefinition.apiextensions.k8s.io "servicemonitors.monitoring.coreos.com" deleted
-customresourcedefinition.apiextensions.k8s.io "thanosrulers.monitoring.coreos.com" deleted
-0
+$ kubectl --request-timeout=60s get validatingwebhookconfigurations,mutatingwebhookconfigurations
+No resources found
+$ kubectl --request-timeout=60s get crd -o name | wc -l
+       0
+$ kubectl --request-timeout=60s get namespace
+NAME                 STATUS   AGE
+default              Active   9h
+gate-baseline        Active   7h47m
+gate-privileged      Active   7h48m
+gate-restricted      Active   7h48m
+kube-node-lease      Active   9h
+kube-public          Active   9h
+kube-system          Active   9h
+local-path-storage   Active   9h
+$ kubectl --request-timeout=60s -n kube-system get svc,endpointslices -o name | grep -c prometheus
 0
 ## step 16: catalog's answer to the paths an edge could send (no edge ran)
 # No Traefik ran on the lab cluster, so nothing here went through an edge. The

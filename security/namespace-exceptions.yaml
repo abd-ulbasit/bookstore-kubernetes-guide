@@ -55,15 +55,18 @@ exceptions:
     chapter: 14-eks-in-production-a-to-z/15-cilium-ebpf-on-eks.md
     expires: 2027-06-30
 
-  - namespace: monitoring
+  - namespace: node-exporter
     level: privileged
     reason: >-
-      The kube-prometheus-stack node-exporter DaemonSet reads host metrics
-      through hostNetwork and hostPath volumes for /proc, /sys and the root
-      filesystem, and baseline forbids both. The chapter turns off the shared
-      host PID namespace, keeps only those host mounts, and labels warn and
-      audit restricted, so the dry run names node-exporter alone.
-    upstream: https://kubernetes.io/docs/concepts/security/pod-security-standards/
+      The node-exporter DaemonSet reads host metrics through hostNetwork and
+      hostPath volumes for /proc, /sys and the root filesystem, and baseline
+      forbids both. The chapter installs kube-prometheus-stack with the chart's
+      prometheus-node-exporter.namespaceOverride, so this namespace holds that
+      one DaemonSet and nothing else. The rest of the stack runs in monitoring,
+      which stays restricted. The chapter turns off the shared host PID
+      namespace, keeps only those host mounts, and labels warn and audit
+      restricted, so the install warning names node-exporter alone.
+    upstream: https://github.com/prometheus/node_exporter#docker
     chapter: 06-production-readiness/01-observability-metrics.md
     expires: 2027-10-31
 

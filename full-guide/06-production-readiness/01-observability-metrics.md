@@ -77,7 +77,7 @@ Three metric *sources* you will always run, answering different questions:
 |---|---|---|
 | Anyone who can reach the metrics port reads route names, traffic and the Go version | A NetworkPolicy admits only the Prometheus pods to `:8080` (section 4) | [02.06](../02-networking/06-network-policies.md) |
 | A public route forwards `/metrics` to the app | No Ingress or Gateway rule may deliver it to catalog (section 4 checks the Bookstore's rules and the paths they produce) | [02.04](../02-networking/04-ingress.md), [02.05](../02-networking/05-gateway-api.md) |
-| node-exporter needs host networking and host paths, which the baseline forbids | `monitoring` is labelled `privileged`, registered as an exception, with host PID off | [05.02](../05-security/02-pod-security.md) |
+| node-exporter needs host networking and host paths, which the baseline forbids | node-exporter gets a namespace of its own, `node-exporter`, labelled `privileged` and registered as an exception, with host PID off. `monitoring` stays `restricted` (section 2) | [05.02](../05-security/02-pod-security.md) |
 | A Grafana admin password written into a values file or manifest | `grafana.admin.existingSecret`: the password lives in a Secret you create | [03.02](../03-config-and-storage/02-secrets.md) |
 | Personal data or secrets reaching the TSDB through labels | Labels stay bounded (`handler`, `code`); log redaction is in [06.02](02-logging.md) | [06.02](02-logging.md) |
 | metrics-server trusting a kubelet it cannot verify | Verification stays on; the insecure flag is never taught | [metrics-server FAQ](https://github.com/kubernetes-sigs/metrics-server/blob/master/FAQ.md) |
@@ -92,8 +92,10 @@ flowchart LR
       cat["catalog Pods<br/>/metrics :8080"]
       ord["orders Pods<br/>/metrics :8080"]
       ksm["kube-state-metrics<br/>(object state)"]
-      nex["node-exporter<br/>DaemonSet (machines)"]
-      subgraph mon["monitoring namespace"]
+      subgraph nexns["node-exporter namespace (privileged)"]
+        nex["node-exporter<br/>DaemonSet (machines)"]
+      end
+      subgraph mon["monitoring namespace (restricted)"]
         op["Prometheus Operator<br/>(watches CRDs)"]
         sm["ServiceMonitor /<br/>PrometheusRule (CRDs)"]
         prom["Prometheus<br/>scrape + TSDB + rules"]
@@ -145,7 +147,8 @@ flowchart LR
 We will: (1) install **metrics-server** and see what its refusal looks like on
 kind; (2) install **kube-prometheus-stack** (Prometheus Operator + Prometheus +
 Alertmanager + Grafana + node-exporter + kube-state-metrics) into its own
-`monitoring` namespace; (3) point a **ServiceMonitor** at catalog's existing
+`monitoring` namespace, with node-exporter alone in a namespace of its own,
+`node-exporter`; (3) point a **ServiceMonitor** at catalog's existing
 `/metrics`; (4) lock `/metrics` down to Prometheus; (5) query it with PromQL;
 (6) add a **PrometheusRule**.
 
@@ -271,25 +274,39 @@ HPA samples ([ch.04](04-autoscaling.md)), not a monitoring store.
 
 ### 2. kube-prometheus-stack (the monitoring plane)
 
-Install the chart into a `monitoring` namespace of its own, not `bookstore`.
-That namespace cannot be `restricted`. node-exporter is a host-level
-DaemonSet, and it needs host networking and host paths, which `restricted` and
-`baseline` both forbid. So `monitoring` is labelled `privileged`, which makes
-it an exception. The exception is registered in
-`security/namespace-exceptions.yaml` at the repository root, with its reason
-and an expiry date. The warn and audit labels stay at `restricted`, so the
-warnings name every pod that would fail it, and the dry run below shows that
-node-exporter is the only one.
+Install the chart into two namespaces, and neither is `bookstore`. A
+component that needs privilege gets a namespace of its own
+([05.02](../05-security/02-pod-security.md)), so that the privilege does not
+reach what runs beside it. One component in this stack needs it. node-exporter
+is a host-level DaemonSet, and it needs host networking and `hostPath`
+volumes, which `restricted` and `baseline` both forbid. Prometheus,
+Alertmanager, Grafana, the operator and kube-state-metrics need neither. The
+stack therefore splits in two:
 
-This lab's install did not finish on the shared cluster, so the stack below is
-checked by a server-side dry run of the rendered chart, not by a running stack.
-The evidence file records what ran.
+| Namespace | Holds | Pod Security labels |
+|---|---|---|
+| `monitoring` | Prometheus, Alertmanager, Grafana, the operator, kube-state-metrics | enforce, audit and warn at `restricted` |
+| `node-exporter` | the node-exporter DaemonSet | enforce at `privileged`, audit and warn at `restricted` |
+
+`node-exporter` is an exception. It is registered in
+`security/namespace-exceptions.yaml` at the repository root, with its reason
+and an expiry date. Its warn and audit labels stay at `restricted`, so the
+install prints a warning that names the DaemonSet, and nothing else in the
+chart should warn. The chart makes the split a values setting. node-exporter
+is a subchart, it takes a `namespaceOverride`, and the stack passes the values
+under `prometheus-node-exporter` to it. The release goes into `monitoring` and
+Helm creates no other namespace, so create and label both before the install:
 
 ```sh
 helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
 helm repo update
 kubectl create namespace monitoring
 kubectl label namespace monitoring \
+  pod-security.kubernetes.io/enforce=restricted \
+  pod-security.kubernetes.io/audit=restricted \
+  pod-security.kubernetes.io/warn=restricted
+kubectl create namespace node-exporter
+kubectl label namespace node-exporter \
   pod-security.kubernetes.io/enforce=privileged \
   pod-security.kubernetes.io/audit=restricted \
   pod-security.kubernetes.io/warn=restricted
@@ -308,12 +325,12 @@ The password is generated and never written to a file. Without an
 into a Secret it chooses. Naming your own Secret keeps the password out of the
 values file.
 
-The values file keeps node-exporter's host networking and its read-only root
-mount, which the network and filesystem collectors read. It turns off the
-shared host PID namespace, because the chart's collectors read host data
-through the `/host` mounts instead. Check after install that `node_` series
-still appear. The file also sets the seccomp and capability fields that the
-chart exposes:
+The values file moves node-exporter into its namespace. It keeps
+node-exporter's host networking and its read-only root mount, which the
+network and filesystem collectors read. It turns off the shared host PID
+namespace, because the chart's collectors read host data through the `/host`
+mounts instead. Check after install that `node_` series still appear. The file
+also sets the seccomp and capability fields that the chart exposes:
 
 ```sh
 cat > monitoring-values.yaml <<'EOF'
@@ -321,6 +338,7 @@ grafana:
   admin:
     existingSecret: grafana-admin
 prometheus-node-exporter:
+  namespaceOverride: node-exporter
   hostPID: false
   securityContext:
     seccompProfile:
@@ -332,10 +350,74 @@ prometheus-node-exporter:
 EOF
 ```
 
-Before installing, render the chart and dry-run it against the server. Nothing
-is created, and the warning reports what `restricted` would refuse:
+Before installing, render the chart at the pinned version and look at where
+each object lands. The first command counts the objects by namespace. The
+second lists the chart templates whose output goes to `node-exporter`:
 
 ```sh
+helm template kube-prometheus-stack prometheus-community/kube-prometheus-stack \
+  --version 92.16.1 --namespace monitoring --values monitoring-values.yaml \
+  --skip-tests > kps.yaml
+grep -E '^  namespace: ' kps.yaml | sort | uniq -c
+awk '/^# Source:/ {src=$3} /^  namespace: node-exporter$/ {print src}' kps.yaml
+```
+
+<!-- gate: output -->
+```
+   5   namespace: kube-system
+ 103   namespace: monitoring
+   4   namespace: node-exporter
+```
+
+<!-- gate: output -->
+```
+kube-prometheus-stack/charts/prometheus-node-exporter/templates/serviceaccount.yaml
+kube-prometheus-stack/charts/prometheus-node-exporter/templates/service.yaml
+kube-prometheus-stack/charts/prometheus-node-exporter/templates/daemonset.yaml
+kube-prometheus-stack/charts/prometheus-node-exporter/templates/servicemonitor.yaml
+```
+
+Four objects moved: node-exporter's ServiceAccount, Service, DaemonSet and
+ServiceMonitor. Prometheus still finds the ServiceMonitor, because the
+chart's Prometheus selects ServiceMonitors in every namespace
+(`serviceMonitorNamespaceSelector: {}` in the render) by the label
+`release: kube-prometheus-stack`. The five objects in `kube-system` are the
+Services the chart writes for the cluster's own components.
+
+The same render settles the password. The chart writes an `admin-password:`
+line into a Secret only when it makes the Secret itself. With the values file
+it makes none. Without `existingSecret`, the render holds one:
+
+```sh
+grep -c '^  admin-password:' kps.yaml
+helm template kube-prometheus-stack prometheus-community/kube-prometheus-stack \
+  --version 92.16.1 --namespace monitoring --skip-tests \
+  | grep -c '^  admin-password:'
+```
+
+With the values file:
+
+<!-- gate: output -->
+```
+0
+```
+
+Without it:
+
+<!-- gate: output -->
+```
+1
+```
+
+The dry run below needs the chart's CRDs in place, because the `Prometheus`
+and `ServiceMonitor` kinds are theirs. `helm install` applies the same CRDs
+from the chart's `crds/` directory. Apply them first, then dry-run the render
+against the server. Nothing is created, and the warning reports what
+`restricted` would refuse:
+
+```sh
+helm show crds prometheus-community/kube-prometheus-stack --version 92.16.1 \
+  | kubectl apply --server-side --force-conflicts -f -
 helm template kube-prometheus-stack prometheus-community/kube-prometheus-stack \
   --version 92.16.1 --namespace monitoring --values monitoring-values.yaml \
   --skip-tests | kubectl apply --dry-run=server -f -
@@ -343,14 +425,19 @@ helm template kube-prometheus-stack prometheus-community/kube-prometheus-stack \
 
 <!-- gate: output -->
 ```
+# ...
 Warning: would violate PodSecurity "restricted:latest": host namespaces (hostNetwork=true), restricted volume types (volumes "proc", "sys", "root" use restricted volume type "hostPath")
+daemonset.apps/kube-prometheus-stack-prometheus-node-exporter created (server dry run)
+# ...
 ```
 
-That one warning is the registered exception: host networking and host paths.
-Nothing else in the chart fails `restricted`. `--skip-tests` leaves out the
-chart's test hook, which `helm test` runs and `helm install` does not. The dry
-run needs the chart's CRDs in place for the `Prometheus` and `ServiceMonitor`
-kinds. Without them the server does not know those kinds. `helm show chart`
+That one warning is the registered exception: host networking and host paths,
+reported for the DaemonSet. Every Deployment and Job in `monitoring` passed
+the `restricted` check that the namespace's warn label runs, and none warned.
+`--skip-tests` leaves out the chart's test hook, which `helm test` runs and
+`helm install` does not. The dry run cannot judge the Prometheus and
+Alertmanager Pods, which the operator creates from their custom resources
+after the install, so the install is what tests those. `helm show chart`
 reports the chart as version 92.16.1, which is the version pinned below.
 
 Install the pinned version:
@@ -363,19 +450,96 @@ helm install kube-prometheus-stack \
   --version 92.16.1 \
   --namespace monitoring \
   --values monitoring-values.yaml \
-  --wait
+  --wait --timeout 8m
 kubectl get pods -n monitoring
+kubectl get pods -n node-exporter
 ```
 
-You now have Prometheus, Alertmanager, Grafana, node-exporter (a DaemonSet),
-and kube-state-metrics — all scraped automatically. Open Prometheus and
-Grafana via port-forward (local only):
+This install did not finish on the lab cluster, which had about 3 GiB of
+memory to spare and a slow disk. Helm printed the one warning the dry run
+predicted, then gave up on Grafana after eight minutes:
+
+<!-- gate: output -->
+```
+I1031 17:11:31.890334   59522 warnings.go:107] "Warning: would violate PodSecurity \"restricted:latest\": host namespaces (hostNetwork=true), restricted volume types (volumes \"proc\", \"sys\", \"root\" use restricted volume type \"hostPath\")"
+Error: INSTALLATION FAILED: resource Deployment/monitoring/kube-prometheus-stack-grafana not ready. status: InProgress, message: Available: 0/1
+context deadline exceeded
+```
+
+The API server restarted while the install ran. Before it, the restart counts
+in `kube-system` were 15 for the API server, 37 for the controller manager and
+39 for the scheduler. Afterwards they read:
+
+<!-- gate: output -->
+```
+NAME                                             READY   STATUS    RESTARTS         AGE
+etcd-sf-sched-control-plane                      1/1     Running   0                9h
+kube-apiserver-sf-sched-control-plane            1/1     Running   17 (60s ago)     9h
+kube-controller-manager-sf-sched-control-plane   1/1     Running   38 (4m1s ago)    9h
+kube-scheduler-sf-sched-control-plane            0/1     Running   40 (3m54s ago)   9h
+```
+
+A restarting control plane is the stop signal for a lab cluster, so the run
+was stopped and removed. The transcript shows the removal, the CRDs included.
+This is what the two namespaces held when it was stopped:
+
+<!-- gate: output -->
+```
+NAME                                                        READY   STATUS             RESTARTS      AGE
+alertmanager-kube-prometheus-stack-alertmanager-0           2/2     Running            0             11m
+kube-prometheus-stack-grafana-57d9867647-jmfnk              2/3     Running            1 (45s ago)   12m
+kube-prometheus-stack-kube-state-metrics-78dc75b868-d62m8   0/1     CrashLoopBackOff   5 (68s ago)   12m
+kube-prometheus-stack-operator-dbf7f9444-p2826              1/1     Running            0             12m
+prometheus-kube-prometheus-stack-prometheus-0               2/2     Running            0             11m
+```
+
+<!-- gate: output -->
+```
+NAME                                                   READY   STATUS    RESTARTS   AGE
+kube-prometheus-stack-prometheus-node-exporter-b6cbm   1/1     Running   0          12m
+kube-prometheus-stack-prometheus-node-exporter-jm6d5   1/1     Running   0          12m
+kube-prometheus-stack-prometheus-node-exporter-wf8kh   1/1     Running   0          12m
+```
+
+Read it for the security claim, not for the failure. A Pod that a namespace
+refuses shows up as a `FailedCreate` event on its controller, and the cluster
+held none:
+
+```sh
+kubectl get events -A --field-selector reason=FailedCreate
+```
+
+<!-- gate: output -->
+```
+No resources found
+```
+
+So the Pods that the install got as far as creating in `monitoring`, among
+them Prometheus and Alertmanager, which the dry run could not judge, were
+admitted by a namespace that enforces `restricted`. The three node-exporter
+Pods run in `node-exporter`. Grafana was 2/3 ready and
+kube-state-metrics was in `CrashLoopBackOff` when the run stopped. Their logs
+were not read, so this lab does not say why.
+
+**Not run on this lab:** a stack with every Pod Ready, Prometheus's list of
+active targets and a Grafana login attempt. There is no output for them here.
+On a cluster you own, open both UIs through a port-forward, which stays local:
 
 ```sh
 kubectl -n monitoring port-forward svc/kube-prometheus-stack-prometheus 9090:9090 &
 # Prometheus UI: http://localhost:9090  (Status -> Targets shows what it scrapes)
 kubectl -n monitoring port-forward svc/kube-prometheus-stack-grafana 3000:80 &
 # Grafana: http://localhost:3000 (user admin; the password is in grafana-admin)
+```
+
+Then check the two claims this section makes about the running stack. The
+first lists every active target with its health. The second sends Grafana's
+API a request with no credentials, and a `401` means the login is enforced:
+
+```sh
+curl -s 'localhost:9090/api/v1/targets?state=active' \
+  | jq -r '.data.activeTargets[] | [.labels.job, .labels.namespace, .health] | @tsv'
+curl -s -o /dev/null -w '%{http_code}\n' localhost:3000/api/org
 ```
 
 ### 3. Scrape the Bookstore: a ServiceMonitor
@@ -516,8 +680,10 @@ Rule 10 is the only edge into `monitoring`, and its `from` entry needs both
 selectors. Two stand-in pods in that namespace show it. The first carries
 `app.kubernetes.io/name: prometheus`, the label to check on the chart's real
 Prometheus pods with `kubectl -n monitoring get pods --show-labels` once the
-stack runs. The second carries a Grafana label. This lab did not run the
-stack, so the stand-ins are the test.
+stack runs. The second carries a Grafana label. This lab ran the Bookstore
+without the stack, so the stand-ins are the test. node-exporter is not part
+of it: the DaemonSet lives in its own namespace and is not a source this rule
+admits.
 
 ```sh
 kubectl -n monitoring create serviceaccount standin
@@ -817,13 +983,14 @@ spec:
 Checklist:
 
 - [ ] metrics-server installed (`kubectl top` works) — HPA prerequisite
-- [ ] Prometheus stack in its own (non-restricted) `monitoring` namespace
+- [ ] Prometheus stack in its own `monitoring` namespace, labelled `restricted`
 - [ ] App exposes `/metrics`; labels are **bounded** (no IDs/paths)
 - [ ] ServiceMonitor carries the `release:` label Prometheus selects on
 - [ ] Alerts are symptom-based (errors/latency/SLO), not CPU
 - [ ] NetworkPolicy admits only the Prometheus pods to app `:8080`
 - [ ] No Ingress or Gateway rule matches `/metrics`
-- [ ] `monitoring` is a registered exception; Grafana's login is a Secret
+- [ ] node-exporter alone is in the privileged `node-exporter` namespace, a
+  registered exception; Grafana's login is a Secret
 - [ ] Retention/long-term storage and cardinality budget decided
 
 ## Test your understanding
@@ -880,6 +1047,25 @@ Checklist:
    receive for `/api/books/metrics`, including `stripPrefix` Middlewares and
    regex captures such as `(.*)`, and send that request to catalog to see the
    status.
+
+   </details>
+
+7. **node-exporter needs host networking and host paths. A teammate suggests
+   labelling `monitoring` as `privileged` so the whole stack installs in one
+   namespace. What is wrong with that, and what does the chart give you
+   instead?**
+   <details><summary>Show answer</summary>
+
+   Pod Security labels work per namespace, and they select a level with
+   nothing in between ([05.02](../05-security/02-pod-security.md)). A
+   `privileged` `monitoring` would stop checking Prometheus, Alertmanager,
+   Grafana, the operator and kube-state-metrics, and any Pod created there
+   later, to give one DaemonSet what it needs. The chart's
+   `prometheus-node-exporter.namespaceOverride` puts that DaemonSet in a
+   namespace of its own, `node-exporter`. That namespace is labelled
+   `privileged`, registered with a reason and an expiry, and keeps audit and
+   warn at `restricted`, so the DaemonSet's warning stays visible. `monitoring`
+   stays `restricted`.
 
    </details>
 

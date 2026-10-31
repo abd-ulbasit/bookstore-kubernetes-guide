@@ -31,6 +31,13 @@ versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   principle, and records what a real pipeline run has and has not proved.
 - README says the guide is being rewritten security-first and which chapters
   are done.
+- 06.01 installs node-exporter in a namespace of its own, `node-exporter`,
+  through the chart's `prometheus-node-exporter.namespaceOverride`. That
+  namespace is the registered exception, at `privileged`. `monitoring` stays
+  at `restricted`, which fixes a privileged component sharing a namespace
+  with Prometheus, Alertmanager and Grafana. The registry entry, the chapter,
+  the lab transcript and the install hints in the Helm and Kustomize trees
+  follow. The renders still hold: Helm 49, Kustomize 45, 49 and 48.
 - The Bookstore NetworkPolicies let the app reach its own data tier. They
   admitted only catalog to postgres and nobody to redis, so orders, the
   migration Job and the catalog cache timed out on a cluster that enforces

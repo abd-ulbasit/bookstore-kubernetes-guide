@@ -92,7 +92,7 @@ CRD/operator below or the API server rejects it with `no matches for kind ...`
 
 | Toggle | Needs | Install |
 |---|---|---|
-| `serviceMonitor.enabled` / `prometheusRule.enabled` | Prometheus Operator CRDs | `helm install kube-prometheus-stack prometheus-community/kube-prometheus-stack -n monitoring --create-namespace` |
+| `serviceMonitor.enabled` / `prometheusRule.enabled` | Prometheus Operator CRDs | Install kube-prometheus-stack as in Part 06 ch.01 section 2: `monitoring` at `restricted`, node-exporter alone in its own `node-exporter` namespace |
 | `keda.enabled` | KEDA CRDs + operator, and a Secret you create | Install KEDA from a pinned chart into a labelled namespace (Part 07 ch.01), then `kubectl create secret generic` the connection Secret and set `keda.connectionSecretName` |
 | `ingress.traefikRewrite.enabled` | Traefik CRDs (`traefik.io/v1alpha1` Middleware) | The Traefik chart installs them (Part 02 ch.04 step 2) |
 | `gateway.enabled` | Gateway API CRDs + a controller | Gateway API standard CRDs + Traefik with its Gateway provider (Part 02 ch.05 step 1 gives the install and the CRD version; `gateway.controllerName` defaults to `traefik.io/gateway-controller`; change it for another implementation) |
