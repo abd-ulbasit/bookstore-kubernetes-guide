@@ -556,9 +556,40 @@ the `82-` HPA are built-ins and dry-run cleanly.
 
 This lab run did not reach the scale-out. The HPA had no metric to read, and
 KEDA was not installed, so neither the catalog HPA nor the queue scaler moved.
-Run the load yourself on a cluster whose metrics-server serves, once the KEDA install in step 3 has rolled out. Use a load
-generator image pinned by digest, and give it the same restricted
-securityContext as the workloads.
+A second pass did not change that. It needed a metrics-server that serves, and
+the ways to get one were closed. A kind cluster built with `serverTLSBootstrap`
+(the route in [ch.01 step 1](01-observability-metrics.md)) was not started,
+because the lab host's container engine did not answer an image listing within
+three minutes. Installing the chart on the shared lab cluster would have
+written a RoleBinding into `kube-system`, a namespace the run does not own, and
+switching kubelet verification off is not something this guide teaches. So no
+HPA ran under load here, and nothing below is a measured result.
+
+Run the load yourself on a cluster whose metrics-server serves, once the KEDA
+install in step 3 has rolled out. Use the curl load Job and the two
+NetworkPolicies from [06.06 section
+1](06-capacity-and-cost.md#1-measure-catalogs-real-usage). It already uses a
+curl image pinned by digest and the restricted `securityContext`. One change
+is needed. The Job runs 180 seconds, and the HPA needs longer to reach its
+ceiling: the `scaleUp` policy above takes the larger of two more Pods or a
+doubling every 60 seconds, after a 60 second stabilization window. From 2
+replicas that is 4, then 6, so edit `+ 180` in the Job's loop to `+ 420`. Then
+watch the HPA from a second shell:
+
+```sh
+kubectl get hpa catalog -n bookstore -w
+```
+
+The expectation follows from the manifest, not from a run. Each catalog Pod
+requests 50m, so the 70% target is 35m of CPU per Pod, and the load has to keep
+every Pod above that. Read the usage with `kubectl top pods -n bookstore`. If
+TARGETS stays under 70%, the load is too light, so raise the Job's
+`parallelism` before suspecting the HPA. Once TARGETS holds above the target,
+REPLICAS should go 2, 4, 6 and stop at `MAXPODS` while the load lasts. It must
+not pass 6 however high the metric reads, which is the property that bounds a
+cost attack. If it does, check `maxReplicas` on the object you applied. After
+the Job ends, the 300 second `scaleDown` stabilization holds the replicas for
+five minutes before they fall.
 
 Orders publishes to the queue only when `AMQP_URL` is set. `14-` leaves it
 unset on purpose (its header explains), so the queue stays empty until that

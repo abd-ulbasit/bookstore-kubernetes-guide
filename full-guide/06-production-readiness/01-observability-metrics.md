@@ -196,8 +196,11 @@ kubectl rollout status deployment/catalog -n bookstore
 Install it with Helm into a namespace of its own, labelled `restricted`. The
 chart's `securityContext` values already set what `restricted` asks for
 (non-root, a read-only root filesystem, every capability dropped, the
-`RuntimeDefault` seccomp profile), and the install keeps them. The chart does
-not go into `kube-system`, which this chapter does not relabel:
+`RuntimeDefault` seccomp profile), and the install keeps them. The workload does
+not go into `kube-system`, which this chapter does not relabel. The chart still
+writes one RoleBinding there, `metrics-server-auth-reader`, which binds the
+`extension-apiserver-authentication-reader` Role to metrics-server's
+ServiceAccount so that it can read the API server's authentication ConfigMap:
 
 ```sh
 kubectl create namespace metrics-server
@@ -254,7 +257,10 @@ reference](https://kubernetes.io/docs/reference/command-line-tools-reference/kub
 Each serving certificate request then waits for approval, with
 `kubectl certificate approve`, before the kubelet serves its certificate.
 A kind configuration would have to set that up, and this lab cluster does not
-have one. So on kind this chapter stops at the refusal. Until metrics-server
+have one. A second pass meant to build such a cluster and did not start,
+because the lab host's container engine did not answer an image listing within
+three minutes. So the route is cited here and was not run, and on kind this
+chapter stops at the refusal. Until metrics-server
 serves, `kubectl get apiservice v1beta1.metrics.k8s.io` reports `False
 (MissingEndpoints)`, and the HPA in [ch.04](04-autoscaling.md) has no resource
 metrics on this cluster.
