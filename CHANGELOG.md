@@ -41,6 +41,13 @@ versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   templates has a `sizeLimit`; the two teaching Pods (`01-`, `02-`) were the
   last without one. Chapter 01.01's baseline shows the cap, and its `fsGroup`
   text says the need depends on the storage driver.
+- Whole-guide sweeps after the rewrite. Every `link-later` marker is a
+  link, 10.04 and the glossary name Traefik where they named ingress-nginx,
+  10.02 says why the platform tree pins EKS module v20, the README status
+  and the chapter counts (123 in Parts 00 to 15) match the tree, the Part 00
+  and Part 05 contents lists and the Appendix F tag index include the new
+  chapters, and `.gitattributes` no longer union-merges
+  `security/namespace-exceptions.yaml`.
 - `SECURITY-SCAN.md` is rewritten around the exceptions registry
   (`.trivyignore.yaml` and `security/namespace-exceptions.yaml`). It corrects
   the platform RBAC count, the Backstage entry and the "permissive examples"
@@ -154,7 +161,9 @@ versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `15-day-to-day-production-ops/` joins the enforced list.
 - Part 14 EKS in production (14.01 to 14.17) is rewritten security-first, with threats and controls in each chapter, the Terraform validated offline and nothing run on AWS, and `14-eks-in-production-a-to-z/` joins the enforced list.
 - Appendix A to F is rewritten security-first (the kubectl cheat sheet loses
-  its exam section), and `appendix/` joins the enforced list.
+  its exam section). It holds no manifest for the manifest gates to judge, so
+  it stays off the enforced list, and the lab-evidence gate checks its lab
+  records.
 - Part 06 Production readiness (06.01 to 06.06) is rewritten security-first,
   with the 06.05 PodDisruptionBudget drain run on a three-node kind cluster,
   and `06-production-readiness/` joins the enforced list.

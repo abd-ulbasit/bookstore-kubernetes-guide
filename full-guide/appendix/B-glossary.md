@@ -1,8 +1,8 @@
 # Appendix B — Glossary
 
 > **Seeded with the original guide; expanded as new Parts shipped.** Every
-> significant term and acronym introduced across the guide — currently
-> **Parts 00–15 (115 chapters)** — appears here, with a precise 1–3 sentence
+> significant term and acronym introduced across the guide (currently
+> **Parts 00–15, 123 chapters**) appears here, with a precise 1–3 sentence
 > definition and a link to the chapter that defines or most-covers it.
 > Definitions are deliberately brief; the linked chapter has the full
 > treatment and the "why".

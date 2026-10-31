@@ -913,8 +913,8 @@ for both plans, on purpose: the same platform serves as the
 substrate for **operating** the infrastructure and for **changing**
 the application on top of it.
 
-**The HUGE through-line — the whole-guide arc.** Fifteen Parts,
-115 chapters, one platform. The arc, named:
+**The HUGE through-line: the whole-guide arc.** Sixteen Parts,
+123 chapters, one platform. The arc, named:
 
 - **Parts 00-09** built a **working Kubernetes application** —
   the original [`examples/bookstore/`](../examples/bookstore/)
@@ -980,7 +980,7 @@ Part 15's analog, closing the guide:
 > structure; the **honesty** is the practice.**
 
 **Pointer forward.** If you have absorbed the full guide — Parts
-00 through 15, all 115 chapters, the working app turned cloud-
+00 through 15, all 123 chapters, the working app turned cloud-
 native turned production-shape turned operable turned owned —
 you have what Google's SRE Book ch.32 describes as the skill set
 of **a senior site-reliability engineer**: someone who can be

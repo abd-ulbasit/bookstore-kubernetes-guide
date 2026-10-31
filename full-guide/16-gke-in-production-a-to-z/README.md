@@ -1,7 +1,7 @@
 # Part 16 — GKE in production, A to Z
 
 The GCP counterpart to [Part 14 (EKS)](../14-eks-in-production-a-to-z/), which
-is 17 chapters and 94,241 words.
+is 17 chapters and 109,021 words.
 
 ## The rule for this Part, which is different from every other Part
 

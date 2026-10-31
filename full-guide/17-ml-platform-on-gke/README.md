@@ -3,7 +3,7 @@
 [Part 12](../12-kubernetes-for-machine-learning/) teaches the ML platform on
 Kubernetes: the device-plugin model, Kueue and JobSet, the Kubeflow Training
 Operator, KServe, Argo Workflows, and the MLOps maturity ladder. It is 8
-chapters and 38,822 words, and it is thorough.
+chapters and 60,901 words, and it is thorough.
 
 **None of it has been run on a GPU.** Part 17 is where it gets run.
 

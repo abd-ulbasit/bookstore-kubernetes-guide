@@ -2,10 +2,11 @@
 
 This is *The Bookstore Guide* — a hands-on Kubernetes learning resource that
 takes a reader from container fundamentals to running multi-region
-production platforms across 16 Parts and 115 chapters, anchored on one
+production platforms across 16 Parts and 123 chapters, anchored on one
 evolving microservices application called *Bookstore*. Concepts compound
 instead of resetting per topic: every chapter's hands-on section advances
-the *same* app.
+the *same* app. Two more Parts, 16 and 17 on GKE, are outlines until their
+labs have run.
 
 ## Author
 
