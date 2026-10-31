@@ -165,4 +165,129 @@ $ kubectl get validatingwebhookconfigurations,validatingadmissionpolicies,valida
 0
 [exit 1]
 
+
+## Review fixes: Audit and Warn first, then Deny; NetworkPolicy test
+# Run 2026-10-31 on the same lab cluster, after the first run above. Names:
+# the VAP part keeps p11-01-bookstore, and the NetworkPolicy part keeps
+# p11-01-operator-system. The test client namespace is p11-01-np (the chapter
+# calls it webhook-test). Its Pods are np-client and np-node (host network),
+# and np-server is the stand-in for the operator Pod. The chapter calls them
+# client, host-client and the operator Pod. The Service is
+# bookstore-operator-webhook-service in p11-01-operator-system.
+# The VAP part is the first run of the Audit and Warn steps. The namespaces
+# it used are deleted before the network test, which creates them again.
+# Two earlier attempts at the network test are not kept: one hit an etcd timeout
+# on the shared cluster, and one raced the Service endpoints. Exploratory runs of
+# the pod-IP path are not kept either. The ipBlock in the chapter comes from the
+# Service-path run below.
+
+$ kubectl apply -f ns.yaml
+namespace/p11-01-bookstore created
+namespace/p11-01-operator-system created
+[exit 0]
+$ kubectl get namespaces p11-01-bookstore p11-01-operator-system -L pod-security.kubernetes.io/enforce
+NAME                     STATUS   AGE   ENFORCE
+p11-01-bookstore         Active   1s    restricted
+p11-01-operator-system   Active   1s    restricted
+[exit 0]
+$ kubectl apply -f vap-audit.yaml
+validatingadmissionpolicy.admissionregistration.k8s.io/bookstore-require-part-of created
+validatingadmissionpolicybinding.admissionregistration.k8s.io/bookstore-require-part-of created
+[exit 0]
+$ sleep 10
+[exit 0]
+$ sed '/app.kubernetes.io\/part-of/d' probe.yaml | kubectl apply -f -
+serviceaccount/probe created
+Warning: Validation failed for ValidatingAdmissionPolicy 'bookstore-require-part-of' with binding 'bookstore-require-part-of': pods in the Bookstore namespace must carry app.kubernetes.io/part-of
+pod/probe created
+[exit 0]
+$ kubectl delete pod probe -n p11-01-bookstore --wait=true
+pod "probe" deleted from p11-01-bookstore namespace
+[exit 0]
+$ kubectl patch validatingadmissionpolicybinding bookstore-require-part-of --type=merge -p '{"spec":{"validationActions":["Deny"]}}'
+validatingadmissionpolicybinding.admissionregistration.k8s.io/bookstore-require-part-of patched
+[exit 0]
+$ sleep 10
+[exit 0]
+$ sed '/app.kubernetes.io\/part-of/d' probe.yaml | kubectl apply -f -
+serviceaccount/probe unchanged
+The pods "probe" is invalid: : ValidatingAdmissionPolicy 'bookstore-require-part-of' with binding 'bookstore-require-part-of' denied request: pods in the Bookstore namespace must carry app.kubernetes.io/part-of
+[exit 1]
+$ kubectl get pod probe -n p11-01-bookstore
+Error from server (NotFound): pods "probe" not found
+[exit 1]
+$ kubectl apply -f probe.yaml
+serviceaccount/probe unchanged
+pod/probe created
+[exit 0]
+$ kubectl delete pod probe -n p11-01-bookstore --wait=true
+pod "probe" deleted from p11-01-bookstore namespace
+[exit 0]
+$ kubectl delete namespace p11-01-np p11-01-operator-system --wait=true
+namespace "p11-01-np" deleted
+namespace "p11-01-operator-system" deleted
+[exit 0]
+
+$ kubectl create namespace p11-01-operator-system
+namespace/p11-01-operator-system created
+[exit 0]
+$ kubectl label namespace p11-01-operator-system pod-security.kubernetes.io/enforce=restricted
+namespace/p11-01-operator-system labeled
+[exit 0]
+$ kubectl create namespace p11-01-np
+namespace/p11-01-np created
+[exit 0]
+$ kubectl apply -f np-server.yaml
+pod/np-server created
+[exit 0]
+$ kubectl apply -f np-svc.yaml
+service/bookstore-operator-webhook-service created
+[exit 0]
+$ kubectl apply -f np-client.yaml -f np-node.yaml
+pod/np-client created
+pod/np-node created
+[exit 0]
+$ kubectl wait --for=condition=Ready pod/np-server -n p11-01-operator-system --timeout=180s
+pod/np-server condition met
+[exit 0]
+$ kubectl wait --for=condition=Ready pod/np-client pod/np-node -n p11-01-np --timeout=180s
+pod/np-client condition met
+pod/np-node condition met
+[exit 0]
+CIP=10.96.189.193 SRV=10.244.0.214
+$ kubectl exec -n p11-01-np np-client -- curl -s -o /dev/null -w '%{http_code}\n' -m 3 http://10.96.189.193:443/
+404
+[exit 0]
+$ kubectl exec -n p11-01-np np-node -- curl -s -o /dev/null -w '%{http_code}\n' -m 3 http://10.96.189.193:443/
+404
+[exit 0]
+$ sed 's/SOURCE/172.18.0.2/' webhook-template.yaml > webhook-final.yaml && kubectl apply -f webhook-final.yaml
+networkpolicy.networking.k8s.io/webhook-apiserver-only created
+[exit 0]
+$ kubectl exec -n p11-01-np np-client -- curl -s -o /dev/null -w '%{http_code}\n' -m 3 http://10.96.189.193:443/
+000
+command terminated with exit code 28
+[exit 28]
+$ kubectl exec -n p11-01-np np-node -- curl -s -o /dev/null -w '%{http_code}\n' -m 3 http://10.96.189.193:443/
+404
+[exit 0]
+$ kubectl exec -n p11-01-np np-client -- curl -s -o /dev/null -w '%{http_code}\n' -m 3 http://10.244.0.214:8081/healthz
+000
+command terminated with exit code 7
+[exit 7]
+$ kubectl delete namespace p11-01-np p11-01-operator-system --wait=true
+namespace "p11-01-np" deleted
+namespace "p11-01-operator-system" deleted
+[exit 0]
+
+$ kubectl delete validatingadmissionpolicybinding bookstore-require-part-of
+validatingadmissionpolicybinding.admissionregistration.k8s.io "bookstore-require-part-of" deleted
+[exit 0]
+$ kubectl delete validatingadmissionpolicy bookstore-require-part-of
+validatingadmissionpolicy.admissionregistration.k8s.io "bookstore-require-part-of" deleted
+[exit 0]
+$ kubectl delete namespace p11-01-bookstore --wait=true
+namespace "p11-01-bookstore" deleted
+[exit 0]
+
 # done

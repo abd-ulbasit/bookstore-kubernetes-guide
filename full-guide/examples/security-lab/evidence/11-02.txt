@@ -297,3 +297,43 @@ ensure CRDs are installed first
 resource mapping not found for name: "acme-legacy" namespace: "" from "full-guide/examples/bookstore/operator/config/samples/bookstore_v1beta1_bookstoretenant.yaml": no matches for kind "BookstoreTenant" in version "bookstore.example.com/v1alpha1"
 ensure CRDs are installed first
 [exit 1]
+
+## Review fix: the update paths of the reviewed operator role
+# Run 2026-10-31 on the same lab cluster. The reviewed config/rbac/role.yaml
+# was applied as a ClusterRole, with a ClusterRoleBinding to a ServiceAccount in
+# p11-02-operator-system (the lab copy of bookstore-operator-system). Both were
+# removed at the end of this section. The can-i checks answer for that binding.
+$ kubectl create namespace p11-02-operator-system
+namespace/p11-02-operator-system created
+[exit 0]
+$ kubectl apply -f config/rbac/role.yaml
+clusterrole.rbac.authorization.k8s.io/bookstore-operator-manager-role created
+[exit 0]
+$ kubectl apply -f manager-binding.yaml
+clusterrolebinding.rbac.authorization.k8s.io/bookstore-operator-manager-rolebinding created
+[exit 0]
+$ kubectl auth can-i update namespaces --as=system:serviceaccount:p11-02-operator-system:bookstore-operator-controller-manager
+Warning: resource 'namespaces' is not namespace scoped
+
+yes
+[exit 0]
+$ kubectl auth can-i update configmaps -n kube-system --as=system:serviceaccount:p11-02-operator-system:bookstore-operator-controller-manager
+yes
+[exit 0]
+$ kubectl auth can-i delete namespaces --as=system:serviceaccount:p11-02-operator-system:bookstore-operator-controller-manager
+Warning: resource 'namespaces' is not namespace scoped
+
+no
+[exit 1]
+$ kubectl auth can-i create deployments -n kube-system --as=system:serviceaccount:p11-02-operator-system:bookstore-operator-controller-manager
+yes
+[exit 0]
+$ kubectl delete clusterrolebinding bookstore-operator-manager-rolebinding
+clusterrolebinding.rbac.authorization.k8s.io "bookstore-operator-manager-rolebinding" deleted
+[exit 0]
+$ kubectl delete clusterrole bookstore-operator-manager-role
+clusterrole.rbac.authorization.k8s.io "bookstore-operator-manager-role" deleted
+[exit 0]
+$ kubectl delete namespace p11-02-operator-system --wait=true
+namespace "p11-02-operator-system" deleted
+[exit 0]

@@ -487,13 +487,27 @@ rules:
 ```
 
 Now replace the reconciler's markers with one that asks for everything. Do this
-in a scratch copy, not in the tree:
+in a scratch copy, not in the tree. The marker to append is:
 
 ```go
 // +kubebuilder:rbac:groups=*,resources=*,verbs=*
 ```
 
-Regenerating the copy gives this ClusterRole:
+Run these commands from the repository root. They copy the operator's Go
+sources into a scratch directory, delete the reconciler's RBAC markers in that
+copy, append the wide marker, and run `controller-gen` on the copy only:
+
+```sh
+OP=$PWD/examples/bookstore/operator
+rm -rf wide && mkdir -p wide/out
+cp -R "$OP/api" "$OP/internal" "$OP/cmd" "$OP/hack" "$OP/go.mod" "$OP/go.sum" wide/
+sed -i.bak '/+kubebuilder:rbac/d' wide/internal/controller/bookstoretenant_controller.go
+printf '\n// +kubebuilder:rbac:groups=*,resources=*,verbs=*\n' >> wide/internal/controller/bookstoretenant_controller.go
+cd wide && "$OP/bin/controller-gen" rbac:roleName=bookstore-operator-manager-role paths="./api/..." paths="./internal/..." output:rbac:artifacts:config=out && cat out/role.yaml
+```
+
+Regenerating the copy gives this ClusterRole. Then run `cd ..` to leave the
+scratch directory:
 
 <!-- gate: output -->
 ```text
@@ -512,9 +526,13 @@ rules:
 ```
 
 That one line grants every verb on every kind in every API group, Secrets and
-RoleBindings included. The escalation check that normally stops a principal
-from granting more than it holds does not stop this one, because the operator
-holds everything. It can bind itself, or anyone, to `cluster-admin`.
+RoleBindings included. The RBAC escalation check stops a principal from
+creating or updating a binding to a role that holds permissions the principal
+does not, unless the principal has the `bind` verb on that role
+([RBAC: restrictions on role binding creation or update](https://kubernetes.io/docs/reference/access-authn-authz/rbac/#restrictions-on-role-binding-creation-or-update)).
+A principal that holds `*` on `*` holds every permission, so the check passes
+for any role, `cluster-admin` included. By that rule, the operator can bind any
+subject to `cluster-admin`. This chapter does not run that escalation.
 
 Narrow verbs do not narrow where a grant applies, though. A ClusterRole applies
 in every namespace. Even the markers above leave a compromised operator able to
@@ -534,6 +552,31 @@ no
 # ...
 no
 # ...
+yes
+```
+
+Two more checks cover the `update` verb, which the printed role also grants on
+Namespaces and ConfigMaps. An operator that can update a Namespace can remove
+the Pod Security labels from it, which switches off the restricted floor from
+[11.01](01-admission-webhooks.md) for that namespace. An operator that can
+update a ConfigMap in `kube-system` can change configuration that cluster
+components read, such as kube-proxy's.
+
+```sh
+kubectl auth can-i update namespaces --as=system:serviceaccount:bookstore-operator-system:bookstore-operator-controller-manager
+kubectl auth can-i update configmaps -n kube-system --as=system:serviceaccount:bookstore-operator-system:bookstore-operator-controller-manager
+```
+
+<!-- gate: output -->
+
+```text
+Warning: resource 'namespaces' is not namespace scoped
+yes
+```
+
+<!-- gate: output -->
+
+```text
 yes
 ```
 
@@ -859,7 +902,9 @@ bookstore-tenant-acme` returns NotFound.
 kubectl -n bookstore-operator-system logs deploy/bookstore-operator-controller-manager --tail=300 | grep -E 'Conversion webhook'
 ```
 
-On the lab, that grep returned one line, `Conversion webhook enabled`, for the `v1beta1` kind. The manager logs it at startup, so a missing route shows up here before any conversion is tried.
+On the lab, that grep returned one line, `Conversion webhook enabled`, for
+the `v1beta1` kind. The manager logs it at startup, so a missing route shows
+up here before any conversion is tried.
 
 The CRD declares `conversion.strategy: Webhook` with `v1beta1` as storage;
 [`api/v1alpha1/bookstoretenant_conversion.go`](../examples/bookstore/operator/api/v1alpha1/bookstoretenant_conversion.go)
@@ -994,7 +1039,7 @@ kind delete cluster --name bookstore
   ordered teardown. It **must be idempotent** (it can run more than once) and
   **must be removed** or the object is stuck `Terminating` forever (a classic
   operator bug). **This chapter's reference operator has no state outside the
-  cluster, so its `finalizeTenant` only emits an Event**: it is the hook where
+  cluster, so its `finalizeTenant` only emits an Event**: it is the place where
   such teardown would go, and an operator with nothing to tear down should
   drop the finalizer (see the Production note below).
 - **The status subresource keeps spec and status from fighting.**
@@ -1217,8 +1262,9 @@ Checklist:
    `list` and `watch` (the cache), `create` and `update` on the children, and
    `update` on the status and finalizers subresources. A forbidden error is
    the RBAC working: it names the missing verb, and the fix is that verb, not a
-   wildcard. Check the grant with `kubectl auth can-i ... --as=system:serviceaccount:<ns>:<sa>`
-   and read `config/rbac/role.yaml` after each marker change.
+   wildcard. Check the grant with
+   `kubectl auth can-i ... --as=system:serviceaccount:<ns>:<sa>` and read
+   `config/rbac/role.yaml` after each marker change.
 
    </details>
 
