@@ -84,6 +84,7 @@ the bounds and access rules around the scaler, not the HPA algorithm.
 | A traffic spike or a message flood scales the workload past what you can pay for (a cost attack) | `maxReplicas` on the HPA and `maxReplicaCount` on the ScaledObject, both inside the namespace ResourceQuota | [01.03](../01-core-workloads/03-resources-and-qos.md), [06.06](06-capacity-and-cost.md) |
 | A subject that can edit an HPA or ScaledObject raises its bounds or retargets it | No workload ServiceAccount holds rights on autoscaling objects; only the team that owns the scaling writes them | [05.01](../05-security/01-authn-authz-rbac.md) |
 | The metric source is forged or drifts, so someone else's number sets the replica count | Scale on a backlog that only trusted producers can write, and give the scaler a broker user that can read queue length and nothing else | [05.01](../05-security/01-authn-authz-rbac.md) |
+| metrics-server skips kubelet certificate checks (`--kubelet-insecure-tls`), so whatever answers at a node address sets the CPU the HPA sees | Keep verification on. Give each kubelet a serving certificate from the cluster CA (`serverTLSBootstrap`), and approve each request only after checking that the requestor is that node and the names are its own (step 0) | [06.01](01-observability-metrics.md) |
 | The external metrics API serves a value nobody checks, or goes down | The APIService that serves `external.metrics.k8s.io` is cluster-wide. Install it from a pinned chart, keep its RBAC narrow and monitor it. When it is down the HPA cannot read that metric and skips the scale-downs the others suggest | [06.01](01-observability-metrics.md) |
 | The scaler's broker credential is readable by tenants | The credential sits in a Secret that a TriggerAuthentication names, never inline in the ScaledObject | [03.02](../03-config-and-storage/02-secrets.md) |
 | Pending Pods grow the node pool without limit | The node autoscaler's own maximum, set by the platform, bounds the nodes that `maxReplicas` asks for | [10.06](../10-cloud-and-managed-kubernetes/06-node-autoscaling-cost-multicloud.md) |
@@ -152,13 +153,19 @@ flowchart LR
 
 **Assumed working directory: the guide repo root (`full-guide/`).**
 
-We will: (1) add the **payments-worker** Deployment (its first manifest); (2)
+We will: (0) give the cluster a resource metrics API that still verifies its
+kubelets; (1) add the **payments-worker** Deployment (its first manifest); (2)
 add an **HPA** on catalog; (3) install **KEDA** and add a **ScaledObject**
-scaling payments-worker on RabbitMQ queue depth; (4) describe the load tests,
-which this lab run did not reach.
+scaling payments-worker on RabbitMQ queue depth; (4) start the load Job, which
+this lab run had to stop early.
 
-The output blocks come from a lab cluster whose node has a different name, and
-its namespaces had other names. The commands use the chapter's names.
+The output blocks come from two lab clusters whose nodes have other names than
+yours. Step 1, step 3, the quota and access checks in step 2 and the orders log
+in step 4 ran on a single-node cluster whose namespaces had other names. The
+metrics API in step 0, the HPA readings in step 2 and the load Job in step 4
+ran on a three-node cluster with the chapter's own namespace names. The
+transcript's header lists both runs and what each did not do. The commands use
+the chapter's names.
 
 ### 0. Prerequisites (self-bootstrapping)
 
@@ -170,13 +177,68 @@ kubectl apply -f examples/bookstore/raw-manifests/13-rabbitmq.yaml
 kubectl rollout status deployment/rabbitmq -n bookstore
 ```
 
-The HPA's CPU metric needs a resource metrics API, which metrics-server serves.
+**Catalog needs room for its replicas.** Catalog spreads its replicas over the
+nodes with a hard rule: `topologySpreadConstraints` on
+`kubernetes.io/hostname`, `maxSkew: 1`, `DoNotSchedule`. On a three-node kind
+cluster the control-plane node carries a `NoSchedule` taint, but the default
+`nodeTaintsPolicy: Ignore` still counts it as an empty domain
+([04.02](../04-scheduling/02-affinity-taints-topology.md) explains the policy).
+Each worker may then hold one replica, and the third waits:
+
+```sh
+kubectl get pods -n bookstore -l app=catalog -o wide
+kubectl get events -n bookstore --field-selector reason=FailedScheduling
+```
+
+<!-- gate: output -->
+```
+NAME                       READY   STATUS    RESTARTS   AGE     IP             NODE               NOMINATED NODE   READINESS GATES
+catalog-86d7dc55cc-6l268   1/1     Running   0          6m18s   10.244.2.112   sf-sched-worker2   <none>           <none>
+catalog-86d7dc55cc-nd99d   1/1     Running   0          6m17s   10.244.1.80    sf-sched-worker    <none>           <none>
+catalog-86d7dc55cc-ptvkj   0/1     Pending   0          6m17s   <none>         <none>             <none>           <none>
+```
+
+<!-- gate: output -->
+```
+LAST SEEN   TYPE      REASON             OBJECT                         MESSAGE
+54s         Warning   FailedScheduling   pod/catalog-86d7dc55cc-ptvkj   0/3 nodes are available: 1 node(s) had untolerated taint(s), 2 node(s) didn't match pod topology spread constraints. preemption: 0/3 nodes are available: 1 No preemption victims found for incoming pod, 1 Preemption is not helpful for scheduling, 1 node(s) didn't match pod topology spread constraints.
+```
+
+This matters here because `maxReplicas` only caps what the HPA asks for. The
+scheduler decides what is placed, and on a cloud cluster a node autoscaler
+answers a Pod left `Pending` by adding a node (see the
+[threats](#threats-and-controls)).
+The lab fixed it on the cluster object and left the shipped file alone. The
+patch adds `nodeTaintsPolicy: Honor`, which leaves out a node the Pod's
+tolerations do not cover when it counts domains. A single-node cluster does
+not need it:
+
+```sh
+kubectl patch deployment catalog -n bookstore --type json \
+  -p '[{"op":"add","path":"/spec/template/spec/topologySpreadConstraints/0/nodeTaintsPolicy","value":"Honor"}]'
+kubectl rollout status deployment/catalog -n bookstore
+kubectl get pods -n bookstore -l app=catalog -o wide
+```
+
+<!-- gate: output -->
+```
+deployment.apps/catalog patched
+# ...
+deployment "catalog" successfully rolled out
+# ...
+NAME                       READY   STATUS        RESTARTS   AGE    IP             NODE               NOMINATED NODE   READINESS GATES
+catalog-74995c78bb-9csnp   1/1     Running       0          7s     10.244.1.82    sf-sched-worker    <none>           <none>
+catalog-74995c78bb-rnjch   1/1     Running       0          26s    10.244.2.113   sf-sched-worker2   <none>           <none>
+catalog-74995c78bb-zpbgk   1/1     Running       0          44s    10.244.1.81    sf-sched-worker    <none>           <none>
+catalog-86d7dc55cc-6l268   1/1     Terminating   0          7m3s   10.244.2.112   sf-sched-worker2   <none>           <none>
+```
+
+**A resource metrics API that checks the kubelets.** The HPA's CPU metric
+needs a resource metrics API, which metrics-server serves.
 [ch.01 step 1](01-observability-metrics.md) installs it and shows that on a
-kind node its kubelet certificate is refused, so a kind cluster built as this
-guide builds it serves no resource metrics. On a managed cluster, whose
-metrics-server serves, step 2 shows live CPU values. On the lab run for this
-chapter the APIService was not registered at all, which has the same effect.
-The checks below show that state:
+kind node the kubelet's certificate is refused, so the API stays down. This
+run took that install through to a working API with verification left on.
+First the state before it:
 
 ```sh
 kubectl get apiservice v1beta1.metrics.k8s.io
@@ -189,6 +251,145 @@ Error from server (NotFound): apiservices.apiregistration.k8s.io "v1beta1.metric
 # ...
 error: Metrics API not available
 ```
+
+Install the chart as ch.01 step 1 does, at its pinned version 3.14.0 in a
+namespace of its own labelled `restricted`. The Pod runs but never becomes
+ready, and the APIService has no endpoint behind it:
+
+```sh
+kubectl -n metrics-server get pods
+kubectl get apiservice v1beta1.metrics.k8s.io
+```
+
+<!-- gate: output -->
+```
+NAME                             READY   STATUS    RESTARTS   AGE
+metrics-server-c4994bc54-qlnvr   0/1     Running   0          43s
+# ...
+NAME                     SERVICE                         AVAILABLE                  AGE
+v1beta1.metrics.k8s.io   metrics-server/metrics-server   False (MissingEndpoints)   43s
+```
+
+The Pod's log says why. Each node's kubelet answered with a certificate that
+lists no IP address, and metrics-server refused it:
+
+```sh
+kubectl -n metrics-server logs deploy/metrics-server | grep 'Failed to scrape' | head -3
+```
+
+<!-- gate: output -->
+```
+E1031 12:48:31.000213       1 scraper.go:149] "Failed to scrape node" err="Get \"https://172.18.0.4:10250/metrics/resource\": tls: failed to verify certificate: x509: cannot validate certificate for 172.18.0.4 because it doesn't contain any IP SANs" node="sf-sched-worker"
+E1031 12:48:31.000755       1 scraper.go:149] "Failed to scrape node" err="Get \"https://172.18.0.5:10250/metrics/resource\": tls: failed to verify certificate: x509: cannot validate certificate for 172.18.0.5 because it doesn't contain any IP SANs" node="sf-sched-worker2"
+E1031 12:48:31.007548       1 scraper.go:149] "Failed to scrape node" err="Get \"https://172.18.0.3:10250/metrics/resource\": tls: failed to verify certificate: x509: cannot validate certificate for 172.18.0.3 because it doesn't contain any IP SANs" node="sf-sched-control-plane"
+```
+
+The refusal is the control working, and the fix keeps it. Each kubelet asks
+the cluster CA for a serving certificate that lists its own name and
+addresses, instead of signing one for itself. The kubelet configuration field
+is `serverTLSBootstrap: true`. On a new kind cluster, set it in the kind
+config under `kubeadmConfigPatches` with `kind: KubeletConfiguration`. This
+cluster was already running, so the loop below appends the line to each node's
+kubelet file (a kind node is a container named like the node), keeps the
+original as `config.yaml.orig` and restarts the kubelet. Every node then files
+a request that waits for approval:
+
+```sh
+for n in $(kubectl get nodes -o name | sed 's|node/||'); do
+  docker exec "$n" sh -c 'cp /var/lib/kubelet/config.yaml /var/lib/kubelet/config.yaml.orig && echo "serverTLSBootstrap: true" >> /var/lib/kubelet/config.yaml && systemctl restart kubelet && grep serverTLSBootstrap /var/lib/kubelet/config.yaml'
+done
+kubectl get csr
+```
+
+<!-- gate: output -->
+```
+serverTLSBootstrap: true
+serverTLSBootstrap: true
+serverTLSBootstrap: true
+# ...
+NAME        AGE   SIGNERNAME                      REQUESTOR                            REQUESTEDDURATION   CONDITION
+csr-5wktd   2s    kubernetes.io/kubelet-serving   system:node:sf-sched-worker          <none>              Pending
+csr-bjx5p   1s    kubernetes.io/kubelet-serving   system:node:sf-sched-worker2         <none>              Pending
+csr-jg8hl   3s    kubernetes.io/kubelet-serving   system:node:sf-sched-control-plane   <none>              Pending
+```
+
+The controller manager does not approve this signer's requests on its own
+([CSR signers](https://kubernetes.io/docs/reference/access-authn-authz/certificate-signing-requests/#kubernetes-signers)),
+and a blanket approval would hand a certificate for a node's address to
+whoever could file a request. Check each one first: the requestor must be the
+node it names, and the names and addresses inside the request must be that
+node's own. The loop prints both for every request, and the approval follows:
+
+```sh
+for c in $(kubectl get csr -o name); do
+  u=$(kubectl get "$c" -o jsonpath='{.spec.username}')
+  s=$(kubectl get "$c" -o jsonpath='{.spec.request}' | base64 -d | openssl req -noout -text | grep -A1 'Alternative Name' | tail -1 | sed 's/^ *//')
+  echo "${c#*/} $u $s"
+done
+kubectl certificate approve $(kubectl get csr -o name)
+```
+
+<!-- gate: output -->
+```
+csr-5wktd system:node:sf-sched-worker DNS:sf-sched-worker, IP Address:172.18.0.4
+csr-bjx5p system:node:sf-sched-worker2 DNS:sf-sched-worker2, IP Address:172.18.0.5
+csr-jg8hl system:node:sf-sched-control-plane DNS:sf-sched-control-plane, IP Address:172.18.0.3
+# ...
+certificatesigningrequest.certificates.k8s.io/csr-5wktd approved
+certificatesigningrequest.certificates.k8s.io/csr-bjx5p approved
+certificatesigningrequest.certificates.k8s.io/csr-jg8hl approved
+```
+
+Now the same metrics-server, unchanged, can verify the kubelets. It becomes
+ready, the APIService turns available, and `kubectl top` answers:
+
+```sh
+kubectl -n metrics-server rollout status deployment/metrics-server --timeout=300s
+kubectl get apiservice v1beta1.metrics.k8s.io
+kubectl top nodes
+```
+
+<!-- gate: output -->
+```
+deployment "metrics-server" successfully rolled out
+# ...
+NAME                     SERVICE                         AVAILABLE   AGE
+v1beta1.metrics.k8s.io   metrics-server/metrics-server   True        82s
+# ...
+NAME                     CPU(cores)   CPU(%)   MEMORY(bytes)   MEMORY(%)   
+sf-sched-control-plane   139m         3%       1139Mi          15%         
+sf-sched-worker          37m          0%       239Mi           3%          
+sf-sched-worker2         23m          0%       272Mi           3%          
+```
+
+Last, confirm that the fix did not switch verification off. The container
+arguments are the chart's defaults, and none of them is an insecure flag:
+
+```sh
+kubectl -n metrics-server get deploy metrics-server -o jsonpath='{.spec.template.spec.containers[0].args}{"\n"}'
+kubectl -n metrics-server get deploy metrics-server -o jsonpath='{.spec.template.spec.containers[0].args}' | grep -c insecure
+```
+
+<!-- gate: output -->
+```
+["--secure-port=10250","--cert-dir=/tmp","--kubelet-preferred-address-types=InternalIP,ExternalIP,Hostname","--kubelet-use-node-status-port","--metric-resolution=15s"]
+# ...
+0
+```
+
+> **The shortcut this run did not take.** Many guides end the story at the
+> refusal with `--kubelet-insecure-tls` on metrics-server. That flag is for a
+> throwaway lab only. It turns off the check that the kubelet answering is the
+> kubelet the cluster knows, so anything that can answer at a node's address
+> can feed metrics-server numbers, and the numbers set the replica counts and
+> so the bill. Production must not use it. The
+> [metrics-server FAQ](https://github.com/kubernetes-sigs/metrics-server/blob/master/FAQ.md)
+> names the flag and the secure setup. The count of `0` above is the check to
+> run on any cluster you inherit.
+
+The change stays on the cluster until you undo it. The lab put each original
+kubelet file back, restarted the kubelets, deleted the three requests and
+uninstalled metrics-server when it finished.
 
 
 ### 1. Add the payments-worker Deployment
@@ -317,40 +518,78 @@ kubectl get hpa catalog -n bookstore
 kubectl describe hpa catalog -n bookstore      # per-metric values + events
 ```
 
-On a cluster whose metrics-server serves, TARGETS shows the live CPU value
-against the 70% target. The lab cluster for this run served no resource
-metrics, so the HPA shows the state it reached:
+With the metrics API serving, TARGETS shows the live CPU against the 70%
+target. Idle catalog Pods use about 1m each, which is 2% of the 50m request:
 
 <!-- gate: output -->
 ```
-NAME      REFERENCE            TARGETS              MINPODS   MAXPODS   REPLICAS   AGE
-catalog   Deployment/catalog   cpu: <unknown>/70%   2         6         3          0s
+NAME      REFERENCE            TARGETS       MINPODS   MAXPODS   REPLICAS   AGE
+catalog   Deployment/catalog   cpu: 2%/70%   2         6         3          0s
 ```
 
-The describe output says why:
+The describe output says the metric is read and the count is inside the
+bounds:
 
 <!-- gate: output -->
 ```
 Conditions:
-  Type           Status  Reason                   Message
-  ----           ------  ------                   -------
-  AbleToScale    True    SucceededGetScale        the HPA controller was able to get the target's current scale
-  ScalingActive  False   FailedGetResourceMetric  the HPA was unable to compute the replica count: failed to get cpu utilization: unable to get metrics for resource cpu: unable to fetch metrics from resource metrics API: the server could not find the requested resource (get pods.metrics.k8s.io)
+  Type            Status  Reason               Message
+  ----            ------  ------               -------
+  AbleToScale     True    ScaleDownStabilized  recent recommendations were higher than current one, applying the highest recent recommendation
+  ScalingActive   True    ValidMetricFound     the HPA was able to successfully calculate a replica count from cpu resource utilization (percentage of request)
+  ScalingLimited  False   DesiredWithinRange   the desired count is within the acceptable range
 ```
+
+`ScalingActive True` means the HPA can read the metric. `ScalingLimited` is
+the condition to watch for the ceiling: it reads `False` while the desired
+count sits inside `minReplicas` and `maxReplicas`, and it changes to `True`
+when the bounds clip the answer.
+
+Catalog starts at 3 replicas, because `10-catalog-deploy.yaml` says so, and
+the floor is 2. The `scaleDown` window of 300 seconds makes the HPA wait
+before it takes the third one away. This loop samples the HPA and the Pods'
+CPU every 30 seconds for six minutes, with no load:
+
+```sh
+start=$(date +%s)
+while [ $(( $(date +%s) - start )) -lt 360 ]; do
+  echo "t=+$(( $(date +%s) - start ))s"
+  kubectl get hpa catalog -n bookstore --no-headers
+  kubectl top pods -n bookstore -l app=catalog --no-headers
+  sleep 30
+done
+```
+
+The last three samples show the window ending. The Pods stay at 1m (the
+shipped target is far above that), and the HPA gives up the third replica
+only after five minutes:
 
 <!-- gate: output -->
 ```
-  Type     Reason                        Age   From                       Message
-  ----     ------                        ----  ----                       -------
-  Warning  FailedGetResourceMetric       10s   horizontal-pod-autoscaler  failed to get cpu utilization: unable to get metrics for resource cpu: unable to fetch metrics from resource metrics API: the server could not find the requested resource (get pods.metrics.k8s.io)
-  Warning  FailedComputeMetricsReplicas  10s   horizontal-pod-autoscaler  invalid metrics (1 invalid out of 1), first error is: failed to get cpu resource metric value: failed to get cpu utilization: unable to get metrics for resource cpu: unable to fetch metrics from resource metrics API: the server could not find the requested resource (get pods.metrics.k8s.io)
+t=+275s
+catalog   Deployment/catalog   cpu: 2%/70%   2     6     3     4m36s
+catalog-74995c78bb-9csnp   1m    3Mi   
+catalog-74995c78bb-rnjch   1m    3Mi   
+catalog-74995c78bb-zpbgk   1m    3Mi   
+t=+306s
+catalog   Deployment/catalog   cpu: 2%/70%   2     6     3     5m7s
+catalog-74995c78bb-9csnp   1m    2Mi   
+catalog-74995c78bb-rnjch   1m    3Mi   
+t=+336s
+catalog   Deployment/catalog   cpu: 2%/70%   2     6     2     5m37s
+catalog-74995c78bb-9csnp   1m    3Mi   
+catalog-74995c78bb-rnjch   1m    3Mi   
 ```
 
 `MAXPODS` is the ceiling that the threats table protects. This run never
-reached it, because no metric reached the HPA. The ceiling does not need a
-metric to show, though. The namespace ResourceQuota is the hard limit under
-`maxReplicas`. Scale catalog past what the quota allows, and the ReplicaSet is
-refused:
+reached it, because the load that would push CPU past the target had to be
+stopped early (step 4). The ceiling does not need a metric to show, though.
+The namespace ResourceQuota is the hard limit under `maxReplicas`. The
+quota demonstration below was recorded earlier, with the HPA applied but
+unable to read a metric. A working HPA owns the replica count, so delete it
+(`kubectl delete hpa catalog -n bookstore`) before you scale by hand, and
+apply it again afterwards. Scale catalog past what the quota allows, and the
+ReplicaSet is refused:
 
 ```sh
 kubectl scale deployment/catalog -n bookstore --replicas=40
@@ -552,44 +791,121 @@ Gateway API and Kyverno objects in earlier chapters. The `19-` Deployment and
 the `82-` HPA are built-ins and dry-run cleanly.
 
 
-### 4. Load tests: left for you to run
+### 4. The load Job: what ran, and what did not
 
-This lab run did not reach the scale-out. The HPA had no metric to read, and
-KEDA was not installed, so neither the catalog HPA nor the queue scaler moved.
-A second pass did not change that. It needed a metrics-server that serves, and
-the ways to get one were closed. A kind cluster built with `serverTLSBootstrap`
-(the route in [ch.01 step 1](01-observability-metrics.md)) was not started,
-because the lab host's container engine did not answer an image listing within
-three minutes. Installing the chart on the shared lab cluster would have
-written a RoleBinding into `kube-system`, a namespace the run does not own, and
-switching kubelet verification off is not something this guide teaches. So no
-HPA ran under load here, and nothing below is a measured result.
-
-Run the load yourself on a cluster whose metrics-server serves, once the KEDA
-install in step 3 has rolled out. Use the curl load Job and the two
-NetworkPolicies from [06.06 section
-1](06-capacity-and-cost.md#1-measure-catalogs-real-usage). It already uses a
-curl image pinned by digest and the restricted `securityContext`. One change
-is needed. The Job runs 180 seconds, and the HPA needs longer to reach its
-ceiling: the `scaleUp` policy above takes the larger of two more Pods or a
-doubling every 60 seconds, after a 60 second stabilization window. From 2
-replicas that is 4, then 6, so edit `+ 180` in the Job's loop to `+ 420`. Then
-watch the HPA from a second shell:
+The load comes from the Job and the two NetworkPolicies in [06.06 section
+1](06-capacity-and-cost.md#1-measure-catalogs-real-usage), which use a curl
+image pinned by digest and the restricted `securityContext`. Save its two YAML
+blocks as `load-allow.yaml` and `load-catalog.yaml`. One change is needed. The
+Job runs 180 seconds, and the HPA needs longer to reach its ceiling: the
+`scaleUp` policy above takes the larger of two more Pods or a doubling every
+60 seconds, after a 60 second stabilization window. From 2 replicas that is 4,
+then 6, so edit `+ 180` to `+ 420` in the Job's loop and check the line:
 
 ```sh
-kubectl get hpa catalog -n bookstore -w
+grep -n 'end=' load-catalog.yaml
+kubectl apply -f load-allow.yaml
+kubectl apply -f load-catalog.yaml
 ```
 
-The expectation follows from the manifest, not from a run. Each catalog Pod
-requests 50m, so the 70% target is 35m of CPU per Pod, and the load has to keep
-every Pod above that. Read the usage with `kubectl top pods -n bookstore`. If
-TARGETS stays under 70%, the load is too light, so raise the Job's
-`parallelism` before suspecting the HPA. Once TARGETS holds above the target,
-REPLICAS should go 2, 4, 6 and stop at `MAXPODS` while the load lasts. It must
-not pass 6 however high the metric reads, which is the property that bounds a
-cost attack. If it does, check `maxReplicas` on the object you applied. After
-the Job ends, the 300 second `scaleDown` stabilization holds the replicas for
-five minutes before they fall.
+<!-- gate: output -->
+```
+29:              end=$(( $(date +%s) + 420 ))
+# ...
+serviceaccount/load-generator-sa created
+networkpolicy.networking.k8s.io/allow-load-generator-egress created
+networkpolicy.networking.k8s.io/allow-load-generator-to-catalog created
+# ...
+job.batch/load-catalog created
+```
+
+Watch the HPA and the Pods' CPU from the same shell, every 20 seconds, with the
+loop from step 2 (change the pause to 20 and drop the `-l app=catalog` filter
+so the load Pod shows). This is the lab's first two minutes at the shipped
+70% target. Each catalog Pod requests 50m, so the target is 35m of CPU per
+Pod:
+
+<!-- gate: output -->
+```
+t=+0s
+catalog   Deployment/catalog   cpu: 2%/70%   2     6     2     6m42s
+catalog-74995c78bb-9csnp   1m    3Mi     
+catalog-74995c78bb-rnjch   1m    3Mi     
+postgres-0                 30m   104Mi   
+redis-574bb544f-b7tvt      4m    3Mi     
+t=+20s
+catalog   Deployment/catalog   cpu: 6%/70%   2     6     2     7m3s
+catalog-74995c78bb-9csnp   3m    4Mi     
+catalog-74995c78bb-rnjch   3m    7Mi     
+load-catalog-shx7j         86m   1Mi     
+postgres-0                 39m   111Mi   
+redis-574bb544f-b7tvt      5m    3Mi     
+t=+41s
+catalog   Deployment/catalog   cpu: 24%/70%   2     6     2     7m23s
+catalog-74995c78bb-9csnp   14m    8Mi     
+catalog-74995c78bb-rnjch   10m    8Mi     
+load-catalog-shx7j         434m   11Mi    
+postgres-0                 44m    111Mi   
+redis-574bb544f-b7tvt      8m     3Mi     
+```
+
+At 41 seconds each catalog Pod used 10m to 14m, which is 24% of its request
+and under the 70% target, so the HPA correctly held at 2 replicas. The
+generator cost more than the service under test: the load Pod used 434m and
+Postgres 44m. In the 75 seconds recorded, this load stayed under the shipped
+target, so at that target it had not added a replica.
+
+**The run stopped here.** About 75 seconds in, the sampling pass that should
+have taken 20 seconds took two minutes (the AGE column jumps from 7m23s to
+9m19s), and `kubectl top` answered that the metrics API was not available:
+
+<!-- gate: output -->
+```
+t=+75s
+catalog   Deployment/catalog   cpu: 21%/70%   2     6     2     9m19s
+error: Metrics API not available
+```
+
+The host's load average had risen to about 30 on four cores, and the control
+plane's controller manager and scheduler restarted. Both already showed
+dozens of restarts before the run (38 and 40 in about ten hours), so one more
+each is no proof that the Job caused it. It came while the host was saturated,
+and the lab's rule for that is to stop. The Job was deleted and everything the
+run had installed was removed. The restart counts about two minutes later:
+
+<!-- gate: output -->
+```
+NAME                                             READY   STATUS    RESTARTS        AGE
+# ...
+kube-controller-manager-sf-sched-control-plane   1/1     Running   39 (111s ago)   10h
+# ...
+kube-scheduler-sf-sched-control-plane            1/1     Running   41 (89s ago)    10h
+```
+
+**Not run.** The scale-out to 4 and then 6 replicas, the hold at `MAXPODS`,
+the `ScalingLimited` condition changing to `True` and the scale-in after the
+Job all stayed unmeasured, and no number in this chapter claims them. Run
+them on a cluster you own, with room for the load. The shipped bounds stay as
+they are. Only the CPU target changes, because the Job above reached about
+24% of the request. Lowering the target to 5% gives 2.5m per Pod, and the
+formula would ask for `ceil(2 x 24/5)`, which is 10 replicas from that reading.
+The ceiling of 6 is then what stops it, and that stop is the property that
+bounds a cost attack. This is the expectation from the manifest and the
+reading above, not a measurement:
+
+```sh
+kubectl patch hpa catalog -n bookstore --type json \
+  -p '[{"op":"replace","path":"/spec/metrics/0/resource/target/averageUtilization","value":5}]'
+kubectl get hpa catalog -n bookstore -w
+kubectl describe hpa catalog -n bookstore | sed -n '/^Conditions:/,$p'
+```
+
+Expect REPLICAS to climb to 6 and stay there while the Job runs, however high
+CPU reads, with `ScalingLimited` at `True` and the reason `TooManyReplicas`. If
+it passes 6, check `maxReplicas` on the object you applied. After the Job ends,
+the 300 second `scaleDown` window holds the replicas for five minutes before
+they fall. If your host struggles as this one did, lower the Job's concurrency
+before the target: the `seq 10` in its loop sets how many requests run at once.
 
 Orders publishes to the queue only when `AMQP_URL` is set. `14-` leaves it
 unset on purpose (its header explains), so the queue stays empty until that
@@ -689,6 +1005,14 @@ changes. The orders log from the lab run shows the unset state:
 > against the namespace **ResourceQuota** (Part 01 ch.03 / [ch.06](06-capacity-and-cost.md))
 > so scaling can't exhaust the cluster or the bill.
 
+> **In production:** a hard spread rule decides how many replicas the
+> scheduler can place, whatever `maxReplicas` says. Catalog's `DoNotSchedule`
+> rule left its third replica `Pending` on a three-node cluster whose
+> control-plane node was tainted (step 0). Set `nodeTaintsPolicy: Honor` when
+> tainted nodes should not count as domains. A Pod left `Pending` is also what
+> a node autoscaler answers by adding a node, so check that the replicas you
+> allow are replicas you can place and pay for.
+
 > **In production:** the custom/external metrics path is real
 > infrastructure. An HPA on req/s or queue depth needs the **Prometheus
 > Adapter** or **KEDA** registered as a metrics API server, monitored like
@@ -704,6 +1028,7 @@ kubectl describe hpa <H> -n <NS>                   # events: why it (didn't) sca
 kubectl get scaledobject -n <NS>                   # KEDA objects
 kubectl get hpa -n <NS> | grep keda-hpa-           # the HPA KEDA created
 kubectl top pods -n <NS>                            # the metric source (metrics-server)
+kubectl get csr                                     # kubelet-serving: check, then approve
 kubectl get deploy <D> -n <NS> -o jsonpath='{.spec.replicas}'   # current count
 ```
 
@@ -715,6 +1040,8 @@ Checklist:
 - [ ] Queue/event consumers scaled by **backlog** via KEDA (scale-to-zero)
 - [ ] `maxReplicas` bounded by the namespace ResourceQuota
 - [ ] metrics-server (Resource) / adapter / KEDA metrics API installed & monitored
+- [ ] metrics-server verifies the kubelets: serving certificates approved
+  after a check, never `--kubelet-insecure-tls`
 - [ ] A node autoscaler (Cluster Autoscaler / Karpenter) for the Pod growth
 - [ ] No workload ServiceAccount can write HPAs or ScaledObjects
 
@@ -772,6 +1099,24 @@ Checklist:
 
    </details>
 
+7. **On a kind cluster `kubectl top` answers `Metrics API not available`, and
+   the metrics-server log says a kubelet certificate "doesn't contain any IP
+   SANs". A colleague adds `--kubelet-insecure-tls`. What does the flag
+   change, and what do you do instead?**
+   <details><summary>Show answer</summary>
+
+   The flag stops metrics-server from verifying the certificate of any
+   kubelet it scrapes. The CPU numbers the HPA divides by then come from
+   whatever answers at a node's address, and those numbers set the replica
+   count and the bill. It is a flag for a throwaway lab. Instead, set
+   `serverTLSBootstrap: true` in the kubelet configuration, check each
+   pending `kubernetes.io/kubelet-serving` request (requestor is the node,
+   names and addresses are the node's own) and approve it, then confirm that
+   the container arguments hold no insecure flag. Step 0 shows each command
+   and the `0` from the final `grep -c insecure`.
+
+   </details>
+
 ## Further reading
 
 - **Ibryam & Huß, _Kubernetes Patterns_ 2e — *Elastic Scale* (ch.29)** (HPA/
@@ -786,3 +1131,13 @@ Checklist:
   and KEDA: <https://keda.sh/docs/latest/concepts/scaling-deployments/>.
 - Pod Security Standards, for the `restricted` fields the KEDA step
   checks: <https://kubernetes.io/docs/concepts/security/pod-security-standards/>.
+- Kubelet serving certificates and how requests are approved:
+  <https://kubernetes.io/docs/reference/access-authn-authz/kubelet-tls-bootstrapping/>
+  and the CSR signers,
+  <https://kubernetes.io/docs/reference/access-authn-authz/certificate-signing-requests/#kubernetes-signers>.
+  Setting a kubelet field from the kind config:
+  <https://kind.sigs.k8s.io/docs/user/configuration/#kubeadm-config-patches>.
+  metrics-server and the kubelet certificate check:
+  <https://github.com/kubernetes-sigs/metrics-server/blob/master/FAQ.md>.
+- Topology spread and the taints policy:
+  [04.02](../04-scheduling/02-affinity-taints-topology.md).

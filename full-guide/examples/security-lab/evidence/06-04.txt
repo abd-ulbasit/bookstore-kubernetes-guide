@@ -1,17 +1,31 @@
-# Transcript for 06-production-readiness/04-autoscaling.md, hands-on steps 0 to 3.
-# Tier A: a kind cluster, Kubernetes v1.37.0 node, kubectl v1.37.2 client.
-# Single control-plane node named sf-pilot-control-plane (the lab cluster's name
-# is not the chapter's `kind-bookstore`). Shared cluster: other workers' objects
-# are present and were not touched.
-# Namespace substitution: the chapter's `bookstore` is `p06-04-bookstore` in
-# this run, and `keda` is `p06-04-keda`. The manifests were applied from copies
-# with only the namespace names changed. A path in a working copy is written as
-# its repository path, examples/bookstore/raw-manifests/.
-# Recorded by running the commands in order from the repository root. Terminal
-# colour codes are removed. A local API tunnel address is written as <port>.
-# Nothing else is edited.
+# Transcript for 06-production-readiness/04-autoscaling.md, hands-on steps 0 to 4.
+# Tier A: kind clusters, Kubernetes v1.37.0 nodes, kubectl v1.37.2 client,
+# Helm v4.1.4. Recorded in two sessions against shared kind lab clusters. The
+# lab clusters' names are not the chapter's `kind-bookstore`.
 #
-# What did not work the first time:
+# First recording (from "## step 0" to the line "## second recording"): a
+# single-node cluster named sf-pilot-control-plane. Namespace substitution: the
+# chapter's `bookstore` is `p06-04-bookstore` in this recording, and `keda` is
+# `p06-04-keda`. The manifests were applied from copies with only the
+# namespace names changed. A path in a working copy is written as its
+# repository path, examples/bookstore/raw-manifests/. Terminal colour codes
+# are removed. A local API tunnel address is written as <port>. Nothing else
+# is edited.
+#
+# Second recording (from "## second recording"): a three-node cluster, shown as
+# sf-sched-control-plane and two workers, with about 3 GiB of host memory to
+# spare and a slow disk. It ran the script examples/security-lab/labs/06-04.sh
+# one phase at a time (metrics, bookstore, spread, idle, load1, then cleanup),
+# each phase in one foreground command, and used the chapter's own namespace
+# names, bookstore and metrics-server, with no substitution. The metrics-server
+# chart is 3.14.0 (app v0.9.0). The Bookstore manifests were applied through a
+# link named examples/bookstore/raw-manifests, so the commands read as in the
+# chapter. The edits to the recorded lines are these: the script's own stop
+# message at the end of the bookstore phase is removed, and the two sections
+# headed "step 0e (continued)" and "abort" were run by hand between phases
+# and are placed where they ran. Terminal colour codes are removed.
+#
+# What did not work the first time, first recording:
 # - 12-redis.yaml was missing from the first apply, so catalog's /readyz failed
 #   on Redis and its rollout hit the progress deadline. Applying Redis fixed it.
 # - The first apply of 19-payments-worker-deploy.yaml and one rollout check
@@ -25,8 +39,32 @@
 #   stale v1beta1.metrics.k8s.io discovery failure blocks namespace deletion.
 #   The namespace was left to finish once the discovery failure clears.
 #
-# Not run in this transcript: the load tests and the KEDA scale-out and
-# scale-to-zero runs, which need a resource metrics API or a running KEDA.
+# What did not work the first time, second recording:
+# - The metrics phase's log read right after the install showed only informer
+#   lines. The refusal had been logged just before them, and the capture headed
+#   "step 0e (continued)" reads it from the same pod after the fix.
+# - The Bookstore phase stopped at its wait for the catalog rollout. The third
+#   catalog replica stayed Pending: catalog spreads over kubernetes.io/hostname
+#   with DoNotSchedule, and the tainted control-plane node counts as an empty
+#   domain, so each worker may hold one replica. The spread phase shows the
+#   event and patches nodeTaintsPolicy: Honor on the Deployment in the cluster
+#   (the shipped file is unchanged), and the rollout then completed.
+#   The wait for the rollout moved from the bookstore phase to the spread
+#   phase in the committed script after this run.
+# - The load phase did not finish. About 75 seconds in, the host's load average
+#   was near 30 on four cores, API answers slowed (one sampling pass took about
+#   two minutes and `kubectl top` answered "Metrics API not available"), and
+#   kube-controller-manager and kube-scheduler restarted once each. Before this
+#   run they already showed 38 and 40 restarts in about ten hours, and the
+#   kube-apiserver 17. Under the rule for this lab, the Job was deleted and
+#   everything the run installed was removed. The controller-manager and the
+#   scheduler restarted once more during the removal.
+#
+# Not run in this transcript: the scale-out of catalog under load, the lowered
+# CPU target, the hold at maxReplicas and the scale-in after the load, and the
+# load tests of the KEDA scaler. KEDA was not installed. The resource metrics
+# API was served only from the metrics phase to the cleanup phase of the second
+# recording.
 ## step 0
 $ kubectl apply -f 00-namespace.yaml
 namespace/p06-04-bookstore created
@@ -610,3 +648,442 @@ $ kubectl -n p06-04-bookstore exec deploy/rabbitmq -- rabbitmqctl list_user_perm
 [
 {"vhost":"/","configure":"^$","write":"^$","read":"^orders$"}
 ]
+
+## second recording: a three-node cluster, the chapter's namespace names
+## step 0a: the cluster, and no resource metrics yet
+$ kubectl get nodes
+NAME                     STATUS   ROLES           AGE   VERSION
+sf-sched-control-plane   Ready    control-plane   10h   v1.37.0
+sf-sched-worker          Ready    <none>          10h   v1.37.0
+sf-sched-worker2         Ready    <none>          10h   v1.37.0
+
+$ kubectl get apiservice v1beta1.metrics.k8s.io
+Error from server (NotFound): apiservices.apiregistration.k8s.io "v1beta1.metrics.k8s.io" not found
+
+$ kubectl top nodes
+error: Metrics API not available
+
+## step 0b: metrics-server, installed as in 06.01 step 1
+$ kubectl create namespace metrics-server
+namespace/metrics-server created
+
+$ kubectl label namespace metrics-server pod-security.kubernetes.io/enforce=restricted pod-security.kubernetes.io/audit=restricted pod-security.kubernetes.io/warn=restricted
+namespace/metrics-server labeled
+
+$ helm install metrics-server metrics-server/metrics-server --version 3.14.0 --namespace metrics-server
+NAME: metrics-server
+LAST DEPLOYED: Sat Oct 31 17:47:47 2026
+NAMESPACE: metrics-server
+STATUS: deployed
+REVISION: 1
+DESCRIPTION: Install complete
+TEST SUITE: None
+NOTES:
+***********************************************************************
+* Metrics Server                                                      *
+***********************************************************************
+  Chart version: 3.14.0
+  App version:   0.9.0
+  Image tag:     registry.k8s.io/metrics-server/metrics-server:v0.9.0
+***********************************************************************
+
+$ kubectl -n metrics-server get deploy metrics-server -o jsonpath='{.metadata.labels.helm\.sh/chart}{"\n"}{.spec.template.spec.containers[0].image}{"\n"}'
+metrics-server-3.14.0
+registry.k8s.io/metrics-server/metrics-server:v0.9.0
+
+$ kubectl -n metrics-server get pods
+NAME                             READY   STATUS    RESTARTS   AGE
+metrics-server-c4994bc54-qlnvr   0/1     Running   0          43s
+
+$ kubectl get apiservice v1beta1.metrics.k8s.io
+NAME                     SERVICE                         AVAILABLE                  AGE
+v1beta1.metrics.k8s.io   metrics-server/metrics-server   False (MissingEndpoints)   43s
+
+$ kubectl top nodes
+error: Metrics API not available
+
+$ kubectl -n metrics-server logs deploy/metrics-server --tail=3
+I1031 12:48:31.089111       1 shared_informer.go:409] "Caches are synced"
+I1031 12:48:31.089136       1 shared_informer.go:409] "Caches are synced"
+I1031 12:48:31.089118       1 shared_informer.go:409] "Caches are synced"
+
+## step 0c: kubelet serving certificates
+$ kubectl get csr
+No resources found
+
+$ for n in $(kubectl get nodes -o name | sed 's|node/||'); do
+  docker exec "$n" sh -c 'cp /var/lib/kubelet/config.yaml /var/lib/kubelet/config.yaml.orig && echo "serverTLSBootstrap: true" >> /var/lib/kubelet/config.yaml && systemctl restart kubelet && grep serverTLSBootstrap /var/lib/kubelet/config.yaml'
+done
+serverTLSBootstrap: true
+serverTLSBootstrap: true
+serverTLSBootstrap: true
+
+$ kubectl get csr
+NAME        AGE   SIGNERNAME                      REQUESTOR                            REQUESTEDDURATION   CONDITION
+csr-5wktd   2s    kubernetes.io/kubelet-serving   system:node:sf-sched-worker          <none>              Pending
+csr-bjx5p   1s    kubernetes.io/kubelet-serving   system:node:sf-sched-worker2         <none>              Pending
+csr-jg8hl   3s    kubernetes.io/kubelet-serving   system:node:sf-sched-control-plane   <none>              Pending
+
+## step 0d: check each request before approving it
+$ for c in $(kubectl get csr -o name); do
+  u=$(kubectl get "$c" -o jsonpath='{.spec.username}')
+  s=$(kubectl get "$c" -o jsonpath='{.spec.request}' | base64 -d | openssl req -noout -text | grep -A1 'Alternative Name' | tail -1 | sed 's/^ *//')
+  echo "${c#*/} $u $s"
+done
+csr-5wktd system:node:sf-sched-worker DNS:sf-sched-worker, IP Address:172.18.0.4
+csr-bjx5p system:node:sf-sched-worker2 DNS:sf-sched-worker2, IP Address:172.18.0.5
+csr-jg8hl system:node:sf-sched-control-plane DNS:sf-sched-control-plane, IP Address:172.18.0.3
+
+$ kubectl certificate approve $(kubectl get csr -o name)
+certificatesigningrequest.certificates.k8s.io/csr-5wktd approved
+certificatesigningrequest.certificates.k8s.io/csr-bjx5p approved
+certificatesigningrequest.certificates.k8s.io/csr-jg8hl approved
+
+$ kubectl get csr
+NAME        AGE   SIGNERNAME                      REQUESTOR                            REQUESTEDDURATION   CONDITION
+csr-5wktd   7s    kubernetes.io/kubelet-serving   system:node:sf-sched-worker          <none>              Approved,Issued
+csr-bjx5p   6s    kubernetes.io/kubelet-serving   system:node:sf-sched-worker2         <none>              Approved,Issued
+csr-jg8hl   8s    kubernetes.io/kubelet-serving   system:node:sf-sched-control-plane   <none>              Approved,Issued
+
+## step 0e: metrics-server serves, with verification still on
+$ kubectl -n metrics-server rollout status deployment/metrics-server --timeout=300s
+deployment "metrics-server" successfully rolled out
+
+$ kubectl get apiservice v1beta1.metrics.k8s.io
+NAME                     SERVICE                         AVAILABLE   AGE
+v1beta1.metrics.k8s.io   metrics-server/metrics-server   True        82s
+
+$ kubectl top nodes
+NAME                     CPU(cores)   CPU(%)   MEMORY(bytes)   MEMORY(%)   
+sf-sched-control-plane   139m         3%       1139Mi          15%         
+sf-sched-worker          37m          0%       239Mi           3%          
+sf-sched-worker2         23m          0%       272Mi           3%          
+
+$ kubectl -n metrics-server get deploy metrics-server -o jsonpath='{.spec.template.spec.containers[0].args}{"\n"}'
+["--secure-port=10250","--cert-dir=/tmp","--kubelet-preferred-address-types=InternalIP,ExternalIP,Hostname","--kubelet-use-node-status-port","--metric-resolution=15s"]
+
+$ kubectl -n metrics-server get deploy metrics-server -o jsonpath='{.spec.template.spec.containers[0].args}' | grep -c insecure
+0
+
+## step 0e (continued): the first scrape errors, read from the same pod after the fix
+$ kubectl -n metrics-server logs deploy/metrics-server | grep 'Failed to scrape' | head -3
+E1031 12:48:31.000213       1 scraper.go:149] "Failed to scrape node" err="Get \"https://172.18.0.4:10250/metrics/resource\": tls: failed to verify certificate: x509: cannot validate certificate for 172.18.0.4 because it doesn't contain any IP SANs" node="sf-sched-worker"
+E1031 12:48:31.000755       1 scraper.go:149] "Failed to scrape node" err="Get \"https://172.18.0.5:10250/metrics/resource\": tls: failed to verify certificate: x509: cannot validate certificate for 172.18.0.5 because it doesn't contain any IP SANs" node="sf-sched-worker2"
+E1031 12:48:31.007548       1 scraper.go:149] "Failed to scrape node" err="Get \"https://172.18.0.3:10250/metrics/resource\": tls: failed to verify certificate: x509: cannot validate certificate for 172.18.0.3 because it doesn't contain any IP SANs" node="sf-sched-control-plane"
+
+$ kubectl -n metrics-server logs deploy/metrics-server | grep -c 'Failed to scrape'
+3
+
+## step 0f: the Bookstore pieces that catalog needs
+$ kubectl apply -f examples/bookstore/raw-manifests/00-namespace.yaml
+namespace/bookstore created
+resourcequota/bookstore-quota created
+limitrange/bookstore-limits created
+
+$ kubectl apply -f examples/bookstore/raw-manifests/05-serviceaccounts-rbac.yaml
+serviceaccount/catalog-sa created
+serviceaccount/storefront-sa created
+serviceaccount/orders-sa created
+serviceaccount/payments-worker-sa created
+serviceaccount/postgres-sa created
+serviceaccount/redis-sa created
+serviceaccount/rabbitmq-sa created
+serviceaccount/migrate-sa created
+role.rbac.authorization.k8s.io/catalog-config-reader created
+rolebinding.rbac.authorization.k8s.io/catalog-config-reader-binding created
+
+$ kubectl apply -f examples/bookstore/raw-manifests/15-catalog-config.yaml
+configmap/catalog-config created
+
+$ kubectl apply -f examples/bookstore/raw-manifests/16-db-credentials.yaml
+secret/db-credentials created
+
+$ kubectl apply -f examples/bookstore/raw-manifests/35-priorityclasses.yaml
+priorityclass.scheduling.k8s.io/bookstore-data created
+priorityclass.scheduling.k8s.io/bookstore-critical created
+priorityclass.scheduling.k8s.io/bookstore-batch created
+
+$ kubectl apply -f examples/bookstore/raw-manifests/20-postgres-statefulset.yaml
+service/postgres created
+statefulset.apps/postgres created
+
+$ kubectl apply -f examples/bookstore/raw-manifests/21-db-migrate-job.yaml
+job.batch/db-migrate created
+
+$ kubectl apply -f examples/bookstore/raw-manifests/12-redis.yaml
+deployment.apps/redis created
+
+$ kubectl apply -f examples/bookstore/raw-manifests/10-catalog-deploy.yaml
+deployment.apps/catalog created
+
+$ kubectl apply -f examples/bookstore/raw-manifests/40-services.yaml
+service/catalog created
+service/storefront created
+service/orders created
+service/redis created
+service/rabbitmq created
+service/payments-worker created
+
+$ kubectl apply -f examples/bookstore/raw-manifests/60-networkpolicy.yaml
+networkpolicy.networking.k8s.io/default-deny-all created
+networkpolicy.networking.k8s.io/allow-dns-egress created
+networkpolicy.networking.k8s.io/allow-ingress-to-http-tiers created
+networkpolicy.networking.k8s.io/allow-storefront-to-apis created
+networkpolicy.networking.k8s.io/allow-data-tier-ingress created
+networkpolicy.networking.k8s.io/allow-orders-to-rabbitmq created
+networkpolicy.networking.k8s.io/allow-backend-egress created
+networkpolicy.networking.k8s.io/allow-storefront-egress created
+networkpolicy.networking.k8s.io/allow-payments-worker-egress created
+networkpolicy.networking.k8s.io/allow-monitoring-scrape created
+networkpolicy.networking.k8s.io/allow-span-egress created
+
+## step 0g: the third catalog replica, and the lab-only change that places it
+$ kubectl get pods -n bookstore -l app=catalog -o wide
+NAME                       READY   STATUS    RESTARTS   AGE     IP             NODE               NOMINATED NODE   READINESS GATES
+catalog-86d7dc55cc-6l268   1/1     Running   0          6m18s   10.244.2.112   sf-sched-worker2   <none>           <none>
+catalog-86d7dc55cc-nd99d   1/1     Running   0          6m17s   10.244.1.80    sf-sched-worker    <none>           <none>
+catalog-86d7dc55cc-ptvkj   0/1     Pending   0          6m17s   <none>         <none>             <none>           <none>
+
+$ kubectl get events -n bookstore --field-selector reason=FailedScheduling
+LAST SEEN   TYPE      REASON             OBJECT                         MESSAGE
+54s         Warning   FailedScheduling   pod/catalog-86d7dc55cc-ptvkj   0/3 nodes are available: 1 node(s) had untolerated taint(s), 2 node(s) didn't match pod topology spread constraints. preemption: 0/3 nodes are available: 1 No preemption victims found for incoming pod, 1 Preemption is not helpful for scheduling, 1 node(s) didn't match pod topology spread constraints.
+
+$ kubectl get deployment catalog -n bookstore -o jsonpath='{.spec.template.spec.topologySpreadConstraints}{"\n"}'
+[{"labelSelector":{"matchLabels":{"app":"catalog"}},"maxSkew":1,"topologyKey":"kubernetes.io/hostname","whenUnsatisfiable":"DoNotSchedule"}]
+
+$ kubectl patch deployment catalog -n bookstore --type json -p '[{"op":"add","path":"/spec/template/spec/topologySpreadConstraints/0/nodeTaintsPolicy","value":"Honor"}]'
+deployment.apps/catalog patched
+
+$ kubectl rollout status deployment/catalog -n bookstore
+deployment "catalog" successfully rolled out
+
+$ kubectl get pods -n bookstore -l app=catalog -o wide
+NAME                       READY   STATUS        RESTARTS   AGE    IP             NODE               NOMINATED NODE   READINESS GATES
+catalog-74995c78bb-9csnp   1/1     Running       0          7s     10.244.1.82    sf-sched-worker    <none>           <none>
+catalog-74995c78bb-rnjch   1/1     Running       0          26s    10.244.2.113   sf-sched-worker2   <none>           <none>
+catalog-74995c78bb-zpbgk   1/1     Running       0          44s    10.244.1.81    sf-sched-worker    <none>           <none>
+catalog-86d7dc55cc-6l268   1/1     Terminating   0          7m3s   10.244.2.112   sf-sched-worker2   <none>           <none>
+
+## step 2: the HPA at its shipped target, with no load
+$ kubectl apply -f examples/bookstore/raw-manifests/82-hpa-catalog.yaml
+horizontalpodautoscaler.autoscaling/catalog created
+
+$ kubectl get hpa catalog -n bookstore
+NAME      REFERENCE            TARGETS       MINPODS   MAXPODS   REPLICAS   AGE
+catalog   Deployment/catalog   cpu: 2%/70%   2         6         3          0s
+
+$ kubectl describe hpa catalog -n bookstore | sed -n '/^Reference:/,$p'
+Reference:                                             Deployment/catalog
+Metrics:                                               ( current / target )
+  resource cpu on pods  (as a percentage of request):  2% (1m) / 70%
+Min replicas:                                          2
+Max replicas:                                          6
+Behavior:
+  Scale Up:
+    Stabilization Window: 60 seconds
+    Select Policy: Max
+    Policies:
+      - Type: Percent  Value: 100  Period: 60 seconds
+      - Type: Pods     Value: 2    Period: 60 seconds
+  Scale Down:
+    Stabilization Window: 300 seconds
+    Select Policy: Max
+    Policies:
+      - Type: Percent  Value: 50  Period: 60 seconds
+Deployment pods:       3 current / 3 desired
+Conditions:
+  Type            Status  Reason               Message
+  ----            ------  ------               -------
+  AbleToScale     True    ScaleDownStabilized  recent recommendations were higher than current one, applying the highest recent recommendation
+  ScalingActive   True    ValidMetricFound     the HPA was able to successfully calculate a replica count from cpu resource utilization (percentage of request)
+  ScalingLimited  False   DesiredWithinRange   the desired count is within the acceptable range
+Events:           <none>
+
+## step 2b: the same HPA over the next six minutes, still no load
+$ start=$(date +%s)
+while [ $(( $(date +%s) - start )) -lt 360 ]; do
+  echo "t=+$(( $(date +%s) - start ))s"
+  kubectl get hpa catalog -n bookstore --no-headers
+  kubectl top pods -n bookstore -l app=catalog --no-headers
+  sleep 30
+done
+t=+0s
+catalog   Deployment/catalog   cpu: 2%/70%   2     6     3     1s
+catalog-74995c78bb-9csnp   10m   2Mi   
+catalog-74995c78bb-rnjch   9m    2Mi   
+catalog-74995c78bb-zpbgk   1m    2Mi   
+t=+30s
+catalog   Deployment/catalog   cpu: 2%/70%   2     6     3     31s
+catalog-74995c78bb-9csnp   1m    2Mi   
+catalog-74995c78bb-rnjch   1m    2Mi   
+catalog-74995c78bb-zpbgk   1m    2Mi   
+t=+61s
+catalog   Deployment/catalog   cpu: 2%/70%   2     6     3     62s
+catalog-74995c78bb-9csnp   1m    2Mi   
+catalog-74995c78bb-rnjch   1m    2Mi   
+catalog-74995c78bb-zpbgk   1m    2Mi   
+t=+91s
+catalog   Deployment/catalog   cpu: 2%/70%   2     6     3     93s
+catalog-74995c78bb-9csnp   1m    2Mi   
+catalog-74995c78bb-rnjch   1m    2Mi   
+catalog-74995c78bb-zpbgk   1m    2Mi   
+t=+122s
+catalog   Deployment/catalog   cpu: 2%/70%   2     6     3     2m3s
+catalog-74995c78bb-9csnp   1m    2Mi   
+catalog-74995c78bb-rnjch   1m    2Mi   
+catalog-74995c78bb-zpbgk   1m    3Mi   
+t=+153s
+catalog   Deployment/catalog   cpu: 2%/70%   2     6     3     2m34s
+catalog-74995c78bb-9csnp   1m    2Mi   
+catalog-74995c78bb-rnjch   1m    2Mi   
+catalog-74995c78bb-zpbgk   1m    3Mi   
+t=+183s
+catalog   Deployment/catalog   cpu: 2%/70%   2     6     3     3m5s
+catalog-74995c78bb-9csnp   1m    2Mi   
+catalog-74995c78bb-rnjch   1m    3Mi   
+catalog-74995c78bb-zpbgk   1m    3Mi   
+t=+214s
+catalog   Deployment/catalog   cpu: 2%/70%   2     6     3     3m35s
+catalog-74995c78bb-9csnp   1m    2Mi   
+catalog-74995c78bb-rnjch   1m    3Mi   
+catalog-74995c78bb-zpbgk   1m    3Mi   
+t=+244s
+catalog   Deployment/catalog   cpu: 2%/70%   2     6     3     4m6s
+catalog-74995c78bb-9csnp   1m    2Mi   
+catalog-74995c78bb-rnjch   1m    3Mi   
+catalog-74995c78bb-zpbgk   1m    3Mi   
+t=+275s
+catalog   Deployment/catalog   cpu: 2%/70%   2     6     3     4m36s
+catalog-74995c78bb-9csnp   1m    3Mi   
+catalog-74995c78bb-rnjch   1m    3Mi   
+catalog-74995c78bb-zpbgk   1m    3Mi   
+t=+306s
+catalog   Deployment/catalog   cpu: 2%/70%   2     6     3     5m7s
+catalog-74995c78bb-9csnp   1m    2Mi   
+catalog-74995c78bb-rnjch   1m    3Mi   
+t=+336s
+catalog   Deployment/catalog   cpu: 2%/70%   2     6     2     5m37s
+catalog-74995c78bb-9csnp   1m    3Mi   
+catalog-74995c78bb-rnjch   1m    3Mi   
+
+## step 4: the 06.06 load Job, with the loop lengthened to 420 seconds
+$ grep -n 'end=' load-catalog.yaml
+29:              end=$(( $(date +%s) + 420 ))
+
+$ kubectl apply -f load-allow.yaml
+serviceaccount/load-generator-sa created
+networkpolicy.networking.k8s.io/allow-load-generator-egress created
+networkpolicy.networking.k8s.io/allow-load-generator-to-catalog created
+
+$ kubectl apply -f load-catalog.yaml
+job.batch/load-catalog created
+
+## step 4a: at the shipped 70 percent target
+$ start=$(date +%s)
+while [ $(( $(date +%s) - start )) -lt 120 ]; do
+  echo "t=+$(( $(date +%s) - start ))s"
+  kubectl get hpa catalog -n bookstore --no-headers
+  kubectl top pods -n bookstore --no-headers
+  sleep 20
+done
+t=+0s
+catalog   Deployment/catalog   cpu: 2%/70%   2     6     2     6m42s
+catalog-74995c78bb-9csnp   1m    3Mi     
+catalog-74995c78bb-rnjch   1m    3Mi     
+postgres-0                 30m   104Mi   
+redis-574bb544f-b7tvt      4m    3Mi     
+t=+20s
+catalog   Deployment/catalog   cpu: 6%/70%   2     6     2     7m3s
+catalog-74995c78bb-9csnp   3m    4Mi     
+catalog-74995c78bb-rnjch   3m    7Mi     
+load-catalog-shx7j         86m   1Mi     
+postgres-0                 39m   111Mi   
+redis-574bb544f-b7tvt      5m    3Mi     
+t=+41s
+catalog   Deployment/catalog   cpu: 24%/70%   2     6     2     7m23s
+catalog-74995c78bb-9csnp   14m    8Mi     
+catalog-74995c78bb-rnjch   10m    8Mi     
+load-catalog-shx7j         434m   11Mi    
+postgres-0                 44m    111Mi   
+redis-574bb544f-b7tvt      8m     3Mi     
+t=+75s
+catalog   Deployment/catalog   cpu: 21%/70%   2     6     2     9m19s
+error: Metrics API not available
+
+## abort: the control plane restarted while the Job ran, so the Job was deleted
+$ kubectl delete job load-catalog -n bookstore --wait=false
+job.batch "load-catalog" deleted from bookstore namespace
+
+$ kubectl get pods -n kube-system
+NAME                                             READY   STATUS    RESTARTS        AGE
+coredns-559f6c778d-9vkt4                         1/1     Running   0               10h
+coredns-559f6c778d-lk2hp                         1/1     Running   0               10h
+etcd-sf-sched-control-plane                      1/1     Running   0               10h
+kindnet-7ppzx                                    1/1     Running   0               10h
+kindnet-fjrk9                                    1/1     Running   0               10h
+kindnet-rm62x                                    1/1     Running   1               10h
+kube-apiserver-sf-sched-control-plane            1/1     Running   17 (45m ago)    10h
+kube-controller-manager-sf-sched-control-plane   1/1     Running   39 (111s ago)   10h
+kube-proxy-25k5p                                 1/1     Running   0               10h
+kube-proxy-2mzj2                                 1/1     Running   0               10h
+kube-proxy-pfxbz                                 1/1     Running   0               10h
+kube-scheduler-sf-sched-control-plane            1/1     Running   41 (89s ago)    10h
+
+## cleanup
+$ kubectl delete namespace bookstore --wait=true
+namespace "bookstore" deleted
+
+$ kubectl delete priorityclass bookstore-critical bookstore-data bookstore-batch
+priorityclass.scheduling.k8s.io "bookstore-critical" deleted
+priorityclass.scheduling.k8s.io "bookstore-data" deleted
+priorityclass.scheduling.k8s.io "bookstore-batch" deleted
+
+$ helm uninstall metrics-server --namespace metrics-server
+release "metrics-server" uninstalled
+
+$ kubectl delete namespace metrics-server --wait=true
+namespace "metrics-server" deleted
+
+$ for n in $(kubectl get nodes -o name | sed 's|node/||'); do
+  docker exec "$n" sh -c 'cp /var/lib/kubelet/config.yaml.orig /var/lib/kubelet/config.yaml && rm /var/lib/kubelet/config.yaml.orig && rm -f /var/lib/kubelet/pki/kubelet-server-*.pem && systemctl restart kubelet && grep -c serverTLSBootstrap /var/lib/kubelet/config.yaml'
+done
+0
+0
+0
+
+$ kubectl delete csr --all
+certificatesigningrequest.certificates.k8s.io "csr-5wktd" deleted
+certificatesigningrequest.certificates.k8s.io "csr-bjx5p" deleted
+certificatesigningrequest.certificates.k8s.io "csr-jg8hl" deleted
+
+## cleanup check
+$ kubectl get ns
+NAME                 STATUS   AGE
+default              Active   10h
+gate-baseline        Active   8h
+gate-privileged      Active   8h
+gate-restricted      Active   8h
+kube-node-lease      Active   10h
+kube-public          Active   10h
+kube-system          Active   10h
+local-path-storage   Active   10h
+
+$ kubectl get crd,validatingwebhookconfigurations,mutatingwebhookconfigurations,csr,priorityclass
+NAME                                                      VALUE        GLOBAL-DEFAULT   AGE   PREEMPTIONPOLICY
+priorityclass.scheduling.k8s.io/system-cluster-critical   2000000000   false            10h   PreemptLowerPriority
+priorityclass.scheduling.k8s.io/system-node-critical      2000001000   false            10h   PreemptLowerPriority
+
+$ kubectl get apiservices | grep -v Local
+NAME                              SERVICE   AVAILABLE   AGE
+
+$ kubectl get clusterrole,clusterrolebinding -o name | grep -c metrics-server
+0
+
+$ kubectl -n kube-system get rolebinding -o name | grep -c metrics-server
+0
+
+$ kubectl get nodes
+NAME                     STATUS   ROLES           AGE   VERSION
+sf-sched-control-plane   Ready    control-plane   10h   v1.37.0
+sf-sched-worker          Ready    <none>          10h   v1.37.0
+sf-sched-worker2         Ready    <none>          10h   v1.37.0
