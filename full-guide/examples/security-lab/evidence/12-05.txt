@@ -1,0 +1,187 @@
+# Transcript for 12-kubernetes-for-machine-learning/05-notebooks-and-interactive.md,
+# lab steps 0 to 8 (cluster), step 9 (image configs from the registries) and
+# step 10 (the chart read offline).
+# Tier A: a kind cluster that the lab owns. Kubernetes v1.37.0 server, kubectl
+# v1.37.2, Helm v4.1.4, chart jupyterhub/jupyterhub 4.4.4.
+# Recorded by running examples/security-lab/labs/12-05.sh from full-guide/, with
+# VALUES set to a copy of the chapter's jupyterhub-values.yaml.
+# The lab used its own namespace, p12-05-jupyter. The chapter names the jupyter
+# namespace and applies the same manifests. Lines that name the lab namespace
+# are kept as captured.
+# The lab cluster has a different name from the guide's, and so does its node.
+# The cluster's CNI is kindnet, which accepts NetworkPolicy objects but does not
+# enforce them. No traffic was sent to test a policy.
+# The hub was not installed in this run. Another install held the lab's
+# heavy-install lock, so the chart was checked with a server dry run, and the
+# hub and proxy Pods were not started. Nothing here shows them running.
+# Step 9 reads each image's config through a registry API request, the anonymous
+# manifest and config-blob requests. No image was pulled.
+# Step 10 reads the chart offline with helm template. One maintainer email in
+# the chart's metadata, in the helm show chart output of step 0, is redacted.
+# What did not work the first time: the first attempt stopped at a shell syntax
+# error before any command ran. The second attempt waited about two minutes on
+# one API call in step 2 and then completed. After step 8, the admin identity
+# was denied cluster-scoped reads and namespace reads. The reflector lines at
+# the end are the client's watch errors from that. The namespace had already
+# been deleted by step 8. Access returned later, and the admission gate was run
+# against the lab cluster after that. The lab itself was not run again.
+#
+## step 0: versions and the chart
+$ kubectl version
+Client Version: v1.37.2
+Kustomize Version: v5.8.1
+Server Version: v1.37.0
+$ helm show chart jupyterhub/jupyterhub --version 4.4.4
+annotations:
+  artifacthub.io/images: |
+    - image: quay.io/jupyterhub/configurable-http-proxy:5.2.0
+      name: configurable-http-proxy
+    - image: quay.io/jupyterhub/k8s-hub:4.4.4
+      name: k8s-hub
+    - image: quay.io/jupyterhub/k8s-image-awaiter:4.4.4
+      name: k8s-image-awaiter
+    - image: quay.io/jupyterhub/k8s-network-tools:4.4.4
+      name: k8s-network-tools
+    - image: quay.io/jupyterhub/k8s-secret-sync:4.4.4
+      name: k8s-secret-sync
+    - image: quay.io/jupyterhub/k8s-singleuser-sample:4.4.4
+      name: k8s-singleuser-sample
+    - image: registry.k8s.io/kube-scheduler:v1.30.14
+      name: kube-scheduler
+    - image: registry.k8s.io/pause:3.10.1
+      name: pause
+    - image: registry.k8s.io/pause:3.10.1
+      name: pause
+    - image: traefik:v3.6.12
+      name: traefik
+apiVersion: v2
+appVersion: 5.5.4
+description: Multi-user Jupyter installation
+home: https://z2jh.jupyter.org
+icon: https://hub.jupyter.org/helm-chart/images/hublogo.svg
+keywords:
+- jupyter
+- jupyterhub
+- z2jh
+kubeVersion: '>=1.28.0-0'
+maintainers:
+- email: <redacted>
+  name: Erik Sundell
+- name: Simon Li
+  url: https://github.com/manics/
+name: jupyterhub
+sources:
+- https://github.com/jupyterhub/zero-to-jupyterhub-k8s
+version: 4.4.4
+
+
+## step 1: a restricted namespace
+$ kubectl apply -f - <<'EOF'   # Namespace jupyter, labelled restricted
+namespace/p12-05-jupyter created
+$ kubectl get namespace p12-05-jupyter --show-labels
+NAME             STATUS   AGE   LABELS
+p12-05-jupyter   Active   0s    kubernetes.io/metadata.name=p12-05-jupyter,pod-security.kubernetes.io/audit-version=latest,pod-security.kubernetes.io/audit=restricted,pod-security.kubernetes.io/enforce-version=latest,pod-security.kubernetes.io/enforce=restricted,pod-security.kubernetes.io/warn-version=latest,pod-security.kubernetes.io/warn=restricted
+
+## step 2: the hub's login Secret, created from a generated password
+$ kubectl create secret generic jupyterhub-hub-secrets -n p12-05-jupyter --from-file=values.yaml=<generated file>
+secret/jupyterhub-hub-secrets created
+$ kubectl get secret jupyterhub-hub-secrets -n p12-05-jupyter
+NAME                     TYPE     DATA   AGE
+jupyterhub-hub-secrets   Opaque   1      0s
+
+## step 3: the chart, rendered with the chapter's values, server dry run
+$ helm template jupyterhub jupyterhub/jupyterhub --version 4.4.4 -n p12-05-jupyter -f jupyterhub-values.yaml | kubectl apply --dry-run=server -n p12-05-jupyter -f -
+networkpolicy.networking.k8s.io/hub created (server dry run)
+networkpolicy.networking.k8s.io/proxy created (server dry run)
+networkpolicy.networking.k8s.io/singleuser created (server dry run)
+serviceaccount/hub created (server dry run)
+secret/hub created (server dry run)
+configmap/hub created (server dry run)
+persistentvolumeclaim/hub-db-dir created (server dry run)
+role.rbac.authorization.k8s.io/hub created (server dry run)
+rolebinding.rbac.authorization.k8s.io/hub created (server dry run)
+service/hub created (server dry run)
+service/proxy-api created (server dry run)
+service/proxy-public created (server dry run)
+deployment.apps/hub created (server dry run)
+deployment.apps/proxy created (server dry run)
+
+## step 4: the notebook ServiceAccount, then the notebook Pod shape
+$ kubectl apply -f - <<'EOF'   # ServiceAccount jupyterhub-singleuser, no token
+serviceaccount/jupyterhub-singleuser created
+$ kubectl apply --dry-run=server -n p12-05-jupyter -f <the example notebook Pod>
+pod/jupyter-singleuser-illustrative created (server dry run)
+
+## step 5: a deliberate refusal, the chart's default init container
+$ kubectl apply --dry-run=server -n p12-05-jupyter -f <Pod with the default init container>
+Error from server (Forbidden): error when creating "STDIN": pods "jupyter-singleuser-privileged-init" is forbidden: violates PodSecurity "restricted:latest": privileged (container "block-cloud-metadata" must not set securityContext.privileged=true), allowPrivilegeEscalation != false (container "block-cloud-metadata" must set securityContext.allowPrivilegeEscalation=false), unrestricted capabilities (container "block-cloud-metadata" must set securityContext.capabilities.drop=["ALL"]; container "block-cloud-metadata" must not include "NET_ADMIN" in securityContext.capabilities.add), runAsUser=0 (container "block-cloud-metadata" must not set runAsUser=0)
+
+## step 6: the fleet quota, server dry run
+$ kubectl create quota nb-quota --hard=requests.cpu=8,requests.memory=16Gi,requests.nvidia.com/gpu=2 -n p12-05-jupyter --dry-run=server
+resourcequota/nb-quota created (server dry run)
+
+## step 7: the cluster's network plugin, which decides whether NetworkPolicy is enforced
+$ kubectl get daemonset kindnet -n kube-system -o name
+daemonset.apps/kindnet
+
+## step 8: cleanup
+$ kubectl delete namespace p12-05-jupyter --wait=true
+namespace "p12-05-jupyter" deleted
+E1031 09:00:37.822525   27057 reflector.go:227] "Failed to watch" err="namespaces \"p12-05-jupyter\" is forbidden: User \"kubernetes-admin\" cannot watch resource \"namespaces\" in API group \"\" at the cluster scope - error from a previous attempt: EOF" reflector="k8s.io/client-go/tools/watch/informerwatcher.go:162" type="*unstructured.Unstructured"
+E1031 09:00:39.013124   27057 reflector.go:227] "Failed to watch" err="failed to list *unstructured.Unstructured: namespaces \"p12-05-jupyter\" is forbidden: User \"kubernetes-admin\" cannot list resource \"namespaces\" in API group \"\" at the cluster scope" reflector="k8s.io/client-go/tools/watch/informerwatcher.go:162" type="*unstructured.Unstructured"
+E1031 09:00:41.369866   27057 reflector.go:227] "Failed to watch" err="failed to list *unstructured.Unstructured: namespaces \"p12-05-jupyter\" is forbidden: User \"kubernetes-admin\" cannot list resource \"namespaces\" in API group \"\" at the cluster scope" reflector="k8s.io/client-go/tools/watch/informerwatcher.go:162" type="*unstructured.Unstructured"
+E1031 09:00:44.639318   27057 reflector.go:227] "Failed to watch" err="failed to list *unstructured.Unstructured: namespaces \"p12-05-jupyter\" is forbidden: User \"kubernetes-admin\" cannot list resource \"namespaces\" in API group \"\" at the cluster scope" reflector="k8s.io/client-go/tools/watch/informerwatcher.go:162" type="*unstructured.Unstructured"
+
+## step 9: the image configs, read from the registries (no pull)
+$ registry config request for each image (manifest, then config blob)
+quay.io/jupyter/scipy-notebook:2024-08-12
+  digest=sha256:a8925f5242a701edd718a4c1afc3bdeabb7dcb9ae6ff55116db790379a6f6e04
+  config={'User': '1000', 'Entrypoint': ['tini', '-g', '--', 'start.sh'], 'Cmd': ['start-notebook.py']}
+quay.io/jupyter/pytorch-notebook:cuda12-2024-08-12
+  digest=sha256:e1ffb5e44ed261f51e524393b8ae621a79da957e712b084aac00a967fb41f6be
+  config={'User': '1000', 'Entrypoint': ['tini', '-g', '--', 'start.sh'], 'Cmd': ['start-notebook.py']}
+quay.io/jupyterhub/k8s-hub:4.4.4
+  digest=sha256:bbce7a924eac0dfe10d738ff2d966cb306a40973519005a160282415561a774b
+  config={'User': 'jovyan', 'Entrypoint': ['tini', '--'], 'Cmd': ['jupyterhub', '--config', '/usr/local/etc/jupyterhub/jupyterhub_config.py']}
+quay.io/jupyterhub/configurable-http-proxy:5.2.0
+  digest=sha256:522738d5285e4be758da5023194cbc95249efdadaa62a0998c8ed1aa2890b2da
+  config={'User': '65534', 'Entrypoint': ['/srv/configurable-http-proxy/chp-docker-entrypoint'], 'Cmd': None}
+quay.io/jupyterhub/k8s-network-tools:4.4.4
+  digest=sha256:9253a270fd2627154b38aea8a43a12e5afbebeb0d0b7d4c13679301cd9a83a0c
+  config={'User': None, 'Entrypoint': None, 'Cmd': ['/bin/sh']}
+
+## step 10: the rendered chart, read offline (no cluster call)
+$ helm template jupyterhub jupyterhub/jupyterhub --version 4.4.4 -n p12-05-jupyter -f jupyterhub-values.yaml | grep -c "^kind: ClusterRole$"
+0
+$ helm template jupyterhub jupyterhub/jupyterhub --version 4.4.4 -n p12-05-jupyter -f jupyterhub-values.yaml --show-only templates/hub/rbac.yaml | sed -n '/^rules:/,/^---/p'
+rules:
+  - apiGroups: [""]       # "" indicates the core API group
+    resources: ["pods", "persistentvolumeclaims", "secrets", "services"]
+    verbs: ["get", "watch", "list", "create", "delete"]
+  - apiGroups: [""]       # "" indicates the core API group
+    resources: ["events"]
+    verbs: ["get", "watch", "list"]
+---
+$ helm template jupyterhub jupyterhub/jupyterhub --version 4.4.4 -n p12-05-jupyter -f jupyterhub-values.yaml --show-only templates/singleuser/netpol.yaml | grep "component: \|cidr:\|port: \|metadata.name: "
+    component: singleuser
+    app.kubernetes.io/component: singleuser
+      component: singleuser-server
+        - port: notebook-port
+              component: hub
+        - port: 8081
+              component: proxy
+        - port: 8000
+              component: autohttps
+        - port: 8080
+        - port: 8443
+        - port: 53
+        - port: 53
+            cidr: 169.254.169.254/32
+              kubernetes.io/metadata.name: kube-system
+            cidr: 10.0.0.0/8
+            cidr: 172.16.0.0/12
+            cidr: 192.168.0.0/16
+$ helm template jupyterhub jupyterhub/jupyterhub --version 4.4.4 -n p12-05-jupyter -f jupyterhub-values.yaml --show-only templates/hub/deployment.yaml | grep "automountServiceAccountToken\|readOnlyRootFilesystem\|runAsNonRoot\|serviceAccountName"
+      serviceAccountName: hub
+        runAsNonRoot: true
+            readOnlyRootFilesystem: true
