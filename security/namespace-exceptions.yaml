@@ -144,3 +144,15 @@ exceptions:
     upstream: https://github.com/chaos-mesh/chaos-mesh/blob/v2.7.0/helm/chaos-mesh/values.yaml
     chapter: 13-grand-capstone-bookstore-platform/12-day-2-runbook-on-call-dr-chaos.md
     expires: 2027-06-30
+
+  - namespace: kafka-system
+    level: baseline
+    reason: >-
+      The KafkaConnect build in this namespace runs the Kaniko executor. The
+      image declares no user and sets USER=root, so restricted rejects the build
+      pod, and baseline admits it with no added capability. The Strimzi operator
+      and the Kafka pods are set to meet restricted. The namespace keeps audit and
+      warn at restricted.
+    upstream: https://strimzi.io/docs/operators/0.40.0/configuring.html
+    chapter: 13-grand-capstone-bookstore-platform/05-search-and-product-discovery.md
+    expires: 2027-06-30

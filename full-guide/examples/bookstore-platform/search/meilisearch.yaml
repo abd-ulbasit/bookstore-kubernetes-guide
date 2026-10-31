@@ -8,25 +8,23 @@
 #     process, no JVM) — easiest operational story on Kubernetes.
 #   - Typo tolerance + relevance ranking + faceting + filtering are all
 #     built in — no plug-in / query DSL the way OpenSearch needs.
-#   - StatefulSet + a single PVC is the production pattern. Sharding
-#     (Meilisearch's "instance pool" model) is reserved for >10M documents.
+#   - One StatefulSet and one PVC keep the index data on one volume.
 # Algolia is the SaaS alternative; teams that prefer "managed search and
 # never run a search engine" should pick it. The chapter walks both.
 #
 # StatefulSet (not Deployment) because the engine writes to a persistent
 # volume and Pod identity matters for stable storage. `serviceName` ties to
-# the headless Service below; one replica is fine for the chapter, two+ for
-# HA (Meilisearch v1.7+ supports a built-in cluster mode via the experimental
-# `--cluster` flag — production-shape after ch.13.05 graduates to the day-2
-# tier in ch.13.12).
+# the headless Service below. The chapter runs one replica; more replicas are
+# a day-2 topic in 13.12.
 #
-# PSA: bookstore-platform-system is `enforce: restricted`. The PodSpec uses
-# the non-root official image (1.7-alpine) + the standard restricted set of
-# securityContext fields.
+# PSA: the Namespace below sets `enforce: restricted`. The image declares no
+# user, so the pod sets runAsUser 65532 itself. The image is pinned by digest
+# (see the image line).
 #
 # Apply:
 #   kubectl apply -f examples/bookstore-platform/search/meilisearch.yaml
 ---
+
 apiVersion: v1
 kind: Namespace
 metadata:
@@ -41,6 +39,7 @@ metadata:
     pod-security.kubernetes.io/warn: restricted
     pod-security.kubernetes.io/warn-version: latest
 ---
+
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -51,6 +50,7 @@ metadata:
     app.kubernetes.io/component: search-engine
 automountServiceAccountToken: false
 ---
+
 # Headless Service — gives each StatefulSet Pod stable DNS (e.g.
 # meilisearch-0.meilisearch-headless.bookstore-platform-search.svc.cluster.local).
 # Used by the StatefulSet's serviceName for governing identity; not by
@@ -72,6 +72,7 @@ spec:
       port: 7700
       targetPort: 7700
 ---
+
 # Regular client Service — the address the search app talks to
 # (`meilisearch.bookstore-platform-search.svc.cluster.local:7700`).
 # clusterIP auto-assigned; load-balances across the StatefulSet's
@@ -92,6 +93,7 @@ spec:
       port: 7700
       targetPort: 7700
 ---
+
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
@@ -117,6 +119,7 @@ spec:
       automountServiceAccountToken: false
       securityContext:
         runAsNonRoot: true
+        # The image declares no USER, so the UID is set here.
         runAsUser: 65532
         runAsGroup: 65532
         fsGroup: 65532
@@ -124,21 +127,34 @@ spec:
           type: RuntimeDefault
       containers:
         - name: meilisearch
-          image: getmeili/meilisearch:v1.7-alpine
+          # Tag getmeili/meilisearch:v1.56.0 at the time of pinning.
+          image: getmeili/meilisearch@sha256:1f578fa865f8251894b3bf38d6668d6209a3f451f8f65ab953e129d4c1db5ef4
           imagePullPolicy: IfNotPresent
+          # The image runs from /meili_data, which sits on the read-only root
+          # filesystem. Dumps and snapshots go to the data volume, and so does
+          # the working directory.
+          workingDir: /data
+          # The image's entrypoint is tini and its default command is
+          # /bin/meilisearch. Args replace that command, so the binary is the
+          # first argument.
           args:
+            - "/bin/meilisearch"
             - "--master-key"
             - "$(MEILI_MASTER_KEY)"
             - "--http-addr"
             - "0.0.0.0:7700"
             - "--db-path"
             - "/data/meilisearch"
+            - "--dump-dir"
+            - "/data/dumps"
+            - "--snapshot-dir"
+            - "/data/snapshots"
             - "--env"
             - "production"
           env:
-            # In production the master key is pulled from ESO + Vault.
-            # The placeholder is UPPERCASE so a grep catches an
-            # un-replaced value before apply.
+            # Filled by External Secrets (search/external-secrets.yaml). Only this
+            # pod and the operators hold the master key; workloads get scoped
+            # keys (ch.13.05 step 4).
             - name: MEILI_MASTER_KEY
               valueFrom:
                 secretKeyRef:
@@ -188,17 +204,38 @@ spec:
           requests:
             storage: 5Gi
 ---
-# Placeholder Secret — REPLACE via ESO + Vault in production
-# (Part 11 ch.05 — ESO + Vault wiring). The chapter calls this out
-# explicitly and the value here is a labelled placeholder, NOT a real key.
-apiVersion: v1
-kind: Secret
+
+# Default-deny for the search namespace, then one explicit allow. Meilisearch
+# makes no outbound calls, so egress stays denied. The allow admits the search
+# service in the tenant namespace and the sink connector in kafka-system.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
 metadata:
-  name: meilisearch-master-key
+  name: default-deny
   namespace: bookstore-platform-search
-  labels:
-    app.kubernetes.io/part-of: bookstore-platform
-    bookstore-platform.example.com/placeholder: "true"
-type: Opaque
-stringData:
-  master-key: "REPLACE-ME-VIA-ESO-NOT-IN-SOURCE"
+spec:
+  podSelector: {}
+  policyTypes: ["Ingress", "Egress"]
+---
+
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-index-clients
+  namespace: bookstore-platform-search
+spec:
+  podSelector:
+    matchLabels:
+      app: meilisearch
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: bookstore-platform-acme-books
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kafka-system
+      ports:
+        - protocol: TCP
+          port: 7700

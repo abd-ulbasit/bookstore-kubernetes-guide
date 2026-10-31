@@ -7,9 +7,13 @@
 # the BookstoreTenant Composition (ch.13.02) stamps the equivalent for each
 # new tenant via the same template.
 #
+# The service holds a search-only key (`search` on books-*), never the master
+# key. External Secrets fills it from Vault (app/search/external-secret.yaml).
+#
 # Apply (after the tenant ns + Meilisearch):
 #   kubectl apply -f examples/bookstore-platform/app/search/deployment.yaml
 ---
+
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -21,6 +25,7 @@ metadata:
     bookstore-platform.example.com/tenant: acme-books
 automountServiceAccountToken: false
 ---
+
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -54,17 +59,19 @@ spec:
           type: RuntimeDefault
       containers:
         - name: search
+          # Built from examples/bookstore-platform/app/search (the guide's own
+          # image, so the tag is the one the build produced).
           image: bookstore-platform/search:dev
           imagePullPolicy: IfNotPresent
           env:
             - { name: PORT,         value: "8080" }
             - { name: MEILI_URL,    value: "http://meilisearch.bookstore-platform-search.svc.cluster.local:7700" }
             - { name: INDEX_PREFIX, value: "books-" }
-            - name: MEILI_MASTER_KEY
+            - name: MEILI_API_KEY
               valueFrom:
                 secretKeyRef:
-                  name: meilisearch-master-key
-                  key: master-key
+                  name: meilisearch-search-key
+                  key: api-key
           ports:
             - { containerPort: 8080, name: http }
           resources:
@@ -89,3 +96,59 @@ spec:
             readOnlyRootFilesystem: true
             capabilities:
               drop: ["ALL"]
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
+---
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: search
+  namespace: bookstore-platform-acme-books
+  labels:
+    app: search
+    app.kubernetes.io/part-of: bookstore-platform
+    app.kubernetes.io/component: search-api
+    bookstore-platform.example.com/tenant: acme-books
+spec:
+  selector:
+    app: search
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+---
+
+# Explicit allows on top of the tenant default-deny (ch.13.02): DNS, and the
+# Meilisearch port in bookstore-platform-search. Nothing else leaves the pods.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: search-egress
+  namespace: bookstore-platform-acme-books
+spec:
+  podSelector:
+    matchLabels:
+      app: search
+  policyTypes: ["Egress"]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - { protocol: UDP, port: 53 }
+        - { protocol: TCP, port: 53 }
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: bookstore-platform-search
+      ports:
+        - { protocol: TCP, port: 7700 }

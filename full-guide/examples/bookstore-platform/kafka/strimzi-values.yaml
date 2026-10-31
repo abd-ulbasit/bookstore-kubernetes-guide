@@ -1,0 +1,18 @@
+# Bookstore Platform v2 — Part 13 ch.05: values for the Strimzi operator
+# (strimzi/strimzi-kafka-operator 0.40.0). The operator image runs as UID 1001
+# and needs no privilege, no added capability and no writable root filesystem.
+# Its /tmp is an emptyDir from the chart. The keys below are the chart's own
+# security values.
+#
+# Apply:
+#   helm install strimzi-operator strimzi/strimzi-kafka-operator \
+#     --version 0.40.0 -n kafka-system -f kafka/strimzi-values.yaml --wait
+podSecurityContext:
+  runAsNonRoot: true
+  seccompProfile:
+    type: RuntimeDefault
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop: ["ALL"]

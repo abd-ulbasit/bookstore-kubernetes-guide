@@ -4,16 +4,21 @@
 # day-2 follow-up).
 #
 # Strimzi (https://strimzi.io) is the Kafka operator. It defines:
-#   - Kafka            — the cluster CR (brokers + zookeeper/kraft + listeners)
+#   - Kafka            — the cluster CR (brokers, listeners, authorization)
 #   - KafkaTopic       — a topic as a Kubernetes resource (declarative)
 #   - KafkaConnect     — a Kafka Connect cluster (Debezium, sinks)
 #   - KafkaConnector   — an individual connector inside the Connect cluster
-#   - KafkaUser        — a SASL user with ACLs
+#   - KafkaUser        — a TLS identity with simple ACLs (debezium-connector.yaml)
 #
 # THIS FILE creates a 3-broker KRaft cluster (no separate ZooKeeper) — Strimzi
 # 0.40+ default. KRaft mode is the future; the chapter teaches KRaft to avoid
 # the ZK-deprecation footgun. 3 brokers + replication.factor 3 + min ISR 2 is
 # the smallest setup that survives one broker loss without data loss.
+#
+# One listener, `tls` on port 9093, with mutual TLS. There is no plaintext
+# listener. A client must present a KafkaUser certificate, and
+# `authorization: simple` checks every request against that user's ACLs. A pod
+# without a KafkaUser certificate cannot produce or consume at all.
 #
 # !!! CRD-INTRINSIC DRY-RUN
 #   `Kafka` and `KafkaTopic` are Strimzi CRDs (kafka.strimzi.io/v1beta2).
@@ -22,9 +27,9 @@
 #   EXPECTED. Install Strimzi first (ch.13.05 Hands-on §1 — pinned-Helm
 #   `strimzi/strimzi-kafka-operator --version 0.40.0` into `kafka-system` ns).
 #
-# PSA — broker Pods land in `kafka-system` (PSA: restricted on this ns is
-# enforced by the platform-base namespace template; Strimzi 0.40+ ships a
-# restricted-compatible PodSpec by default).
+# PSA — the broker Pods land in `kafka-system`, which is labelled `baseline`
+# (ch.13.05 step 1) because the Connect build runs as root. The broker
+# containers set restricted-compatible security contexts anyway (nodepool.yaml).
 #
 # Apply (after Strimzi operator):
 #   kubectl apply -f examples/bookstore-platform/kafka/cluster.yaml
@@ -49,19 +54,15 @@ spec:
     # Strimzi ignores them here and would warn on apply. Cluster-level
     # listener + config remain on the Kafka CR.
     listeners:
-      # Plaintext + SASL inside the mesh; mTLS is enforced one layer up via
-      # Istio ambient (Part 11 ch.04). Production sets `tls: true` and a
-      # cert-manager-issued cert; on kind the in-cluster listener is enough.
-      - name: plain
-        port: 9092
-        type: internal
-        tls: false
       - name: tls
         port: 9093
         type: internal
         tls: true
         authentication:
           type: tls
+    # Simple ACLs: a request succeeds only when a KafkaUser grants it.
+    authorization:
+      type: simple
     config:
       # Production-shape defaults (Confluent's recommendation, scaled to 3 brokers).
       offsets.topic.replication.factor: 3
