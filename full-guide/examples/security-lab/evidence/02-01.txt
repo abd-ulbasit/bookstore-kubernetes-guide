@@ -1,0 +1,297 @@
+# Transcript for 02-networking/01-networking-model.md, hands-on steps 1 to 3.
+# Tier A (kind). Kubernetes v1.37.0 on a kind v0.33.0 node (image
+# kindest/node:v1.37.0, one node), kubectl v1.37.2. The cluster is a kind
+# cluster on a remote Linux lab host, not on a reader's machine, and other
+# workers share it. The chapter names its cluster bookstore; this one is
+# sf-pilot.
+# Renamed: the chapter's bookstore namespace ran as p02-01-bookstore and its
+# netdemo namespace as p02-01-netdemo. The manifests are scratch copies of
+# examples/bookstore/raw-manifests (00-, 05-, 10-, 15- and 16-) with the
+# namespace renamed, and netdemo.yaml with the same rename. The commands
+# otherwise match the chapter.
+# Did not work the first time: the apply of 15-catalog-config.yaml returned an
+# etcd timeout and was re-applied, and the catalog and client Pods sat in
+# ContainerCreating for about two minutes while the node was busy, then reached
+# Running. Catalog stays 0/1 Ready because /readyz pings Postgres, which this
+# run does not deploy.
+# The run log also keeps exploratory commands: one jsonpath filter that returned
+# 0, one count that did not match, and one unquoted zsh glob that failed.
+# The chapter shows only the commands it needs.
+# Cleanup: kubectl delete was accepted for both namespaces, which were still
+# Terminating when the run ended: the namespace controller had not finished,
+# because the shared control plane was failing its etcd readiness check. The
+# last blocks show that state.
+# ---- run log ----
+$ kubectl apply -f 00-namespace.yaml
+namespace/p02-01-bookstore created
+resourcequota/bookstore-quota created
+limitrange/bookstore-limits created
+[exit 0]
+$ kubectl apply -f 05-serviceaccounts-rbac.yaml -f 15-catalog-config.yaml -f 16-db-credentials.yaml
+serviceaccount/catalog-sa created
+serviceaccount/storefront-sa created
+serviceaccount/orders-sa created
+serviceaccount/payments-worker-sa created
+serviceaccount/postgres-sa created
+serviceaccount/redis-sa created
+serviceaccount/rabbitmq-sa created
+serviceaccount/migrate-sa created
+role.rbac.authorization.k8s.io/catalog-config-reader created
+rolebinding.rbac.authorization.k8s.io/catalog-config-reader-binding created
+secret/db-credentials created
+Error from server: error when creating "15-catalog-config.yaml": etcdserver: request timed out
+[exit 1]
+$ kubectl apply -f 10-catalog-deploy.yaml
+deployment.apps/catalog created
+[exit 0]
+$ kubectl wait pod -l app=catalog -n p02-01-bookstore --for=jsonpath='{.status.phase}'=Running --timeout=180s
+error: no matching resources found
+[exit 1]
+$ kubectl get pods -n p02-01-bookstore -l app=catalog -o wide
+No resources found in p02-01-bookstore namespace.
+[exit 0]
+$ kubectl apply -f 15-catalog-config.yaml
+configmap/catalog-config unchanged
+[exit 0]
+$ kubectl wait pod -l app=catalog -n p02-01-bookstore --for=create --timeout=80s
+pod/catalog-86d7dc55cc-dl2mk condition met
+pod/catalog-86d7dc55cc-m85rq condition met
+[exit 0]
+$ kubectl wait pod -l app=catalog -n p02-01-bookstore --for=jsonpath='{.status.phase}'=Running --timeout=90s
+timed out waiting for the condition on pods/catalog-86d7dc55cc-dl2mk
+timed out waiting for the condition on pods/catalog-86d7dc55cc-f6gjb
+timed out waiting for the condition on pods/catalog-86d7dc55cc-m85rq
+[exit 1]
+$ kubectl get pods -n p02-01-bookstore -l app=catalog -o wide
+NAME                       READY   STATUS              RESTARTS   AGE    IP       NODE                     NOMINATED NODE   READINESS GATES
+catalog-86d7dc55cc-dl2mk   0/1     ContainerCreating   0          98s    <none>   sf-pilot-control-plane   <none>           <none>
+catalog-86d7dc55cc-f6gjb   0/1     ContainerCreating   0          98s    <none>   sf-pilot-control-plane   <none>           <none>
+catalog-86d7dc55cc-m85rq   0/1     ContainerCreating   0          101s   <none>   sf-pilot-control-plane   <none>           <none>
+[exit 0]
+$ kubectl wait pod -l app=catalog -n p02-01-bookstore --for=condition=Ready=false --timeout=5s
+pod/catalog-86d7dc55cc-dl2mk condition met
+pod/catalog-86d7dc55cc-f6gjb condition met
+pod/catalog-86d7dc55cc-m85rq condition met
+[exit 0]
+$ kubectl wait pod -l app=catalog -n p02-01-bookstore --for=jsonpath='{.status.phase}'=Running --timeout=100s
+pod/catalog-86d7dc55cc-dl2mk condition met
+pod/catalog-86d7dc55cc-f6gjb condition met
+pod/catalog-86d7dc55cc-m85rq condition met
+[exit 0]
+$ kubectl get pods -n p02-01-bookstore -l app=catalog -o wide
+NAME                       READY   STATUS    RESTARTS   AGE     IP             NODE                     NOMINATED NODE   READINESS GATES
+catalog-86d7dc55cc-dl2mk   0/1     Running   0          2m33s   10.244.0.191   sf-pilot-control-plane   <none>           <none>
+catalog-86d7dc55cc-f6gjb   0/1     Running   0          2m33s   10.244.0.192   sf-pilot-control-plane   <none>           <none>
+catalog-86d7dc55cc-m85rq   0/1     Running   0          2m36s   10.244.0.188   sf-pilot-control-plane   <none>           <none>
+[exit 0]
+$ kubectl apply -f netdemo-lab.yaml
+namespace/p02-01-netdemo created
+serviceaccount/client created
+pod/client created
+[exit 0]
+$ kubectl wait pod/client -n p02-01-netdemo --for=jsonpath='{.status.phase}'=Running --timeout=100s
+error: timed out waiting for the condition on pods/client
+[exit 1]
+$ kubectl wait pod/client -n p02-01-netdemo --for=jsonpath='{.status.phase}'=Running --timeout=100s
+pod/client condition met
+[exit 0]
+$ kubectl get pod client -n p02-01-netdemo -o wide
+NAME     READY   STATUS    RESTARTS   AGE     IP             NODE                     NOMINATED NODE   READINESS GATES
+client   1/1     Running   0          2m19s   10.244.0.219   sf-pilot-control-plane   <none>           <none>
+[exit 0]
+$ kubectl get events -n p02-01-netdemo --sort-by=.lastTimestamp
+LAST SEEN   TYPE     REASON      OBJECT       MESSAGE
+2m18s       Normal   Scheduled   pod/client   Successfully assigned p02-01-netdemo/client to sf-pilot-control-plane
+[exit 0]
+$ CAT_IP=$(kubectl get pod -n p02-01-bookstore -l app=catalog -o jsonpath="{.items[0].status.podIP}"); echo "$CAT_IP"
+10.244.0.191
+[exit 0]
+$ kubectl exec -n p02-01-netdemo client -- curl -s http://$CAT_IP:8080/healthz
+{"status":"ok"}
+[exit 0]
+$ kubectl exec -n p02-01-netdemo client -- sh -c "curl -s -o /dev/null -w \"%{http_code}\n\" http://$CAT_IP:8080/books"
+500
+[exit 0]
+$ kubectl exec -n p02-01-netdemo client -- curl -s -w "\n" http://$CAT_IP:8080/books | head -c 300; echo
+{"error":"cannot load catalog"}
+
+
+[exit 0]
+$ kubectl get daemonset -n kube-system kindnet
+NAME      DESIRED   CURRENT   READY   UP-TO-DATE   AVAILABLE   NODE SELECTOR            AGE
+kindnet   1         1         1       1            1           kubernetes.io/os=linux   9h
+[exit 0]
+$ docker exec sf-pilot-control-plane sh -c 'grep "\"type\"" /etc/cni/net.d/10-kindnet.conflist'
+		"type": "ptp",
+			"type": "host-local",
+		"type": "portmap",
+[exit 0]
+$ docker exec sf-pilot-control-plane sh -c 'ip -br addr | grep veth'
+vethacf6be5b@if2 UP             10.244.0.1/32 fe80::acb8:81ff:fe29:deec/64 
+vethf6deb356@if2 UP             10.244.0.1/32 fe80::b09c:eeff:feaf:5968/64 
+vethea0d3f0b@if2 UP             10.244.0.1/32 fe80::7c46:cfff:fe48:bf09/64 
+veth3c2511a8@if2 UP             10.244.0.1/32 fe80::bca3:d1ff:fe9e:1225/64 
+vethb00b4df5@if2 UP             10.244.0.1/32 fe80::bc46:83ff:fe05:22da/64 
+veth668f9cd6@if2 UP             10.244.0.1/32 fe80::80a6:dfff:fec3:81b0/64 
+veth9e08e2ca@if2 UP             10.244.0.1/32 fe80::9053:8fff:fe16:c965/64 
+veth02955fe1@if2 UP             10.244.0.1/32 fe80::3048:85ff:fe4f:14df/64 
+vethe916861b@if2 UP             10.244.0.1/32 fe80::4897:7bff:fe97:ea62/64 
+veth7afe49b9@if2 UP             10.244.0.1/32 fe80::e4c0:40ff:fe21:6c05/64 
+veth862e2b74@if2 UP             10.244.0.1/32 fe80::f461:60ff:fe43:eff5/64 
+veth64b1d54e@if2 UP             10.244.0.1/32 fe80::18e8:aaff:fe9a:1190/64 
+veth55d2eed9@if2 UP             10.244.0.1/32 fe80::884a:66ff:fe92:4e69/64 
+vethe7b86f52@if2 UP             10.244.0.1/32 fe80::d87f:20ff:fe06:926/64 
+veth939637eb@if2 UP             10.244.0.1/32 fe80::5095:3cff:fe18:fc94/64 
+veth08ee030f@if2 UP             10.244.0.1/32 fe80::640b:7ff:fe6a:7376/64 
+veth2f43b8c0@if2 UP             10.244.0.1/32 fe80::3083:82ff:fe9d:3c00/64 
+vethf54ebd5c@if2 UP             10.244.0.1/32 fe80::7858:68ff:fe36:9eb9/64 
+veth759a2c78@if2 UP             10.244.0.1/32 fe80::3421:6aff:fede:21b0/64 
+veth7a3595b9@if2 UP             10.244.0.1/32 fe80::6496:c1ff:fe2e:9993/64 
+veth350f63b1@if2 UP             10.244.0.1/32 fe80::f833:e9ff:feab:87d/64 
+vethd7f302b0@if2 UP             10.244.0.1/32 fe80::f445:97ff:fe20:2f6e/64 
+veth87df7561@if2 UP             10.244.0.1/32 fe80::6001:d2ff:feee:797e/64 
+vethc4e5d6ce@if2 UP             10.244.0.1/32 fe80::dc41:c2ff:feab:67db/64 
+veth0b8c5212@if2 UP             10.244.0.1/32 fe80::dcfe:c9ff:fe68:57e2/64 
+vethea58d450@if2 UP             10.244.0.1/32 fe80::886f:7fff:fe73:43e8/64 
+veth737ae443@if2 UP             10.244.0.1/32 fe80::cca8:47ff:fe62:5f90/64 
+veth6d0c6154@if2 UP             10.244.0.1/32 fe80::c0e1:e6ff:fea5:8a5a/64 
+veth2ac4c265@if2 UP             10.244.0.1/32 fe80::301a:1fff:fe8c:53f4/64 
+veth266e6b55@if2 UP             10.244.0.1/32 fe80::9c77:9aff:fea3:236e/64 
+veth1266b26b@if2 UP             10.244.0.1/32 fe80::d49a:efff:fec0:35b4/64 
+veth61f34f24@if2 UP             10.244.0.1/32 fe80::c01d:3ff:fed3:e5ac/64 
+veth3aa32292@if2 UP             10.244.0.1/32 fe80::ecfb:36ff:fe1f:e9ef/64 
+vethb88f5cc2@if2 UP             10.244.0.1/32 fe80::e496:a8ff:fef6:8dbc/64 
+veth690447f8@if2 UP             10.244.0.1/32 fe80::a41c:e2ff:fe5b:c37c/64 
+veth5a2de1a5@if2 UP             10.244.0.1/32 fe80::18cc:e1ff:fe61:743f/64 
+vethfb589b86@if2 UP             10.244.0.1/32 fe80::b419:76ff:fe60:98f5/64 
+vetha50fcf6f@if2 UP             10.244.0.1/32 fe80::d44c:cfff:fe58:c3d1/64 
+veth7894368e@if2 UP             10.244.0.1/32 fe80::f0e5:56ff:fe03:5509/64 
+vethd0a79b86@if2 UP             10.244.0.1/32 fe80::b85a:f0ff:fe60:89b3/64 
+vethab8fb6e2@if2 UP             10.244.0.1/32 fe80::f0c4:65ff:fed9:78de/64 
+vethb5fc6938@if2 UP             10.244.0.1/32 fe80::70fe:3fff:feef:727c/64 
+veth420090dc@if2 UP             10.244.0.1/32 fe80::d07c:b7ff:feed:bf7f/64 
+veth7d9a5e28@if2 UP             10.244.0.1/32 fe80::b457:56ff:feab:2d9c/64 
+vethaff2f75d@if2 UP             10.244.0.1/32 fe80::1845:9dff:fe53:1e69/64 
+veth7e2ffedc@if2 UP             10.244.0.1/32 fe80::f0f9:49ff:fed2:ec1/64 
+veth71007068@if2 UP             10.244.0.1/32 fe80::f035:ddff:fe08:4140/64 
+veth45a5b9fc@if2 UP             10.244.0.1/32 fe80::40eb:e0ff:fe6f:58a7/64 
+veth9ac571a5@if2 UP             10.244.0.1/32 fe80::7c28:8eff:fee7:8b49/64 
+vethca11288a@if2 UP             10.244.0.1/32 fe80::e03f:48ff:fed0:72ae/64 
+[exit 0]
+$ docker exec sf-pilot-control-plane sh -c 'ip route'
+default via 172.18.0.1 dev eth0 
+10.244.0.2 dev vethacf6be5b scope host 
+10.244.0.3 dev vethf6deb356 scope host 
+10.244.0.4 dev vethea0d3f0b scope host 
+10.244.0.167 dev veth3c2511a8 scope host 
+10.244.0.171 dev vethb00b4df5 scope host 
+10.244.0.172 dev veth668f9cd6 scope host 
+10.244.0.173 dev veth9e08e2ca scope host 
+10.244.0.174 dev veth02955fe1 scope host 
+10.244.0.176 dev vethe916861b scope host 
+10.244.0.177 dev veth7afe49b9 scope host 
+10.244.0.185 dev veth862e2b74 scope host 
+10.244.0.186 dev veth64b1d54e scope host 
+10.244.0.188 dev veth55d2eed9 scope host 
+10.244.0.189 dev vethe7b86f52 scope host 
+10.244.0.190 dev veth939637eb scope host 
+10.244.0.191 dev veth08ee030f scope host 
+10.244.0.192 dev veth2f43b8c0 scope host 
+10.244.0.193 dev vethf54ebd5c scope host 
+10.244.0.194 dev veth759a2c78 scope host 
+10.244.0.200 dev veth7a3595b9 scope host 
+10.244.0.201 dev veth350f63b1 scope host 
+10.244.0.202 dev vethd7f302b0 scope host 
+10.244.0.203 dev veth87df7561 scope host 
+10.244.0.204 dev vethc4e5d6ce scope host 
+10.244.0.207 dev veth0b8c5212 scope host 
+10.244.0.208 dev vethea58d450 scope host 
+10.244.0.211 dev veth737ae443 scope host 
+10.244.0.214 dev veth6d0c6154 scope host 
+10.244.0.215 dev veth2ac4c265 scope host 
+10.244.0.216 dev veth266e6b55 scope host 
+10.244.0.217 dev veth1266b26b scope host 
+10.244.0.218 dev veth61f34f24 scope host 
+10.244.0.219 dev veth3aa32292 scope host 
+10.244.0.222 dev vethb88f5cc2 scope host 
+10.244.0.224 dev veth690447f8 scope host 
+10.244.0.225 dev veth5a2de1a5 scope host 
+10.244.0.226 dev vethfb589b86 scope host 
+10.244.0.227 dev vetha50fcf6f scope host 
+10.244.0.228 dev veth7894368e scope host 
+10.244.0.229 dev vethd0a79b86 scope host 
+10.244.0.230 dev vethab8fb6e2 scope host 
+10.244.0.231 dev vethb5fc6938 scope host 
+10.244.0.232 dev veth420090dc scope host 
+10.244.0.233 dev veth7d9a5e28 scope host 
+10.244.0.234 dev vethaff2f75d scope host 
+10.244.0.235 dev veth7e2ffedc scope host 
+10.244.0.236 dev veth71007068 scope host 
+10.244.0.237 dev veth45a5b9fc scope host 
+10.244.0.238 dev veth9ac571a5 scope host 
+10.244.0.239 dev vethca11288a scope host 
+172.18.0.0/16 dev eth0 proto kernel scope link src 172.18.0.2 
+[exit 0]
+$ kubectl get pods -A --field-selector spec.nodeName=sf-pilot-control-plane -o jsonpath='{range .items[?(@.spec.hostNetwork!=true)]}{.metadata.name}{"\n"}{end}' | wc -l
+       0
+[exit 0]
+$ docker exec sf-pilot-control-plane sh -c 'ip -br addr | grep -c veth'
+50
+[exit 0]
+$ kubectl get pods -A --field-selector spec.nodeName=sf-pilot-control-plane -o jsonpath='{range .items[*]}{.status.podIP}{"\n"}{end}' | grep -c '^10\.244\.'
+38
+[exit 0]
+$ docker exec sf-pilot-control-plane sh -c 'ip -br addr | grep -c veth'
+50
+[exit 0]
+$ kubectl get pods -n p02-01-bookstore -l app=catalog -o custom-columns=POD:.metadata.name,IP:.status.podIP,NODE:.spec.nodeName
+POD                        IP             NODE
+catalog-86d7dc55cc-dl2mk   10.244.0.191   sf-pilot-control-plane
+catalog-86d7dc55cc-f6gjb   10.244.0.192   sf-pilot-control-plane
+catalog-86d7dc55cc-m85rq   10.244.0.188   sf-pilot-control-plane
+[exit 0]
+$ kubectl get pod client -n p02-01-netdemo -o custom-columns=POD:.metadata.name,IP:.status.podIP,NODE:.spec.nodeName
+POD      IP             NODE
+client   10.244.0.219   sf-pilot-control-plane
+[exit 0]
+$ docker exec sf-pilot-control-plane sh -c 'ip route | grep -E "^10\.244\.0\.(188|191|192|219) "'
+10.244.0.188 dev veth55d2eed9 scope host 
+10.244.0.191 dev veth08ee030f scope host 
+10.244.0.192 dev veth2f43b8c0 scope host 
+10.244.0.219 dev veth3aa32292 scope host 
+[exit 0]
+$ docker exec sf-pilot-control-plane sh -c 'ip -br addr | grep -E "^veth" | wc -l'
+52
+[exit 0]
+$ kubectl get nodes -o custom-columns=NAME:.metadata.name,IP:.status.addresses[0].address
+(eval):1: no matches found: custom-columns=NAME:.metadata.name,IP:.status.addresses[0].address
+[exit 1]
+$ CAT_IP=$(kubectl get pod -n p02-01-bookstore -l app=catalog -o jsonpath="{.items[0].status.podIP}"); CLIENT_IP=$(kubectl get pod client -n p02-01-netdemo -o jsonpath="{.status.podIP}"); for ip in $CAT_IP $CLIENT_IP; do docker exec sf-pilot-control-plane sh -c "ip route | grep \"^$ip \""; done
+10.244.0.191 dev veth08ee030f scope host 
+10.244.0.219 dev veth3aa32292 scope host 
+[exit 0]
+$ docker exec sf-pilot-control-plane sh -c 'ip -br link | awk "/^(cni|br)/{n++} END{print n+0}"'
+0
+[exit 0]
+$ ssh thinkpad '~/.local/bin/kind-v0.33.0 version'
+kind v0.33.0 go1.26.7 linux/amd64
+[exit 0]
+$ kubectl get nodes -o custom-columns='NAME:.metadata.name,IP:.status.addresses[0].address'
+NAME                     IP
+sf-pilot-control-plane   172.18.0.2
+[exit 0]
+$ docker exec sf-pilot-control-plane grep -o '"type": "[^"]*"' /etc/cni/net.d/10-kindnet.conflist
+"type": "ptp"
+"type": "host-local"
+"type": "portmap"
+[exit 0]
+$ kubectl delete namespace p02-01-netdemo p02-01-bookstore --timeout=100s
+namespace "p02-01-netdemo" deleted
+namespace "p02-01-bookstore" deleted
+error: timed out waiting for the condition on namespaces/p02-01-netdemo
+[exit 1]
+$ kubectl get ns p02-01-bookstore p02-01-netdemo
+NAME               STATUS        AGE
+p02-01-bookstore   Terminating   18m
+p02-01-netdemo     Terminating   12m
+[exit 0]
