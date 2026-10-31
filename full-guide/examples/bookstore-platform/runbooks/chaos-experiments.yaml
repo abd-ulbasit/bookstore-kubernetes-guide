@@ -1,6 +1,6 @@
 # Bookstore Platform v2 — Part 13 ch.12: the Chaos Mesh Workflow that
 # chains the 5 quarterly experiments (pod-kill, network-delay,
-# io-stress, region-loss, payments-failure). Run during the chaos
+# io-latency, region-loss, payments-failure). Run during the chaos
 # game-day against the staging cluster.
 #
 # v1 had a small set of chaos experiments (Part 11 ch.07). v2's are
@@ -12,6 +12,8 @@
 #   Chaos Mesh CRDs. WITHOUT Chaos Mesh installed:
 #     no matches for kind "Workflow" in version "chaos-mesh.org/v1alpha1"
 #   EXPECTED. ch.13.12 installs Chaos Mesh first.
+#
+# Blast radius: every experiment names one namespace and uses mode: one.
 #
 # Apply (against the STAGING cluster only):
 #   kubectl --context kind-bookstore-platform-staging apply \
@@ -55,7 +57,7 @@ spec:
         - observation-1
         - experiment-2-network-delay-catalog
         - observation-2
-        - experiment-3-io-stress-cnpg
+        - experiment-3-io-latency-cnpg
         - observation-3
         - experiment-4-region-dns-loss
         - observation-4
@@ -87,7 +89,7 @@ spec:
       deadline: 5m
       networkChaos:
         action: delay
-        mode: all
+        mode: one
         selector:
           namespaces: [bookstore-platform-acme-books]
           labelSelectors:
@@ -97,7 +99,7 @@ spec:
           correlation: "25"
           jitter: "10ms"
         target:
-          mode: all
+          mode: one
           selector:
             namespaces: [bookstore-platform-acme-books]
             labelSelectors:
@@ -107,22 +109,23 @@ spec:
       templateType: Suspend
       deadline: 10m
     # ---------------------------------------------------------------
-    # Experiment 3: io-stress (CNPG primary node)
+    # Experiment 3: io-latency (CNPG primary data volume)
     # Hypothesis: replication lag bounded; reads still served.
     # ---------------------------------------------------------------
-    - name: experiment-3-io-stress-cnpg
-      templateType: StressChaos
+    - name: experiment-3-io-latency-cnpg
+      templateType: IOChaos
       deadline: 5m
-      stressChaos:
+      ioChaos:
+        action: latency
         mode: one
         selector:
           namespaces: [cnpg-system]
           labelSelectors:
             cnpg.io/cluster: bookstore-platform-cnpg
             cnpg.io/instanceRole: primary
-        stressors:
-          io:
-            workers: 4
+        volumePath: /var/lib/postgresql/data
+        delay: "100ms"
+        percent: 50
         duration: "2m"
     - name: observation-3
       templateType: Suspend
@@ -143,8 +146,9 @@ spec:
       deadline: 5m
       dnsChaos:
         action: error
-        mode: all
+        mode: one
         selector:
+          namespaces: [bookstore-platform-acme-books]
           labelSelectors:
             app.kubernetes.io/part-of: bookstore-platform
         patterns:
@@ -155,13 +159,14 @@ spec:
     # ---------------------------------------------------------------
     # Experiment 5: payments-gateway-failure (Stripe 500)
     # Hypothesis: saga compensation fires; no order stuck.
-    # Inject HTTP chaos returning 500 on 30% of webhook callbacks.
+    # Replace the status of webhook callbacks with 500 (HTTPChaos has no
+    # percentage in 2.7.0, so every matching callback is affected).
     # ---------------------------------------------------------------
     - name: experiment-5-payments-failure
       templateType: HTTPChaos
       deadline: 5m
       httpChaos:
-        mode: all
+        mode: one
         selector:
           namespaces: [bookstore-platform-acme-books]
           labelSelectors:
@@ -170,7 +175,6 @@ spec:
         port: 8080
         path: /stripe/webhook
         method: POST
-        percent: 30
         replace:
           code: 500
         duration: "3m"

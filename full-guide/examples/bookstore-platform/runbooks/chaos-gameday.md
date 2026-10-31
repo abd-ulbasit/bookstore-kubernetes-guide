@@ -32,12 +32,14 @@ windows + postmortems.
 - One experiment at a time.
 - Maximum blast radius:
   - Pod-level: `mode: one` (one Pod).
-  - Network: 1 minute of injected delay/loss.
-  - I/O: 1 minute of throttle.
+  - Network: the Workflow's duration (5 minutes at most), mode one.
+  - I/O: 2 minutes of latency on one CNPG primary, mode one.
   - Region-loss: simulated by cordoning a node group, not a real
     region.
-- Abort condition: a Prometheus query that fails the experiment
-  early (e.g. "5xx rate > 50 % for 30 s" → abort).
+- Stop rule: the lead watches the thresholds in each experiment and
+  deletes the Workflow when one breaks (for example "5xx rate > 50 % for
+  30 s"). Chaos Mesh's statusCheck can only check an HTTP status code,
+  so the stop is manual.
 - Manual abort: the game-day lead can call abort at any time.
 
 ## The five experiments
@@ -46,8 +48,8 @@ Each experiment is declared in `chaos-experiments.yaml` (a Chaos Mesh
 Workflow). Each has:
 
 1. A **hypothesis** ("storefront stays up").
-2. A **safety boundary** ("one Pod; 60 s").
-3. An **abort condition** (a Prometheus query).
+2. A **safety boundary** (one Pod or one namespace; a stated duration).
+3. A **stop rule** (the thresholds above; the lead deletes the Workflow).
 4. An **observation window** (10 min after the fault clears).
 5. A **postmortem requirement** (even if the experiment passed).
 
@@ -56,11 +58,12 @@ Workflow). Each has:
 - **Hypothesis:** When one `payments-gateway` Pod is killed in
   `bookstore-platform-acme-books`, the storefront's `/healthz` stays
   at 200 OK, and the catalog's p99 latency stays under 100 ms. The
-  PodDisruptionBudget keeps `minAvailable: 2`.
+  PodDisruptionBudget with `minAvailable: 2` keeps it. This tree ships
+  none for payments-gateway, so add one first.
 - **Inject:** Chaos Mesh `PodChaos` with `action: pod-kill, mode: one,
   duration: 60s`.
-- **Abort:** 5xx rate > 5 % for 30 s.
-- **Observed:** storefront stays up; PDB preserves replica count.
+- **Stop:** 5xx rate > 5 % for 30 s (manual).
+- **Observed:** storefront stays up; the replica count holds.
 - **Why it matters:** rolling restarts + node failures look like this.
 
 ### Experiment 2 — network-delay (catalog → orders)
@@ -70,19 +73,19 @@ Workflow). Each has:
   (the timeout + retry logic handles it).
 - **Inject:** Chaos Mesh `NetworkChaos` with `action: delay,
   latency: 200ms, duration: 5m`.
-- **Abort:** p99 > 2 s for 1 min.
+- **Stop:** p99 > 2 s for 1 min (manual).
 - **Observed:** retries fire; p99 stays bounded; no 5xx spike.
 - **Why it matters:** cross-region calls + noisy neighbours look like
   this.
 
-### Experiment 3 — io-stress (CNPG node)
+### Experiment 3 — io-latency (CNPG primary data volume)
 
-- **Hypothesis:** When I/O stress is applied to the CNPG primary's
-  node, the database's connection pool stays under 80 % usage; the
+- **Hypothesis:** When I/O latency is added to the CNPG primary's data
+  volume, the database's connection pool stays under 80 % usage; the
   catalog and orders services see < 1 s p99.
-- **Inject:** Chaos Mesh `StressChaos` with `stressors: io: workers:
-  4, duration: 2m`.
-- **Abort:** CNPG replication lag > 60 s.
+- **Inject:** Chaos Mesh `IOChaos` with `action: latency, delay: 100ms,
+  percent: 50, duration: 2m` on the primary's data volume.
+- **Stop:** CNPG replication lag > 60 s (manual).
 - **Observed:** I/O degraded; replication slows but doesn't break;
   read replicas serve some traffic.
 - **Why it matters:** disk saturation in cloud-managed disks is
@@ -91,34 +94,35 @@ Workflow). Each has:
 ### Experiment 4 — region-DNS-loss (simulated cross-region outage)
 
 - **Hypothesis:** When cross-region DNS resolution fails (a Chaos
-  Mesh `DNSChaos` returns NXDOMAIN for
+  Mesh `DNSChaos` returns a DNS error for
   `*.bookstore-platform.example.com`), the saga compensates and the
   DR runbook completes in < 30 minutes; eu-west becomes primary;
   checkout works against eu-west.
 - **Inject (primary):** Chaos Mesh `DNSChaos` with `action: error,
-  mode: all, patterns: ["*.bookstore-platform.example.com"]`,
-  scoped to pods labeled `app.kubernetes.io/part-of:
+  mode: one, patterns: ["*.bookstore-platform.example.com"]`, in one
+  tenant namespace, on pods labeled `app.kubernetes.io/part-of:
   bookstore-platform`.
 - **Inject (complementary):** the game-day lead also runs
   `kubectl cordon` on all us-east nodes + drain — disrupting what
   the *cluster* sees of its own nodes, while DNSChaos disrupts what
   the *application* sees of remote regions. The two are designed
   to be exercised together.
-- **Abort:** runbook driver cannot recover in 60 minutes; the lead
-  calls abort + restores.
+- **Stop:** runbook driver cannot recover in 60 minutes; the lead
+  calls stop and restores (manual).
 - **Observed:** the runbook driver follows
   `dr-drill-script.sh`; RTO is measured; RPO is measured.
 - **Why it matters:** the actual disaster scenario.
 
 ### Experiment 5 — payments-gateway-failure (Stripe 500)
 
-- **Hypothesis:** When the Stripe webhook returns 500 to 30 % of
-  callbacks, the saga compensation in payments-worker fires; failed
+- **Hypothesis:** When the webhook receiver answers 500 to every
+  callback for three minutes, the saga compensation in payments-worker fires; failed
   orders are rolled back; no order is left in `payment_pending` for
   more than 5 minutes.
-- **Inject:** Custom toxiproxy / mock-stripe pod returning HTTP 500
-  with probability 0.3.
-- **Abort:** payments-worker queue depth > 1000 (a backlog explosion).
+- **Inject:** HTTPChaos on `payments-webhook-receiver` (in
+  `chaos-experiments.yaml`): `replace.code: 500` on `POST /stripe/webhook`
+  for three minutes.
+- **Stop:** payments-worker queue depth > 1000 (a backlog explosion; manual).
 - **Observed:** the saga's compensation transactions appear in the
   outbox; the failed orders are correctly rolled back.
 - **Why it matters:** the payment failure mode the v1 toy could not
@@ -129,7 +133,7 @@ Workflow). Each has:
 For experiments 1, 2, 3, and 5, the runbook driver follows the
 relevant runbook ONLY:
 
-- Experiment 1 → `runbook-api-latency-p99.md` (the PDB held; the
+- Experiment 1 → `runbook-api-latency-p99.md` (the replicas held; the
   alert may not fire; the runbook should still document the
   scenario).
 - Experiment 2 → `runbook-api-latency-p99.md` (timeout + retry

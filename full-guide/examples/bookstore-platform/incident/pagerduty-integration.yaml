@@ -28,11 +28,13 @@
 #
 # Production note:
 #   The routing keys are not in this file. The ExternalSecret
-#   `pagerduty-keys` (chapter 15.10) syncs them from Vault into the Secret
-#   the receivers read. The ExternalSecret `slack-webhooks` (same chapter)
-#   syncs the Slack webhook that the P3 and hygiene receivers read. The
-#   operator rejects the whole configuration if either Secret is missing. The keys are scoped per-service in PagerDuty so a
-#   key leak is contained to one severity-channel. Rotate quarterly.
+#   `pagerduty-keys` below syncs them from Vault into the Secret the
+#   receivers read, and the ExternalSecret `slack-webhooks` syncs the Slack
+#   webhook that the P3 and hygiene receivers read. The operator rejects
+#   the whole configuration if either Secret is missing. The keys are scoped
+#   per-service in PagerDuty so a key leak is contained to one
+#   severity-channel. Rotate quarterly. Chapter 15.10 does the same in the
+#   monitoring namespace.
 # ---------------------------------------------------------------------------
 apiVersion: monitoring.coreos.com/v1beta1
 kind: AlertmanagerConfig
@@ -166,7 +168,7 @@ spec:
   # CTO) defined in PagerDuty's own UI / Terraform.
   #
   # routingKey -> a Secret reference, NOT a literal string. The secret
-  # itself is managed by ExternalSecrets in production (see ch.15.05).
+  # itself is an ExternalSecret that reads Vault (ch.13.06).
   # ------------------------------------------------------------------------
   receivers:
     # ----- P0 receiver -----
@@ -283,6 +285,68 @@ spec:
           text: |
             Alert fired without a severity label. Fix in the PrometheusRule
             and add a severity (P0/P1/P2/P3) per incident/severity-matrix.md.
+
+---
+# ---------------------------------------------------------------------------
+# The routing keys and the Slack webhook: ExternalSecrets, not literal Secrets
+# ---------------------------------------------------------------------------
+# The Secrets pagerduty-keys and slack-webhooks are written by External Secrets
+# from Vault (ch.13.06), in the namespace of the AlertmanagerConfig. Each
+# routing key is a 32-character Events API V2 key, one per PagerDuty service,
+# rotated quarterly. No key or webhook is committed here.
+# ---------------------------------------------------------------------------
+apiVersion: external-secrets.io/v1beta1
+kind: ExternalSecret
+metadata:
+  name: pagerduty-keys
+  namespace: prometheus-system
+  labels:
+    app.kubernetes.io/part-of: bookstore-platform
+    app.kubernetes.io/component: alerting
+spec:
+  refreshInterval: 1h
+  secretStoreRef:
+    name: bookstore-platform-vault
+    kind: ClusterSecretStore
+  target:
+    name: pagerduty-keys
+    creationPolicy: Owner
+  data:
+    - secretKey: p0-routing-key
+      remoteRef:
+        key: kv/bookstore-platform/pagerduty
+        property: p0_routing_key
+    - secretKey: p1-routing-key
+      remoteRef:
+        key: kv/bookstore-platform/pagerduty
+        property: p1_routing_key
+    - secretKey: p2-routing-key
+      remoteRef:
+        key: kv/bookstore-platform/pagerduty
+        property: p2_routing_key
+
+---
+apiVersion: external-secrets.io/v1beta1
+kind: ExternalSecret
+metadata:
+  name: slack-webhooks
+  namespace: prometheus-system
+  labels:
+    app.kubernetes.io/part-of: bookstore-platform
+    app.kubernetes.io/component: alerting
+spec:
+  refreshInterval: 1h
+  secretStoreRef:
+    name: bookstore-platform-vault
+    kind: ClusterSecretStore
+  target:
+    name: slack-webhooks
+    creationPolicy: Owner
+  data:
+    - secretKey: bookstore-alerts-webhook
+      remoteRef:
+        key: kv/bookstore-platform/slack
+        property: bookstore_alerts_webhook
 
 ---
 # ---------------------------------------------------------------------------
