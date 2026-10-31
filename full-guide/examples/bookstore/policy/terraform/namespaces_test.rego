@@ -23,6 +23,26 @@ test_privileged_namespace_fails if {
 	startswith(m, "BK-TF-001 kubernetes_namespace_v1.legacy")
 }
 
+test_excepted_namespace_passes if {
+	ok := {"resource_changes": [{
+		"address": "kubernetes_namespace_v1.falco",
+		"type": "kubernetes_namespace_v1",
+		"name": "falco",
+		"change": {
+			"actions": ["create"],
+			"after": {"metadata": [{
+				"name": "falco",
+				"labels": {"pod-security.kubernetes.io/enforce": "privileged"},
+				"annotations": {
+					"security.example/exception-reason": "Host mounts for the Falco driver.",
+					"security.example/exception-expires": "2027-06-30",
+				},
+			}]},
+		},
+	}]}
+	count(deny) == 0 with input as ok
+}
+
 test_missing_label_fails if {
 	bad := {"resource_changes": [{
 		"address": "kubernetes_namespace_v1.bare",

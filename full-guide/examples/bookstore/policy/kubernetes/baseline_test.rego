@@ -197,6 +197,22 @@ test_namespace_not_restricted_fails if {
 	startswith(m, "BK-POL-011")
 }
 
+test_excepted_namespace_passes if {
+	ok := {
+		"apiVersion": "v1",
+		"kind": "Namespace",
+		"metadata": {
+			"name": "falco",
+			"labels": {"pod-security.kubernetes.io/enforce": "privileged"},
+			"annotations": {
+				"security.example/exception-reason": "Host mounts for the Falco driver.",
+				"security.example/exception-expires": "2027-06-30",
+			},
+		},
+	}
+	count(deny) == 0 with input as ok
+}
+
 test_restricted_namespace_passes if {
 	ok := {
 		"apiVersion": "v1",

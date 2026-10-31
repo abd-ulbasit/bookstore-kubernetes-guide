@@ -20,16 +20,26 @@ rules:
     resources:
       - group: ""
         resources: ["serviceaccounts/token"]
-  # Pod changes, exec, attach and port-forward: keep the request body, which
-  # names the image, the hostPath, the serviceAccountName and the command.
+  # Pod changes: keep the request body, which names the image, the hostPath
+  # and the serviceAccountName.
   - level: Request
     verbs: ["create", "update", "patch", "delete"]
     resources:
       - group: ""
-        resources: ["pods", "pods/exec", "pods/attach", "pods/portforward"]
-  # RBAC changes: keep the request, so a new binding is visible in full.
+        resources: ["pods"]
+  # exec, attach and port-forward have no request body. The command is in the
+  # request URI, which every level keeps. A WebSocket exec request can be
+  # audited with the verb get, so both verbs are listed.
   - level: Request
-    verbs: ["create", "update", "patch", "delete", "bind", "escalate"]
+    verbs: ["create", "get"]
+    resources:
+      - group: ""
+        resources: ["pods/exec", "pods/attach", "pods/portforward"]
+  # RBAC changes: keep the request, so a new binding is visible in full. The
+  # bind and escalate checks happen in the authorizer, and audit events carry
+  # the request verb, so those two verbs never match an event.
+  - level: Request
+    verbs: ["create", "update", "patch", "delete"]
     resources:
       - group: "rbac.authorization.k8s.io"
         resources: ["roles", "rolebindings", "clusterroles", "clusterrolebindings"]

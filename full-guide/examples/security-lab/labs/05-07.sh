@@ -293,9 +293,15 @@ spec:
         apiVersions: ["v1"]
         operations: ["CREATE", "UPDATE"]
         resources: ["pods"]
+  variables:
+    - name: images
+      expression: "object.spec.containers + (has(object.spec.initContainers) ? object.spec.initContainers : [])"
   validations:
-    - expression: "object.spec.containers.all(c, c.image.contains('@sha256:'))"
-      message: "every container image must be pinned by digest"
+    - expression: "variables.images.all(c, c.image.contains('@sha256:') || c.image.startsWith('registry.example.com/bookstore/'))"
+      message: "BK-POL-009: every third-party image must be pinned by digest"
+      reason: Forbidden
+    - expression: "variables.images.all(c, !c.image.endsWith(':latest'))"
+      message: "BK-POL-009: no image may use the latest tag"
       reason: Forbidden
 ---
 apiVersion: admissionregistration.k8s.io/v1
@@ -558,6 +564,8 @@ metadata:
   name: escape-node
   namespace: p05-07-kyverno
 spec:
+  nodeSelector:
+    lab-never-scheduled: "true"
   automountServiceAccountToken: false
   securityContext:
     runAsNonRoot: true
@@ -570,7 +578,6 @@ spec:
       image: REPLACE_CATALOG
       securityContext:
         privileged: true
-        allowPrivilegeEscalation: false
         readOnlyRootFilesystem: true
         capabilities:
           drop: ["ALL"]
@@ -594,7 +601,6 @@ metadata:
     policies.kyverno.io/title: Disallow privileged containers
     policies.kyverno.io/description: The Bookstore rule BK-POL-001, enforced at admission.
 spec:
-  validationFailureAction: Audit
   background: true
   rules:
     - name: no-privileged-containers
@@ -604,6 +610,7 @@ spec:
               kinds: [Pod]
               namespaces: [p05-07-kyverno]
       validate:
+        failureAction: Audit
         message: "BK-POL-001: privileged containers are not allowed"
         pattern:
           spec:
@@ -621,7 +628,7 @@ show "kubectl -n p05-07-kyverno get ephemeralreports,policyreports 2>/dev/null |
 fi
 echo '## step 10: Enforce: the same rule refuses the next privileged Pod [full mode]'
 if [ "$MODE" = full ]; then
-show "kubectl patch clusterpolicy p05-07-disallow-privileged --type merge -p '{\"spec\":{\"validationFailureAction\":\"Enforce\"}}'"
+show "kubectl patch clusterpolicy p05-07-disallow-privileged --type json -p '[{\"op\":\"replace\",\"path\":\"/spec/rules/0/validate/failureAction\",\"value\":\"Enforce\"}]'"
 show "sleep 5"
 sed 's/name: escape-node$/name: escape-node-2/' escape-node.yaml > escape-node-2.yaml
 show "kubectl apply -f escape-node-2.yaml"
@@ -639,7 +646,6 @@ metadata:
     policies.kyverno.io/title: Verify lab image signatures
     policies.kyverno.io/description: Pods in p05-07-signed run only images signed by the lab key.
 spec:
-  validationFailureAction: Enforce
   background: false
   webhookTimeoutSeconds: 30
   rules:
@@ -654,12 +660,15 @@ spec:
             - "$REG_SVC/bookstore/*"
           verifyDigest: true
           required: true
+          failureAction: Enforce
           attestors:
             - entries:
                 - keys:
                     secret:
                       name: p05-07-cosign-pub
                       namespace: kyverno
+                    rekor:
+                      ignoreTlog: true
 YAML
 show "kubectl apply -f policy-verify-signed.yaml"
 show "sleep 5"
@@ -676,7 +685,7 @@ cat > gatekeeper-template.yaml <<'YAML'
 apiVersion: templates.gatekeeper.sh/v1
 kind: ConstraintTemplate
 metadata:
-  name: p05nopriv
+  name: p05noprivileged
 spec:
   crd:
     spec:
@@ -733,6 +742,43 @@ show "kubectl get crd -o name | grep 'gatekeeper.sh' | xargs kubectl delete --wa
 show "kubectl delete namespace gatekeeper-system --wait=true"
 
 fi
+if [ "$MODE" = shared ]; then
+echo '## step 12b: the built-in validation refuses privileged with allowPrivilegeEscalation false, before any policy [shared mode]'
+show "kubectl create namespace p05-07-kyverno"
+wait_sa p05-07-kyverno
+cat > escape-conflict.yaml <<YAML
+# INSECURE ON PURPOSE: a privileged container. Lab cluster only.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: escape-node
+  namespace: p05-07-kyverno
+spec:
+  automountServiceAccountToken: false
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 65532
+    runAsGroup: 65532
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: app
+      image: $BUSYBOX
+      command: ["sleep", "3600"]
+      securityContext:
+        privileged: true
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop: ["ALL"]
+YAML
+show "kubectl apply --dry-run=server -f escape-conflict.yaml; echo \"server dry-run exit=\$?\""
+sed '/allowPrivilegeEscalation: false/d' escape-conflict.yaml > escape-node-dryrun.yaml
+show "kubectl apply --dry-run=server -f escape-node-dryrun.yaml; echo \"server dry-run exit=\$?\""
+show "kubectl delete namespace p05-07-kyverno --wait=true --ignore-not-found"
+
+fi
+
 echo '## step 13: the same policy as unit tests and as checks on manifests and a Terraform plan (no cluster)'
 show "opa test $POLICY -v | tail -n 1"
 show "kubectl kustomize $here/examples/bookstore/kustomize/overlays/prod > prod-overlay.yaml"
@@ -761,6 +807,7 @@ show "helm repo add kyverno https://kyverno.github.io/kyverno/ --force-update"
 show "helm repo add gatekeeper https://open-policy-agent.github.io/gatekeeper/charts --force-update"
 show "helm template kyverno kyverno/kyverno --version $KYVERNO_CHART --namespace kyverno --set features.registryClient.allowInsecure=true --set admissionController.replicas=1 --set backgroundController.replicas=1 --set cleanupController.replicas=1 --set reportsController.replicas=1 > kyverno-rendered.yaml"
 show "grep -c '^kind: ' kyverno-rendered.yaml"
+show "grep -c 'deprecationWarning: kyverno.io/v1 ClusterPolicy is deprecated' kyverno-rendered.yaml"
 show "grep -h 'image: ' kyverno-rendered.yaml | sed 's/^ *//' | sort -u | head -4"
 show "helm template gatekeeper gatekeeper/gatekeeper --version $GATEKEEPER_CHART --namespace gatekeeper-system --set replicas=1 > gatekeeper-rendered.yaml"
 show "grep -c '^kind: ' gatekeeper-rendered.yaml"
@@ -770,7 +817,6 @@ kind: ClusterPolicy
 metadata:
   name: p05-07-disallow-privileged
 spec:
-  validationFailureAction: Audit
   background: true
   rules:
     - name: no-privileged-containers
@@ -780,6 +826,7 @@ spec:
               kinds: [Pod]
               namespaces: [p05-07-kyverno]
       validate:
+        failureAction: Audit
         message: "BK-POL-001: privileged containers are not allowed"
         pattern:
           spec:

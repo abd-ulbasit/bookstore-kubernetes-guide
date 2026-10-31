@@ -41,7 +41,7 @@ Seccomp: 0
 ca.crt namespace token 
 
 $ kubectl -n p05-07-open get pod forgetful -o jsonpath='{.spec.volumes[*].name}{"\n"}'
-kube-api-access-l4wgr
+kube-api-access-5z49c
 
 ## step 6: the same namespace, with the policies in place and the namespace labelled
 $ kubectl apply -f vap-no-external-ips.yaml -f vap-digest-pinned.yaml -f map-automount-off.yaml -f map-seccomp.yaml
@@ -66,7 +66,7 @@ Warning: spec.externalIPs is deprecated and may no longer be implemented in some
 Error from server (Forbidden): error when creating "attack-service-2.yaml": services "catalog-ext-2" is forbidden: ValidatingAdmissionPolicy 'p05-07-no-external-ips' with binding 'p05-07-no-external-ips' denied request: a Service may not set spec.externalIPs
 
 $ kubectl apply -f tag-only.yaml
-Error from server (Forbidden): error when creating "tag-only.yaml": pods "tag-only" is forbidden: ValidatingAdmissionPolicy 'p05-07-digest-pinned' with binding 'p05-07-digest-pinned' denied request: every container image must be pinned by digest
+Error from server (Forbidden): error when creating "tag-only.yaml": pods "tag-only" is forbidden: ValidatingAdmissionPolicy 'p05-07-digest-pinned' with binding 'p05-07-digest-pinned' denied request: BK-POL-009: every third-party image must be pinned by digest
 
 $ kubectl apply -f forgetful-2.yaml
 pod/forgetful-2 created
@@ -82,7 +82,7 @@ Seccomp: 2
 ca.crt namespace token 
 
 $ kubectl -n p05-07-open get pod forgetful-2 -o jsonpath='{.spec.volumes[*].name}{"\n"}'
-kube-api-access-gpsls
+kube-api-access-lwdnx
 
 $ kubectl apply -f baseline.yaml
 pod/baseline created
@@ -100,9 +100,24 @@ ls: /var/run/secrets/kubernetes.io/serviceaccount: No such file or directory
 ## step 10: Enforce: the same rule refuses the next privileged Pod [full mode]
 ## step 11: verifyImages: the signature is checked, not only the digest [full mode]
 ## step 12: Gatekeeper, the same rule in Rego, in dry-run beside Kyverno [full mode]
+## step 12b: the built-in validation refuses privileged with allowPrivilegeEscalation false, before any policy [shared mode]
+$ kubectl create namespace p05-07-kyverno
+namespace/p05-07-kyverno created
+
+$ kubectl apply --dry-run=server -f escape-conflict.yaml; echo "server dry-run exit=$?"
+The Pod "escape-node" is invalid: spec.containers[0].securityContext: Invalid value: {"Capabilities":{"Add":null,"Drop":["ALL"]},"Privileged":true,"SELinuxOptions":null,"WindowsOptions":null,"RunAsUser":null,"RunAsGroup":null,"RunAsNonRoot":null,"ReadOnlyRootFilesystem":true,"AllowPrivilegeEscalation":false,"ProcMount":null,"SeccompProfile":null,"AppArmorProfile":null}: cannot set `allowPrivilegeEscalation` to false and `privileged` to true
+server dry-run exit=1
+
+$ kubectl apply --dry-run=server -f escape-node-dryrun.yaml; echo "server dry-run exit=$?"
+pod/escape-node created (server dry run)
+server dry-run exit=0
+
+$ kubectl delete namespace p05-07-kyverno --wait=true --ignore-not-found
+namespace "p05-07-kyverno" deleted
+
 ## step 13: the same policy as unit tests and as checks on manifests and a Terraform plan (no cluster)
 $ opa test guide/examples/bookstore/policy -v | tail -n 1
-PASS: 22/22
+PASS: 24/24
 
 $ kubectl kustomize guide/examples/bookstore/kustomize/overlays/prod > prod-overlay.yaml
 
@@ -139,6 +154,9 @@ $ helm template kyverno kyverno/kyverno --version 3.9.2 --namespace kyverno --se
 
 $ grep -c '^kind: ' kyverno-rendered.yaml
 80
+
+$ grep -c 'deprecationWarning: kyverno.io/v1 ClusterPolicy is deprecated' kyverno-rendered.yaml
+1
 
 $ grep -h 'image: ' kyverno-rendered.yaml | sed 's/^ *//' | sort -u | head -4
 image: "ghcr.io/kyverno/readiness-checker:v1.19.2"
@@ -192,4 +210,3 @@ $ kubectl delete mutatingadmissionpolicy p05-07-default-automount-off p05-07-def
 mutatingadmissionpolicy.admissionregistration.k8s.io "p05-07-default-automount-off" deleted
 mutatingadmissionpolicy.admissionregistration.k8s.io "p05-07-default-seccomp" deleted
 
-run exit=0

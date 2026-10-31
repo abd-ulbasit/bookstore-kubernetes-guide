@@ -10,13 +10,18 @@
 **Prerequisites:** [Part 05 ch.02](02-pod-security.md): the baseline's fields
 and the `restricted` level · [Part 05 ch.03](03-supply-chain.md): SBOMs, image
 scans and the Trivy ignore file · [Part 05 ch.01](01-authn-authz-rbac.md):
-least-privilege RBAC **You'll know after this:** • write a threat model entry
-with a named trigger for its next review · • triage a finding by reachability,
-and say what a VEX statement records · • read a registry entry's reason and
-expiry, and show a scanner honouring it until that date · • write an admission
-rule that enforces an expiry on namespace exceptions, and say what it cannot
-check · • map a control to the CIS Kubernetes Benchmark, the NSA and CISA
-guidance and NIST SP 800-190
+least-privilege RBAC
+
+**You'll know after this:**
+
+- write a threat model entry with a named trigger for its next review
+- triage a finding by reachability, and say what a VEX statement records
+- read a registry entry's reason and expiry, and show a scanner honouring it
+  until that date
+- write an admission rule that enforces an expiry on namespace exceptions, and
+  say what it cannot check
+- map a control to the CIS Kubernetes Benchmark, the NSA and CISA guidance and
+  NIST SP 800-190
 
 <!-- tags: security, platform, devsecops, vulnerability-management, exceptions, vex, cis-benchmark, nist-800-190, admission -->
 
@@ -199,22 +204,39 @@ the pipeline reads them together.
 | `full-guide/examples/bookstore/ci/kube-linter.yaml` | KubeLinter | The `expiry` stage of `ci/scan.sh`, which reads a `Revisit by` date beside each entry |
 | `full-guide/examples/bookstore/ci/zap/baseline.conf` | ZAP | The same `expiry` stage |
 
-Namespace exceptions are in none of the four. A chapter that records one, such
-as 05.05's kind namespace, keeps it in its own text until a single registry
-lands. The admission rule in the hands-on checks that every such record
-carries a reason and a date.
+Namespace exceptions are not in these four files. Their record is the
+Namespace itself: two annotations, `security.example/exception-reason` and
+`security.example/exception-expires`. The admission rule in the hands-on, and
+the Rego rules `BK-POL-011` and `BK-TF-001` in
+[05.07](07-admission-control-and-policy-as-code.md), read the same two
+annotations. A chapter that records a namespace exception uses them and points
+here.
 
 ### An entry, and how Trivy reads its date
 
-The storefront entry has this shape. The scanner's own finding ID goes where
-the placeholder is.
+An entry names the scanner's own finding ID. A CVE goes under `vulnerabilities`.
+A misconfiguration check, such as KSV-0017, goes under `misconfigurations`, with
+the file it applies to in `paths`:
 
 ```yaml
 vulnerabilities:
-  - id: <scanner finding ID>
+  - id: <CVE ID>
     statement: "<what is true here, and why the finding is accepted>"
     expired_at: 2026-11-30
+misconfigurations:
+  - id: <check ID, for example KSV-0017>
+    paths:
+      - <file the check reads>
+    statement: "<what is true here, and why the check is accepted>"
+    expired_at: 2026-11-30
 ```
+
+Trivy reads this YAML form only when it is named with `--ignorefile`, because
+[Trivy's filtering
+guide](https://trivy.dev/docs/latest/guide/configuration/filtering/) marks it
+experimental. Its warning says the format may change without backwards
+compatibility. That is one reason the expiry stage below also checks the
+dates.
 
 Trivy stops honouring an entry on its `expired_at` date, and the finding
 returns to the gate. The entry says what is true and when the decision ends.
@@ -227,7 +249,16 @@ the finding after it.
 A namespace below `restricted` is an exception. Its record is two annotations
 on the Namespace: a reason, and an expiry date. The admission rule in the
 hands-on refuses a namespace below `restricted` unless both annotations are
-present and the expiry falls within 365 days of the namespace's creation.
+present and the expiry falls within 365 days of the namespace's creation. A
+namespace with no enforce label counts as below `restricted`. Pod Security
+Admission uses `privileged` for a namespace with no label, unless the
+cluster's admission configuration sets another default, so the rule refuses
+that case too.
+
+The Rego rules that CI runs, `BK-POL-011` for manifests and `BK-TF-001` for
+Terraform plans, check the same record. They check that both annotations are
+present. Only the admission rule checks the window, because a manifest carries
+no creation time.
 
 The rule cannot check today's date. In this Kubernetes version, a
 ValidatingAdmissionPolicy's CEL has no clock: the expression that names `now`
@@ -246,18 +277,18 @@ expiry stage above is the pattern for it.
 ### Lab header
 
 - **Tier A, partly run.** Part 1 and Part 1b need only Trivy 0.76.1 and no
-  cluster. Part 2 runs on the shared `sf-pilot` kind cluster, a node on
-  Kubernetes v1.37.0, with kubectl v1.37.2. The lab host runs kind, and the
-  cluster is reached from a workstation over a tunnel.
+  cluster. Part 2 runs on a lab kind cluster, a node on Kubernetes v1.37.0, with
+  kubectl v1.37.2. The output below came from a lab cluster with a different
+  name from the one this guide uses.
 - **Script and transcript.**
   [`labs/05-09.sh`](../examples/security-lab/labs/05-09.sh) runs every step
   below. Its recorded output is
   [`evidence/05-09.txt`](../examples/security-lab/evidence/05-09.txt).
-- **Cleanup.** The script creates only `p05-09-*` namespaces and one
-  cluster-scoped policy, and it deletes them. Namespace removal is slow on a
-  busy control plane, so the script requests the deletions and does not wait
-  for them. Before a run it waits, for up to five minutes, for leftovers from
-  an earlier run to finish terminating.
+- **Cleanup.** The script creates only namespaces whose names carry the lab's
+  `p05-09-` prefix, and one cluster-scoped policy, and it deletes them.
+  Namespace removal is slow on a busy control plane, so the script requests
+  the deletions and does not wait for them. Before a run it waits, for up to
+  five minutes, for leftovers from an earlier run to finish terminating.
 - **A kind node is a container.** It runs on the machine that runs kind and
   shares that machine's kernel. This lab creates namespaces and two
   cluster-scoped admission objects. It runs no Pod, so no payload runs. The
@@ -266,7 +297,7 @@ expiry stage above is the pattern for it.
   Kubernetes version has no `now` in CEL, and the server said so. Comparing
   the expiry string with the creation timestamp failed until the timestamp was
   wrapped in `timestamp()`, so the rule refused a namespace it should admit.
-  The shared control plane then became unstable: the controller manager
+  The lab cluster's control plane then became unstable: the controller manager
   restarted and lost its leader lease, API calls timed out, and namespaces
   stayed `Terminating`. One namespace apply timed out, so the privileged-Pod
   step was refused for a missing `default` ServiceAccount, not by PodSecurity.
@@ -286,7 +317,7 @@ apiVersion: v1
 kind: Pod
 metadata:
   name: exception-demo
-  namespace: p05-09-demo
+  namespace: demo
 spec:
   containers:
     - name: app
@@ -295,7 +326,8 @@ spec:
         privileged: true
 ```
 
-With no registry entry, the scan reports the finding once:
+With no entry, the scan reports the finding once. The first output line is the
+scanner's version, so the reader can see what ran:
 
 ```bash
 trivy --version | head -1
@@ -305,27 +337,39 @@ trivy config --quiet --format json --ignorefile "" exception-demo.yaml | grep -c
 <!-- gate: output -->
 ```
 Version: 0.76.1
-```
-
-The first output line confirms the scanner version. The next confirms that the
-scan reports one KSV-0017 finding when no entry applies.
-
-<!-- gate: output -->
-```
+# ...
 1
 ```
 
-The same finding is suppressed by an entry whose `expired_at` is still ahead.
-The lab writes the entry with a date 180 days out, and the count drops to
-zero:
+The lab writes two entries that name the check and its file. One has a date
+still ahead, and the other a date already past:
+
+```yaml
+misconfigurations:
+  - id: KSV-0017
+    paths:
+      - exception-demo.yaml
+    statement: "Demo entry: privileged container excepted for the registry worked example."
+    expired_at: 2027-04-29
+```
+
+With the entry still in force, the same count drops to zero:
+
+```bash
+trivy config --quiet --format json --ignorefile ignore-future.yaml exception-demo.yaml | grep -c '"ID": "KSV-0017"'
+```
 
 <!-- gate: output -->
 ```
 0
 ```
 
-The same entry, with a date 30 days in the past, no longer suppresses the
-finding, so the count returns to one:
+The second entry differs only in its date, `expired_at: 2026-10-01`, which is
+already past. The finding comes back:
+
+```bash
+trivy config --quiet --format json --ignorefile ignore-expired.yaml exception-demo.yaml | grep -c '"ID": "KSV-0017"'
+```
 
 <!-- gate: output -->
 ```
@@ -372,13 +416,13 @@ The failure is deliberate. The stage exits 1 and names the line.
 Part 2 runs on the cluster. The first manifest is the rule itself: a
 ValidatingAdmissionPolicy and its binding. The policy's match condition limits
 the rule to namespaces whose names begin with `p05-09-`, so it cannot affect
-any other namespace on a shared cluster.
+any other namespace on a lab cluster.
 
 ```yaml
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicy
 metadata:
-  name: p05-09-exception-expiry
+  name: exception-expiry
 spec:
   failurePolicy: Fail
   matchConstraints:
@@ -395,7 +439,7 @@ spec:
       expression: >-
         has(object.metadata.labels) &&
         'pod-security.kubernetes.io/enforce' in object.metadata.labels ?
-        object.metadata.labels['pod-security.kubernetes.io/enforce'] : 'restricted'
+        object.metadata.labels['pod-security.kubernetes.io/enforce'] : ''
     - name: notes
       expression: >-
         has(object.metadata.annotations) ? object.metadata.annotations : {}
@@ -412,13 +456,13 @@ spec:
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicyBinding
 metadata:
-  name: p05-09-exception-expiry
+  name: exception-expiry
 spec:
-  policyName: p05-09-exception-expiry
+  policyName: exception-expiry
   validationActions: ["Deny"]
 ```
 
-The lab first clears any `p05-09-*` namespace an earlier run left, then
+The lab first clears any `*` namespace an earlier run left, then
 applies the policy. Applying it prints the two objects it creates:
 
 <!-- gate: output -->
@@ -433,17 +477,17 @@ validatingadmissionpolicybinding.admissionregistration.k8s.io/p05-09-exception-e
 ```
 
 The lab then waits until a server dry run shows the binding refuse a namespace
-that carries no record. Then it applies four namespaces. Two of them are
-refused by design. The first has no reason and no expiry, and the second has
-an expiry more than 365 days out. Each namespace is labelled at the same level
-for enforce, audit and warn, as [ch.02](02-pod-security.md) requires for every
-namespace the guide creates.
+that carries no record. Then it applies five namespaces. Three of them are
+refused by design: one has no reason and no expiry, one has no enforce label,
+and one has an expiry more than 365 days out. Each namespace that is admitted is
+labelled at the same level for enforce, audit and warn, as
+[ch.02](02-pod-security.md) requires for every namespace the guide creates.
 
 ```yaml
 apiVersion: v1
 kind: Namespace
 metadata:
-  name: p05-09-restricted
+  name: restricted
   labels:
     pod-security.kubernetes.io/enforce: restricted
     pod-security.kubernetes.io/enforce-version: v1.37
@@ -455,7 +499,7 @@ metadata:
 apiVersion: v1
 kind: Namespace
 metadata:
-  name: p05-09-no-expiry
+  name: no-expiry
   labels:
     pod-security.kubernetes.io/enforce: baseline
     pod-security.kubernetes.io/enforce-version: v1.37
@@ -467,7 +511,7 @@ metadata:
 apiVersion: v1
 kind: Namespace
 metadata:
-  name: p05-09-exception
+  name: exception
   labels:
     pod-security.kubernetes.io/enforce: baseline
     pod-security.kubernetes.io/enforce-version: v1.37
@@ -482,7 +526,17 @@ metadata:
 apiVersion: v1
 kind: Namespace
 metadata:
-  name: p05-09-too-long
+  name: unlabelled
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: unlabelled
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: too-long
   labels:
     pod-security.kubernetes.io/enforce: baseline
     pod-security.kubernetes.io/enforce-version: v1.37
@@ -508,6 +562,7 @@ binding enforced after about 2 second(s)
 namespace/p05-09-restricted created
 namespace/p05-09-exception created
 Error from server (Invalid): error when creating "namespaces.yaml": namespaces "p05-09-no-expiry" is forbidden: ValidatingAdmissionPolicy 'p05-09-exception-expiry' with binding 'p05-09-exception-expiry' denied request: a namespace below restricted needs a reason and an expiry within 365 days
+Error from server (Invalid): error when creating "namespaces.yaml": namespaces "p05-09-unlabelled" is forbidden: ValidatingAdmissionPolicy 'p05-09-exception-expiry' with binding 'p05-09-exception-expiry' denied request: a namespace below restricted needs a reason and an expiry within 365 days
 Error from server (Invalid): error when creating "namespaces.yaml": namespaces "p05-09-too-long" is forbidden: ValidatingAdmissionPolicy 'p05-09-exception-expiry' with binding 'p05-09-exception-expiry' denied request: a namespace below restricted needs a reason and an expiry within 365 days
 ```
 
@@ -519,8 +574,8 @@ The next step lists which namespaces exist. The two refused names are absent.
 <!-- gate: output -->
 ```
 NAME                STATUS   AGE   ENFORCE
-p05-09-restricted   Active   2s    restricted
-p05-09-exception    Active   2s    baseline
+p05-09-restricted   Active   1s    restricted
+p05-09-exception    Active   1s    baseline
 ```
 
 Next the lab creates a service namespace at `restricted`, the level every
@@ -534,7 +589,7 @@ the UID the image declares.
 apiVersion: v1
 kind: Namespace
 metadata:
-  name: p05-09-service
+  name: service
   labels:
     pod-security.kubernetes.io/enforce: restricted
     pod-security.kubernetes.io/enforce-version: v1.37
@@ -549,14 +604,14 @@ apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: catalog
-  namespace: p05-09-service
+  namespace: service
 automountServiceAccountToken: false
 ---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: catalog
-  namespace: p05-09-service
+  namespace: service
   labels:
     app.kubernetes.io/name: catalog
 spec:
@@ -771,29 +826,30 @@ the chapter does not show their output.
 - **A VEX scan** that suppresses a finding with a `not_affected` statement.
   Not run: a hand-written SBOM gave Trivy no results. The specification is
   cited above.
-- **A clock-based expiry check in the admission layer.** A policy engine with
-  a clock in its expression language could refuse a lapsed exception at
-  admission. Part 05 ch.07 <!-- link-later: 05.07 --> covers the engines this
-  guide uses. Not run here.
+- **A clock-based expiry check in the admission layer.** A policy engine with a
+  clock in its expression language could refuse a lapsed exception at admission.
+  The engines in this guide are not used for it, and the lab did not test one.
+  Not run.
 
 ## How it works under the hood
 
 Four mechanisms in this chapter are easy to misread.
 
 - **Trivy's ignore file.** Trivy reads the ignore file on each scan. An entry
-  with `expired_at` applies until that date has passed. The guide's design
-  notes that Trivy still marks this feature experimental, which is why the
-  expiry stage exists: one scanner's date is not the only check.
+  with `expired_at` applies until that date has passed. Trivy's filtering
+  guide still marks the YAML form experimental, which is one reason the expiry
+  stage exists: one scanner's date is not the only check.
 - **The expiry stage.** `scan.sh expiry` reads each file line by line. A
   `Revisit by YYYY-MM-DD` comment, on the entry or directly above it, carries
   the date. A date before today's UTC date fails the stage. An entry with no
   date fails it. A file with no entries fails it too, so an empty check cannot
   pass silently.
 - **The clock in admission.** During validating admission, the API server has
-  set `metadata.creationTimestamp`. A probe policy, run while the lab was
-  being built, printed the value during validation, which is how the window is
-  measured. CEL in this version has no current-time variable, so the policy
-  cannot compare an expiry with today.
+  set `metadata.creationTimestamp` before the policy runs, so the window is
+  measured from it. The lab's admission step tests the window: an exception
+  inside 365 days is admitted, and one beyond it is refused. CEL in this version
+  has no current-time variable, so the policy cannot compare an expiry with
+  today.
 - **Namespace termination.** A deleted namespace stays `Terminating` until its
   controllers remove its content and the `kubernetes` finalizer. A stalled
   controller manager therefore holds the name, and that is why the script

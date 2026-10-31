@@ -143,10 +143,24 @@ deny contains msg if {
 }
 
 # A Namespace the Bookstore creates enforces restricted. The label is what
-# makes Pod Security Admission refuse the Pods above in the cluster.
+# makes Pod Security Admission refuse the Pods above in the cluster. A
+# namespace below restricted is an exception only when it carries both
+# annotations of the exception record (Part 05 ch.09): a reason and an expiry
+# date. This rule checks that both are present; the 365-day window is checked
+# by the admission rule in the cluster.
+exception_annotations := {"security.example/exception-reason", "security.example/exception-expires"}
+
+excepted_namespace if {
+	ann := object.get(input.metadata, "annotations", {})
+	every key in exception_annotations {
+		ann[key]
+	}
+}
+
 deny contains msg if {
 	input.kind == "Namespace"
 	level := object.get(object.get(input.metadata, "labels", {}), "pod-security.kubernetes.io/enforce", "")
 	level != "restricted"
+	not excepted_namespace
 	msg := sprintf("BK-POL-011 Namespace %s enforces %q, not restricted", [input.metadata.name, level])
 }
