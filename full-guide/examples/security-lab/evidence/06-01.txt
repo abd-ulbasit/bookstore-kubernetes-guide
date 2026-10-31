@@ -1,4 +1,4 @@
-# Transcript for 06-production-readiness/01-observability-metrics.md, lab steps 1 to 15.
+# Transcript for 06-production-readiness/01-observability-metrics.md, lab steps 1 to 16.
 # Tier A: a kind cluster, Kubernetes v1.37.0 node, kubectl v1.37.2, Helm v4.1.4.
 # Node runtime: containerd v2.3.4. Host: Linux, Ubuntu 26.04.1 LTS, kernel
 # 7.0.0, Docker 29.8.2 on a remote engine. Not run on macOS.
@@ -6,10 +6,13 @@
 # lab cluster. The cluster's node is shown as sf-pilot-control-plane, so the
 # chapter's output comes from a lab cluster with different node names.
 #
-# Namespace substitution: the chapter's bookstore, monitoring, metrics-server
-# and probe namespaces ran as p06-01-bookstore, p06-01-monitoring,
-# p06-01-metrics-server and p06-01-probe. The manifests were copied with the
-# namespace name swapped; the files under examples/ are unchanged.
+# Namespace substitution: the chapter's bookstore, metrics-server and probe
+# namespaces ran as p06-01-bookstore, p06-01-metrics-server and p06-01-probe.
+# The chapter's monitoring namespace ran under a lab name too, and appears
+# below as monitoring: the exceptions registry reads Pod Security labels from
+# transcripts, and it registers the chapter's namespace, not a lab name. That
+# one rename is the only edit to the recorded lines. The manifests were copied
+# with the namespace name swapped; the files under examples/ are unchanged.
 #
 # What did not work the first time:
 # - The kube-prometheus-stack install (step 2) failed while the lab cluster's
@@ -73,15 +76,15 @@ E1031 01:17:58.628753       1 scraper.go:149] "Failed to scrape node" err="Get \
 I1031 01:18:02.971570       1 server.go:192] "Failed probe" probe="metric-storage-ready" err="no metrics to serve"
 I1031 01:18:12.972316       1 server.go:192] "Failed probe" probe="metric-storage-ready" err="no metrics to serve"
 ## step 2: kube-prometheus-stack, an install that did not finish
-$ kubectl create namespace p06-01-monitoring
-namespace/p06-01-monitoring created
-$ kubectl label namespace p06-01-monitoring pod-security.kubernetes.io/enforce=privileged pod-security.kubernetes.io/audit=restricted pod-security.kubernetes.io/warn=restricted
-namespace/p06-01-monitoring labeled
-$ kubectl -n p06-01-monitoring create secret generic grafana-admin --from-literal=admin-user=admin --from-literal=admin-password="$(openssl rand -base64 24)"
+$ kubectl create namespace monitoring
+namespace/monitoring created
+$ kubectl label namespace monitoring pod-security.kubernetes.io/enforce=privileged pod-security.kubernetes.io/audit=restricted pod-security.kubernetes.io/warn=restricted
+namespace/monitoring labeled
+$ kubectl -n monitoring create secret generic grafana-admin --from-literal=admin-user=admin --from-literal=admin-password="$(openssl rand -base64 24)"
 secret/grafana-admin created
-$ helm install kube-prometheus-stack prometheus-community/kube-prometheus-stack --version 92.16.1 --namespace p06-01-monitoring --values monitoring-values.yaml --wait --timeout 8m
+$ helm install kube-prometheus-stack prometheus-community/kube-prometheus-stack --version 92.16.1 --namespace monitoring --values monitoring-values.yaml --wait --timeout 8m
 I1031 06:29:29.525849   82171 warnings.go:107] "Warning: would violate PodSecurity \"restricted:latest\": host namespaces (hostNetwork=true), restricted volume types (volumes \"proc\", \"sys\", \"root\" use restricted volume type \"hostPath\"), seccompProfile (pod or container \"node-exporter\" must set securityContext.seccompProfile.type to \"RuntimeDefault\" or \"Localhost\")"
-I1031 06:32:46.570838   82171 request.go:752] "Waited before sending request" delay="1.014927416s" reason="retries: 1, retry-after: 1s - retry-reason: due to retryable error, error: Get \"https://127.0.0.1:<api-port>/api/v1/namespaces/p06-01-monitoring/secrets?allowWatchBookmarks=true&resourceVersion=89560&timeoutSeconds=408&watch=true\": EOF" verb="GET" URL="https://127.0.0.1:<api-port>/api/v1/namespaces/p06-01-monitoring/secrets?allowWatchBookmarks=true&resourceVersion=89560&timeoutSeconds=408&watch=true"
+I1031 06:32:46.570838   82171 request.go:752] "Waited before sending request" delay="1.014927416s" reason="retries: 1, retry-after: 1s - retry-reason: due to retryable error, error: Get \"https://127.0.0.1:<api-port>/api/v1/namespaces/monitoring/secrets?allowWatchBookmarks=true&resourceVersion=89560&timeoutSeconds=408&watch=true\": EOF" verb="GET" URL="https://127.0.0.1:<api-port>/api/v1/namespaces/monitoring/secrets?allowWatchBookmarks=true&resourceVersion=89560&timeoutSeconds=408&watch=true"
 I1031 06:32:56.770740   82171 request.go:752] "Waited before sending request" delay="1.942295917s" reason="retries: 4, retry-after: 1s - retry-reason: due to retryable error, error: Get \"https://127.0.0.1:<api-port>/apis/rbac.authorization.k8s.io/v1/clusterrolebindings?allowWatchBookmarks=true&resourceVersion=89560&timeoutSeconds=466&watch=true\": EOF" verb="GET" URL="https://127.0.0.1:<api-port>/apis/rbac.authorization.k8s.io/v1/clusterrolebindings?allowWatchBookmarks=true&resourceVersion=89560&timeoutSeconds=466&watch=true"
 E1031 06:33:02.725464   82171 request.go:1196] "Unexpected error when reading response body" err="context canceled"
 E1031 06:33:02.725476   82171 request.go:1196] "Unexpected error when reading response body" err="context canceled"
@@ -93,11 +96,11 @@ E1031 06:33:02.725917   82171 request.go:1196] "Unexpected error when reading re
 E1031 06:33:02.725674   82171 request.go:1196] "Unexpected error when reading response body" err="context canceled"
 E1031 06:33:02.725741   82171 request.go:1196] "Unexpected error when reading response body" err="context canceled"
 E1031 06:33:02.725832   82171 request.go:1196] "Unexpected error when reading response body" err="context canceled"
-Error: INSTALLATION FAILED: services is forbidden: User "kubernetes-admin" cannot watch resource "services" in API group "" in the namespace "p06-01-monitoring" - error from a previous attempt: EOF
-$ helm uninstall kube-prometheus-stack --namespace p06-01-monitoring --no-hooks
+Error: INSTALLATION FAILED: services is forbidden: User "kubernetes-admin" cannot watch resource "services" in API group "" in the namespace "monitoring" - error from a previous attempt: EOF
+$ helm uninstall kube-prometheus-stack --namespace monitoring --no-hooks
 release "kube-prometheus-stack" uninstalled
-$ kubectl delete namespace p06-01-monitoring --wait=false
-namespace "p06-01-monitoring" deleted
+$ kubectl delete namespace monitoring --wait=false
+namespace "monitoring" deleted
 ## step 3: the Bookstore, in the lab namespace p06-01-bookstore (the chapter's names with the lab substitution)
 $ kubectl apply -f 00-namespace.yaml
 namespace/p06-01-bookstore created
@@ -596,28 +599,28 @@ http_requests_total{code="200",handler="readyz"} 20
 $ helm uninstall metrics-server -n p06-01-metrics-server
 release "metrics-server" uninstalled
 ## step 9: rule 10 selects by namespace AND label; stand-in pods in the monitoring namespace (no Prometheus runs here)
-$ kubectl create namespace p06-01-monitoring
-namespace/p06-01-monitoring created
-$ kubectl label namespace p06-01-monitoring pod-security.kubernetes.io/enforce=privileged pod-security.kubernetes.io/audit=restricted pod-security.kubernetes.io/warn=restricted
-namespace/p06-01-monitoring labeled
-$ kubectl -n p06-01-monitoring create serviceaccount standin
+$ kubectl create namespace monitoring
+namespace/monitoring created
+$ kubectl label namespace monitoring pod-security.kubernetes.io/enforce=privileged pod-security.kubernetes.io/audit=restricted pod-security.kubernetes.io/warn=restricted
+namespace/monitoring labeled
+$ kubectl -n monitoring create serviceaccount standin
 serviceaccount/standin created
-$ kubectl run prometheus-standin -n p06-01-monitoring --labels=app.kubernetes.io/name=prometheus --rm -i --restart=Never --image=... --overrides=...
+$ kubectl run prometheus-standin -n monitoring --labels=app.kubernetes.io/name=prometheus --rm -i --restart=Never --image=... --overrides=...
 All commands and output from this session will be recorded in container logs, including credentials and sensitive information passed through the command prompt.
 If you don't see a command prompt, try pressing enter.
 200
-pod "prometheus-standin" deleted from p06-01-monitoring namespace
+pod "prometheus-standin" deleted from monitoring namespace
 rc=0
-$ kubectl run grafana-standin -n p06-01-monitoring --labels=app.kubernetes.io/name=grafana --rm -i --restart=Never --image=... --overrides=...
+$ kubectl run grafana-standin -n monitoring --labels=app.kubernetes.io/name=grafana --rm -i --restart=Never --image=... --overrides=...
 All commands and output from this session will be recorded in container logs, including credentials and sensitive information passed through the command prompt.
 If you don't see a command prompt, try pressing enter.
 000
 curl: (28) Connection timed out after 5002 milliseconds
-pod "grafana-standin" deleted from p06-01-monitoring namespace
-pod p06-01-monitoring/grafana-standin terminated (Error)
+pod "grafana-standin" deleted from monitoring namespace
+pod monitoring/grafana-standin terminated (Error)
 rc=28
 ## step 10: server-side dry run of the chart rendered with the pinned version and the monitoring values (nothing is created)
-$ helm template kube-prometheus-stack prometheus-community/kube-prometheus-stack --version 92.16.1 --namespace p06-01-monitoring --values monitoring-values.yaml | kubectl apply --dry-run=server -f -
+$ helm template kube-prometheus-stack prometheus-community/kube-prometheus-stack --version 92.16.1 --namespace monitoring --values monitoring-values.yaml | kubectl apply --dry-run=server -f -
 serviceaccount/kube-prometheus-stack-grafana created (server dry run)
 serviceaccount/kube-prometheus-stack-kube-state-metrics created (server dry run)
 serviceaccount/kube-prometheus-stack-prometheus-node-exporter created (server dry run)
@@ -743,10 +746,10 @@ role.rbac.authorization.k8s.io/kube-prometheus-stack-admission created (server d
 rolebinding.rbac.authorization.k8s.io/kube-prometheus-stack-admission created (server dry run)
 job.batch/kube-prometheus-stack-admission-create created (server dry run)
 job.batch/kube-prometheus-stack-admission-patch created (server dry run)
-Error from server (Forbidden): error when creating "ksp-rendered.yaml": pods "kube-prometheus-stack-grafana-test" is forbidden: error looking up service account p06-01-monitoring/kube-prometheus-stack-grafana-test: serviceaccount "kube-prometheus-stack-grafana-test" not found
+Error from server (Forbidden): error when creating "ksp-rendered.yaml": pods "kube-prometheus-stack-grafana-test" is forbidden: error looking up service account monitoring/kube-prometheus-stack-grafana-test: serviceaccount "kube-prometheus-stack-grafana-test" not found
 rc=1
 ## step 10b: the same dry run with the chart's test hook left out (helm test is not part of install)
-$ helm template kube-prometheus-stack prometheus-community/kube-prometheus-stack --version 92.16.1 --namespace p06-01-monitoring --values monitoring-values.yaml --skip-tests | kubectl apply --dry-run=server -f -
+$ helm template kube-prometheus-stack prometheus-community/kube-prometheus-stack --version 92.16.1 --namespace monitoring --values monitoring-values.yaml --skip-tests | kubectl apply --dry-run=server -f -
 serviceaccount/kube-prometheus-stack-grafana created (server dry run)
 serviceaccount/kube-prometheus-stack-kube-state-metrics created (server dry run)
 serviceaccount/kube-prometheus-stack-prometheus-node-exporter created (server dry run)
@@ -1015,8 +1018,8 @@ p06-01-probe            Active   3m24s
 p06-01-metrics-server   Active   29m
 $ kubectl delete namespace p06-01-probe --wait=false
 namespace "p06-01-probe" deleted
-$ kubectl delete namespace p06-01-monitoring --wait=false
-namespace "p06-01-monitoring" deleted
+$ kubectl delete namespace monitoring --wait=false
+namespace "monitoring" deleted
 $ kubectl delete namespace p06-01-bookstore --wait=false
 namespace "p06-01-bookstore" deleted
 $ kubectl delete namespace p06-01-metrics-server --wait=false
@@ -1114,3 +1117,17 @@ customresourcedefinition.apiextensions.k8s.io "servicemonitors.monitoring.coreos
 customresourcedefinition.apiextensions.k8s.io "thanosrulers.monitoring.coreos.com" deleted
 0
 0
+## step 16: catalog's answer to the paths an edge could send (no edge ran)
+# No Traefik ran on the lab cluster, so nothing here went through an edge. The
+# edge half of the claim is read from raw-manifests/50-ingress.yaml,
+# 50-ingress-traefik.yaml and 51-gateway.yaml. This step sends the paths to a
+# build of app/catalog run on a workstation without DB_DSN, which registers
+# the same routes as the Pod. The chapter's port-forward form sends the same
+# requests to the Service.
+$ go build -o catalog-local .
+$ PORT=18099 ./catalog-local &
+$ for p in /metrics /books/metrics /api/books/metrics; do curl -s -o /dev/null -w "%{http_code} $p\n" "http://localhost:18099$p"; done
+200 /metrics
+404 /books/metrics
+404 /api/books/metrics
+$ kill %1
