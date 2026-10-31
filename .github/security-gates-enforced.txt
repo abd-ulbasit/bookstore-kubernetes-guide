@@ -20,3 +20,4 @@
 07-delivery/03-cicd-pipeline.md
 10-cloud-and-managed-kubernetes/
 15-day-to-day-production-ops/
+appendix/

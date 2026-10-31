@@ -129,6 +129,8 @@ versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Part 15 Day-to-day production ops (15.01 to 15.12) is rewritten
   security-first, with 15.09 as the home for breakglass, and
   `15-day-to-day-production-ops/` joins the enforced list.
+- Appendix A to F is rewritten security-first (the kubectl cheat sheet loses
+  its exam section), and `appendix/` joins the enforced list.
 
 ### Fixed
 - Standalone EKS add-ons (kube-proxy, CoreDNS, EBS CSI) now follow
