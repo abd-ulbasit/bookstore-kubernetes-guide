@@ -32,9 +32,6 @@ on:
         type: choice
         options: ['all', '06-01', '06-04', '09-01']
         default: 'all'
-  # Only while the labs are developed. Removed before the branch merges.
-  push:
-    branches: ['security-first/ci-labs']
 
 permissions: {}
 
@@ -50,7 +47,7 @@ env:
 jobs:
   lab-06-01:
     name: 06.01 kube-prometheus-stack
-    if: ${{ github.event_name == 'push' || inputs.lab == 'all' || inputs.lab == '06-01' }}
+    if: ${{ inputs.lab == 'all' || inputs.lab == '06-01' }}
     runs-on: ubuntu-latest
     timeout-minutes: 60
     permissions:
@@ -145,7 +142,7 @@ jobs:
 
   lab-06-04:
     name: 06.04 HPA under load
-    if: ${{ github.event_name == 'push' || inputs.lab == 'all' || inputs.lab == '06-04' }}
+    if: ${{ inputs.lab == 'all' || inputs.lab == '06-04' }}
     runs-on: ubuntu-latest
     timeout-minutes: 90
     permissions:
@@ -255,7 +252,7 @@ jobs:
 
   lab-09-01:
     name: 09.01 the composed stack
-    if: ${{ github.event_name == 'push' || inputs.lab == 'all' || inputs.lab == '09-01' }}
+    if: ${{ inputs.lab == 'all' || inputs.lab == '09-01' }}
     runs-on: ubuntu-latest
     timeout-minutes: 120
     permissions:

@@ -148,6 +148,11 @@ operations, and each links to the other.
 - **Transcripts.** Runs are scripted and recorded. The redacted transcript is
   committed under `full-guide/examples/security-lab/evidence/`, with no
   public IPs, home paths, emails or cloud identifiers.
+- **Labs too big for a small host.** The workflow `lab-on-runner.yml` runs a
+  lab on a GitHub Actions runner, which has 4 vCPU and 16 GiB of memory, on a
+  kind cluster, with nothing on a cloud account. The transcript is a workflow
+  artifact in the evidence format. Its header gives the run URL, and it is
+  committed like any other transcript.
 
 ## 6. DevSecOps in the projects
 

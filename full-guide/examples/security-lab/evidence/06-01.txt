@@ -70,7 +70,7 @@
 # Recording 3 ran on a GitHub Actions runner, not on the lab host. It is the
 # section from the line "# Runner recording for" to the end of this file,
 # and its own header gives the versions. Run URL:
-# https://github.com/abd-ulbasit/bookstore-kubernetes-guide/actions/runs/41216368151
+# https://github.com/abd-ulbasit/bookstore-kubernetes-guide/actions/runs/41223339026
 # It installed kube-prometheus-stack with the chapter's values and read
 # Prometheus's active targets, a node_ series, Grafana's answer with and
 # without credentials, the catalog target behind the default-deny policy and
@@ -887,8 +887,8 @@ $ kill %1
 
 # Runner recording for 06-production-readiness/01-observability-metrics.md.
 # It ran on a GitHub Actions runner, not on the lab host. Run URL:
-# https://github.com/abd-ulbasit/bookstore-kubernetes-guide/actions/runs/41216368151 (attempt 1)
-# Commit: e13de995e375b84118be911ceb08807d6c375240
+# https://github.com/abd-ulbasit/bookstore-kubernetes-guide/actions/runs/41223339026 (attempt 1)
+# Commit: 43314971a16564a587342caf0fc24a420f8cdd20
 # Tier A: a kind cluster of 3 nodes, Kubernetes v1.37.0 (kind v0.33.0,
 # node image pinned by digest in examples/security-lab/kind), kubectl
 # v1.37.2, Helm v3.22.1. Node runtime: containerd://2.3.4.
@@ -896,16 +896,17 @@ $ kill %1
 # memory, Docker 29.4.2. Recorded by running
 # examples/security-lab/labs/06-01.sh from the workflow lab-on-runner.yml.
 # Paths of the runner's checkout and temporary directory are written as
-# <repo> and <tmp>. Terminal colour codes are removed. Nothing else is
-# edited.
+# <repo> and <tmp>. Terminal colour codes are removed, and tabs become spaces
+# (tab stops every 4 columns, as the evidence gate reads a chapter's code
+# blocks). Nothing else is edited.
 #
 # Runner recording, from examples/security-lab/labs/06-01.sh.
 ## runner step 0: the cluster
 $ kubectl get nodes
 NAME                      STATUS   ROLES           AGE   VERSION
-bookstore-control-plane   Ready    control-plane   35s   v1.37.0
-bookstore-worker          Ready    <none>          20s   v1.37.0
-bookstore-worker2         Ready    <none>          20s   v1.37.0
+bookstore-control-plane   Ready    control-plane   47s   v1.37.0
+bookstore-worker          Ready    <none>          33s   v1.37.0
+bookstore-worker2         Ready    <none>          33s   v1.37.0
 
 $ kubectl version
 Client Version: v1.37.2
@@ -962,10 +963,10 @@ $ helm install kube-prometheus-stack \
   --version 92.16.1 \
   --namespace monitoring \
   --values monitoring-values.yaml \
-  --wait --timeout 10m
-I1031 15:47:23.218863   12624 warnings.go:107] "Warning: would violate PodSecurity \"restricted:latest\": host namespaces (hostNetwork=true), restricted volume types (volumes \"proc\", \"sys\", \"root\" use restricted volume type \"hostPath\")"
+  --wait --timeout 8m
+I1031 17:13:47.863359   14211 warnings.go:107] "Warning: would violate PodSecurity \"restricted:latest\": host namespaces (hostNetwork=true), restricted volume types (volumes \"proc\", \"sys\", \"root\" use restricted volume type \"hostPath\")"
 NAME: kube-prometheus-stack
-LAST DEPLOYED: Sat Oct 31 15:47:17 2026
+LAST DEPLOYED: Sat Oct 31 17:13:42 2026
 NAMESPACE: monitoring
 STATUS: deployed
 REVISION: 1
@@ -993,17 +994,17 @@ Visit https://github.com/prometheus-operator/kube-prometheus for instructions on
 
 $ kubectl get pods -n monitoring
 NAME                                                        READY   STATUS    RESTARTS   AGE
-alertmanager-kube-prometheus-stack-alertmanager-0           2/2     Running   0          32s
-kube-prometheus-stack-grafana-57d9867647-n5z8x              3/3     Running   0          37s
-kube-prometheus-stack-kube-state-metrics-78dc75b868-rbdpz   1/1     Running   0          37s
-kube-prometheus-stack-operator-dbf7f9444-qd8td              1/1     Running   0          37s
-prometheus-kube-prometheus-stack-prometheus-0               1/2     Running   0          30s
+alertmanager-kube-prometheus-stack-alertmanager-0           2/2     Running   0          34s
+kube-prometheus-stack-grafana-57d9867647-6r2qr              3/3     Running   0          39s
+kube-prometheus-stack-kube-state-metrics-78dc75b868-rp4rd   1/1     Running   0          39s
+kube-prometheus-stack-operator-dbf7f9444-jrbnf              1/1     Running   0          39s
+prometheus-kube-prometheus-stack-prometheus-0               2/2     Running   0          34s
 
 $ kubectl get pods -n node-exporter
 NAME                                                   READY   STATUS    RESTARTS   AGE
-kube-prometheus-stack-prometheus-node-exporter-cv6b9   1/1     Running   0          37s
-kube-prometheus-stack-prometheus-node-exporter-fwl4n   1/1     Running   0          37s
-kube-prometheus-stack-prometheus-node-exporter-js2fm   1/1     Running   0          37s
+kube-prometheus-stack-prometheus-node-exporter-686nj   1/1     Running   0          39s
+kube-prometheus-stack-prometheus-node-exporter-98tb4   1/1     Running   0          39s
+kube-prometheus-stack-prometheus-node-exporter-wbbgq   1/1     Running   0          39s
 
 $ kubectl get events -A --field-selector reason=FailedCreate
 No resources found
@@ -1054,12 +1055,12 @@ $ curl -s 'localhost:9090/api/v1/targets?state=active' \
 
 $ curl -s 'localhost:9090/api/v1/targets?state=active' \
   | jq -r '.data.activeTargets[] | select(.health!="up") | [.labels.job, .scrapeUrl, .lastError] | @tsv' | sort
-kube-controller-manager https://172.18.0.2:10257/metrics    Get "https://172.18.0.2:10257/metrics": dial tcp 172.18.0.2:10257: connect: connection refused
-kube-etcd   http://172.18.0.2:2381/metrics  Get "http://172.18.0.2:2381/metrics": dial tcp 172.18.0.2:2381: connect: connection refused
+kube-controller-manager https://172.18.0.3:10257/metrics    Get "https://172.18.0.3:10257/metrics": dial tcp 172.18.0.3:10257: connect: connection refused
+kube-etcd   http://172.18.0.3:2381/metrics  Get "http://172.18.0.3:2381/metrics": dial tcp 172.18.0.3:2381: connect: connection refused
 kube-proxy  http://172.18.0.2:10249/metrics Get "http://172.18.0.2:10249/metrics": dial tcp 172.18.0.2:10249: connect: connection refused
 kube-proxy  http://172.18.0.3:10249/metrics Get "http://172.18.0.3:10249/metrics": dial tcp 172.18.0.3:10249: connect: connection refused
 kube-proxy  http://172.18.0.4:10249/metrics Get "http://172.18.0.4:10249/metrics": dial tcp 172.18.0.4:10249: connect: connection refused
-kube-scheduler  https://172.18.0.2:10259/metrics    Get "https://172.18.0.2:10259/metrics": dial tcp 172.18.0.2:10259: connect: connection refused
+kube-scheduler  https://172.18.0.3:10259/metrics    Get "https://172.18.0.3:10259/metrics": dial tcp 172.18.0.3:10259: connect: connection refused
 
 ## runner step 4b: node-exporter, in its own namespace, still feeds node_ series
 $ curl -s 'localhost:9090/api/v1/query' --data-urlencode 'query=count(node_cpu_seconds_total) by (namespace)' \
@@ -1153,7 +1154,7 @@ prometheusrule.monitoring.coreos.com/bookstore-catalog-rules created
 ## runner step 5c: the Prometheus pods the rule admits, and the Bookstore targets
 $ kubectl -n monitoring get pods -l app.kubernetes.io/name=prometheus
 NAME                                            READY   STATUS    RESTARTS   AGE
-prometheus-kube-prometheus-stack-prometheus-0   2/2     Running   0          2m14s
+prometheus-kube-prometheus-stack-prometheus-0   2/2     Running   0          3m11s
 
 $ curl -s 'localhost:9090/api/v1/targets?state=active' \
   | jq -r '.data.activeTargets[] | select(.labels.namespace=="bookstore") | [.labels.job, .labels.namespace, .health] | @tsv' | sort
@@ -1186,4 +1187,4 @@ $ kubectl get pods -A --no-headers | awk '{print $4}' | sort | uniq -c
 
 $ helm list -A
 NAME                    NAMESPACE   REVISION    UPDATED                                 STATUS      CHART                           APP VERSION
-kube-prometheus-stack   monitoring  1           2026-10-31 15:47:17.091729446 +0000 UTC deployed    kube-prometheus-stack-92.16.1   v0.94.2    
+kube-prometheus-stack   monitoring  1           2026-10-31 17:13:42.263134974 +0000 UTC deployed    kube-prometheus-stack-92.16.1   v0.94.2    

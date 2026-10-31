@@ -10,9 +10,10 @@ watch lists and the NetworkPolicy namespace selector name the lab namespace.
 The prod overlay was copied and renamed in the copy. Its images were pointed at
 the kind-loaded dev images, the traefik-rewrite component was added, and the
 demo Secret 16-db-credentials.yaml was applied, as the chapter said for kind at the time of this run.
-Not run here: kube-prometheus-stack (06.01), Argo CD (07.04), Argo Rollouts
-(07.05), KEDA (06.04), Kyverno (05.07), Velero (08.02) and the node drain
-(06.05, which needs two workers).
+Not run in this first recording: kube-prometheus-stack (06.01), Argo CD
+(07.04), Argo Rollouts (07.05), KEDA (06.04), Kyverno (05.07), Velero (08.02)
+and the node drain (06.05, which needs two workers). The second recording,
+below, ran all of these except the drain.
 What did not work the first time: (1) the db-migrate Job started before
 Postgres was ready and used up its backoffLimit, so it was deleted and the
 overlay applied again; (2) the Postgres volume waited several minutes for the
@@ -33,6 +34,33 @@ output below depends on which Secret was used. The catalog ServiceAccount check,
 the cosign checks and the Kyverno chart check were run again for that review. The
 scratch namespace p09-01-rbac was created for the ServiceAccount check and deleted
 after it.
+Second recording, from the line "# Runner recording for" to the end of this
+file: the composed stack on a GitHub Actions runner, with the chapter's own
+names and a four-node kind cluster built from the config in (a). Its own
+header gives the versions. Run URL:
+https://github.com/abd-ulbasit/bookstore-kubernetes-guide/actions/runs/41223339026
+It installed metrics-server, Traefik, kube-prometheus-stack, Argo CD, Argo
+Rollouts, KEDA, Kyverno and the Velero controller, applied the prod overlay
+with the prefix strip, and ran the checks in (e) to (h), (j) and (k). It did
+not run a Git remote for Argo CD, a canary Rollout, an object store, a
+snapshot-capable CSI driver, a backup, a restore or a node drain.
+What did not work on the runner before the recording below:
+- The CSR loop in metrics-server's setup checked every request, and a new
+  cluster still holds the Approved client requests of its nodes. It now
+  selects the kubelet-serving signer.
+- Argo CD's Redis image comes from ECR Public by default, and the pull was
+  refused with "toomanyrequests: Data limit exceeded" on a first run, so the
+  chart install timed out. The install now pulls the same tag from Docker Hub.
+- A curl Pod could not resolve cluster names (the edge client printed HTTP
+  000, the refusal probe "Could not resolve host"). Docker copies the
+  runner VM's DNS search domain into the kind nodes, and curl's resolver stops
+  on it. The workflow drops that search line from each node before the lab.
+- The KEDA ScaledObject was not Ready: the shipped default-deny policy has no
+  rule for the KEDA operator. The recording shows the failure and then a
+  lab-only rule that clears it.
+- Early versions sent traffic before Prometheus had the targets, so the p95
+  query had no increase to read, and printed a command that an address check
+  read as an email. Both are fixed in the script.
 ==== transcript ====
 $ kubectl get nodes
 NAME                     STATUS   ROLES           AGE   VERSION
@@ -364,3 +392,982 @@ $ helm show chart kyverno/kyverno --version 3.9.2 | grep -E '^(appVersion|name|v
 appVersion: v1.19.2
 name: kyverno
 version: 3.9.2
+==== runner recording ====
+# Runner recording for 09-end-to-end-bookstore/01-bookstore-end-to-end.md.
+# It ran on a GitHub Actions runner, not on the lab host. Run URL:
+# https://github.com/abd-ulbasit/bookstore-kubernetes-guide/actions/runs/41223339026 (attempt 1)
+# Commit: 43314971a16564a587342caf0fc24a420f8cdd20
+# Tier A: a kind cluster of 4 nodes, Kubernetes v1.37.0 (kind v0.33.0,
+# node image pinned by digest in examples/security-lab/kind), kubectl
+# v1.37.2, Helm v3.22.1. Node runtime: containerd://2.3.4.
+# Host: Ubuntu 26.04.1 LTS, kernel 7.0.0-1017-azure, 4 vCPU, about 16 GiB of
+# memory, Docker 29.4.2. Recorded by running
+# examples/security-lab/labs/09-01.sh from the workflow lab-on-runner.yml.
+# Paths of the runner's checkout and temporary directory are written as
+# <repo> and <tmp>. Terminal colour codes are removed, and tabs become spaces
+# (tab stops every 4 columns, as the evidence gate reads a chapter's code
+# blocks). Nothing else is edited.
+#
+# Runner recording, from examples/security-lab/labs/09-01.sh.
+## runner step (a): the cluster, built from the chapter's kind-capstone.yaml
+$ kubectl get nodes -L topology.kubernetes.io/zone,dedicated
+NAME                      STATUS   ROLES           AGE   VERSION   ZONE     DEDICATED
+bookstore-control-plane   Ready    control-plane   48s   v1.37.0            
+bookstore-worker          Ready    <none>          33s   v1.37.0   zone-a   
+bookstore-worker2         Ready    <none>          33s   v1.37.0   zone-b   
+bookstore-worker3         Ready    <none>          33s   v1.37.0   zone-b   database
+
+$ kubectl version
+Client Version: v1.37.2
+Kustomize Version: v5.8.1
+Server Version: v1.37.0
+
+$ helm version --short
+v3.22.1+gd6c1a0e
+
+## runner step (b): load the four images, built before this script with docker build -t bookstore/<service>:dev
+$ for s in catalog orders payments-worker storefront; do
+  kind load docker-image bookstore/$s:dev --name bookstore
+done
+docker exec bookstore-control-plane crictl images | grep bookstore
+Image: "bookstore/catalog:dev" with ID "sha256:722a51b0da43c7bf9d14fdf47cd3254870be7c26c562fb8245fbcb39682d70d6" not yet present on node "bookstore-worker", loading...
+Image: "bookstore/catalog:dev" with ID "sha256:722a51b0da43c7bf9d14fdf47cd3254870be7c26c562fb8245fbcb39682d70d6" not yet present on node "bookstore-control-plane", loading...
+Image: "bookstore/catalog:dev" with ID "sha256:722a51b0da43c7bf9d14fdf47cd3254870be7c26c562fb8245fbcb39682d70d6" not yet present on node "bookstore-worker3", loading...
+Image: "bookstore/catalog:dev" with ID "sha256:722a51b0da43c7bf9d14fdf47cd3254870be7c26c562fb8245fbcb39682d70d6" not yet present on node "bookstore-worker2", loading...
+Image: "bookstore/orders:dev" with ID "sha256:f936b81f7dda061e8c947e2c0bd93521468fe35d4e14d7f4fd6761b925bd8961" not yet present on node "bookstore-worker", loading...
+Image: "bookstore/orders:dev" with ID "sha256:f936b81f7dda061e8c947e2c0bd93521468fe35d4e14d7f4fd6761b925bd8961" not yet present on node "bookstore-control-plane", loading...
+Image: "bookstore/orders:dev" with ID "sha256:f936b81f7dda061e8c947e2c0bd93521468fe35d4e14d7f4fd6761b925bd8961" not yet present on node "bookstore-worker3", loading...
+Image: "bookstore/orders:dev" with ID "sha256:f936b81f7dda061e8c947e2c0bd93521468fe35d4e14d7f4fd6761b925bd8961" not yet present on node "bookstore-worker2", loading...
+Image: "bookstore/payments-worker:dev" with ID "sha256:25957f2db8f1f6a3626e3e4cce9ad5eda5f592acdd52cbbb2d9bd5beaed5e4fd" not yet present on node "bookstore-worker", loading...
+Image: "bookstore/payments-worker:dev" with ID "sha256:25957f2db8f1f6a3626e3e4cce9ad5eda5f592acdd52cbbb2d9bd5beaed5e4fd" not yet present on node "bookstore-control-plane", loading...
+Image: "bookstore/payments-worker:dev" with ID "sha256:25957f2db8f1f6a3626e3e4cce9ad5eda5f592acdd52cbbb2d9bd5beaed5e4fd" not yet present on node "bookstore-worker3", loading...
+Image: "bookstore/payments-worker:dev" with ID "sha256:25957f2db8f1f6a3626e3e4cce9ad5eda5f592acdd52cbbb2d9bd5beaed5e4fd" not yet present on node "bookstore-worker2", loading...
+Image: "bookstore/storefront:dev" with ID "sha256:dbea75896394276dc2d9ceed9105d424865eaef93076196a81db84e5b0fba078" not yet present on node "bookstore-worker", loading...
+Image: "bookstore/storefront:dev" with ID "sha256:dbea75896394276dc2d9ceed9105d424865eaef93076196a81db84e5b0fba078" not yet present on node "bookstore-control-plane", loading...
+Image: "bookstore/storefront:dev" with ID "sha256:dbea75896394276dc2d9ceed9105d424865eaef93076196a81db84e5b0fba078" not yet present on node "bookstore-worker3", loading...
+Image: "bookstore/storefront:dev" with ID "sha256:dbea75896394276dc2d9ceed9105d424865eaef93076196a81db84e5b0fba078" not yet present on node "bookstore-worker2", loading...
+docker.io/bookstore/catalog                     dev                  3bbc0a7f71799       6.86MB
+docker.io/bookstore/orders                      dev                  8765b75e0b764       6.39MB
+docker.io/bookstore/payments-worker             dev                  b2f981aace238       5.2MB
+docker.io/bookstore/storefront                  dev                  c0e79edabca3c       26.1MB
+
+## runner step (c)0: a resource metrics API, added by this run (06.04 step 0)
+$ kubectl create namespace metrics-server
+kubectl label namespace metrics-server pod-security.kubernetes.io/enforce=restricted pod-security.kubernetes.io/audit=restricted pod-security.kubernetes.io/warn=restricted
+helm install metrics-server metrics-server/metrics-server --version 3.14.0 --namespace metrics-server
+namespace/metrics-server created
+namespace/metrics-server labeled
+NAME: metrics-server
+LAST DEPLOYED: Sat Oct 31 17:18:10 2026
+NAMESPACE: metrics-server
+STATUS: deployed
+REVISION: 1
+TEST SUITE: None
+NOTES:
+***********************************************************************
+* Metrics Server                                                      *
+***********************************************************************
+  Chart version: 3.14.0
+  App version:   0.9.0
+  Image tag:     registry.k8s.io/metrics-server/metrics-server:v0.9.0
+***********************************************************************
+
+$ for n in $(kubectl get nodes -o name | sed 's|node/||'); do
+  docker exec "$n" sh -c 'cp /var/lib/kubelet/config.yaml /var/lib/kubelet/config.yaml.orig && echo "serverTLSBootstrap: true" >> /var/lib/kubelet/config.yaml && systemctl restart kubelet && grep serverTLSBootstrap /var/lib/kubelet/config.yaml'
+done
+serverTLSBootstrap: true
+serverTLSBootstrap: true
+serverTLSBootstrap: true
+serverTLSBootstrap: true
+
+$ kubectl get csr --field-selector spec.signerName=kubernetes.io/kubelet-serving
+NAME        AGE   SIGNERNAME                      REQUESTOR                             REQUESTEDDURATION   CONDITION
+csr-6gcw6   2s    kubernetes.io/kubelet-serving   system:node:bookstore-worker3         <none>              Pending
+csr-9bm2t   2s    kubernetes.io/kubelet-serving   system:node:bookstore-worker2         <none>              Pending
+csr-fgnmf   3s    kubernetes.io/kubelet-serving   system:node:bookstore-control-plane   <none>              Pending
+csr-lgr5n   2s    kubernetes.io/kubelet-serving   system:node:bookstore-worker          <none>              Pending
+
+$ for c in $(kubectl get csr --field-selector spec.signerName=kubernetes.io/kubelet-serving -o name); do
+  u=$(kubectl get "$c" -o jsonpath='{.spec.username}')
+  s=$(kubectl get "$c" -o jsonpath='{.spec.request}' | base64 -d | openssl req -noout -text | grep -A1 'Alternative Name' | tail -1 | sed 's/^ *//')
+  echo "${c#*/} $u $s"
+done
+csr-6gcw6 system:node:bookstore-worker3 DNS:bookstore-worker3, IP Address:172.18.0.5
+csr-9bm2t system:node:bookstore-worker2 DNS:bookstore-worker2, IP Address:172.18.0.4
+csr-fgnmf system:node:bookstore-control-plane DNS:bookstore-control-plane, IP Address:172.18.0.2
+csr-lgr5n system:node:bookstore-worker DNS:bookstore-worker, IP Address:172.18.0.3
+
+$ kubectl certificate approve $(kubectl get csr --field-selector spec.signerName=kubernetes.io/kubelet-serving -o name)
+certificatesigningrequest.certificates.k8s.io/csr-6gcw6 approved
+certificatesigningrequest.certificates.k8s.io/csr-9bm2t approved
+certificatesigningrequest.certificates.k8s.io/csr-fgnmf approved
+certificatesigningrequest.certificates.k8s.io/csr-lgr5n approved
+
+$ kubectl get apiservice v1beta1.metrics.k8s.io
+kubectl top nodes
+NAME                     SERVICE                         AVAILABLE   AGE
+v1beta1.metrics.k8s.io   metrics-server/metrics-server   True        38s
+NAME                      CPU(cores)   CPU(%)   MEMORY(bytes)   MEMORY(%)   
+bookstore-control-plane   94m          2%       551Mi           3%          
+bookstore-worker          15m          0%       125Mi           0%          
+bookstore-worker2         93m          2%       155Mi           0%          
+bookstore-worker3         15m          0%       122Mi           0%          
+
+## runner step (c)1: Traefik, the edge
+$ kubectl apply -f traefik-namespace.yaml
+helm repo add traefik https://traefik.github.io/charts
+helm repo update traefik
+helm show chart traefik/traefik --version "$TRAEFIK_CHART_VERSION" \
+  | grep -E '^(appVersion|name|version):'
+helm install traefik traefik/traefik --version "$TRAEFIK_CHART_VERSION" \
+  --namespace traefik -f traefik-values.yaml --wait
+kubectl -n traefik get pods,svc
+kubectl get ingressclass traefik
+namespace/traefik created
+"traefik" has been added to your repositories
+Hang tight while we grab the latest from your chart repositories...
+...Successfully got an update from the "traefik" chart repository
+Update Complete. ⎈Happy Helming!⎈
+appVersion: v3.7.16
+name: traefik
+version: 42.2.0
+NAME: traefik
+LAST DEPLOYED: Sat Oct 31 17:18:50 2026
+NAMESPACE: traefik
+STATUS: deployed
+REVISION: 1
+TEST SUITE: None
+NOTES:
+traefik with docker.io/traefik:v3.7.16@sha256:1336e85aaed293bd63d005086e0dd013b04078b26aaeb1c18b26a2f928af7e65 has been deployed successfully on traefik namespace!
+NAME                           READY   STATUS    RESTARTS   AGE
+pod/traefik-5c6b475d69-s5ckn   1/1     Running   0          14s
+
+NAME              TYPE       CLUSTER-IP      EXTERNAL-IP   PORT(S)                      AGE
+service/traefik   NodePort   10.96.146.230   <none>        80:30080/TCP,443:30443/TCP   14s
+NAME      CONTROLLER                      PARAMETERS   AGE
+traefik   traefik.io/ingress-controller   <none>       14s
+
+## runner step (c)2: kube-prometheus-stack, node-exporter in its own namespace
+$ helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
+helm repo update prometheus-community
+kubectl create namespace monitoring
+kubectl label namespace monitoring \
+  pod-security.kubernetes.io/enforce=restricted \
+  pod-security.kubernetes.io/audit=restricted \
+  pod-security.kubernetes.io/warn=restricted
+kubectl create namespace node-exporter
+kubectl label namespace node-exporter \
+  pod-security.kubernetes.io/enforce=privileged \
+  pod-security.kubernetes.io/audit=restricted \
+  pod-security.kubernetes.io/warn=restricted
+kubectl -n monitoring create secret generic grafana-admin \
+  --from-literal=admin-user=admin \
+  --from-literal=admin-password="$(openssl rand -base64 24)"
+"prometheus-community" has been added to your repositories
+Hang tight while we grab the latest from your chart repositories...
+...Successfully got an update from the "prometheus-community" chart repository
+Update Complete. ⎈Happy Helming!⎈
+namespace/monitoring created
+namespace/monitoring labeled
+namespace/node-exporter created
+namespace/node-exporter labeled
+secret/grafana-admin created
+
+$ helm install kube-prometheus-stack \
+  prometheus-community/kube-prometheus-stack \
+  --version "$KPS_CHART_VERSION" \
+  --namespace monitoring \
+  --values monitoring-values.yaml \
+  --wait --timeout 10m
+I1031 17:19:17.424477   22630 warnings.go:107] "Warning: would violate PodSecurity \"restricted:latest\": host namespaces (hostNetwork=true), restricted volume types (volumes \"proc\", \"sys\", \"root\" use restricted volume type \"hostPath\")"
+NAME: kube-prometheus-stack
+LAST DEPLOYED: Sat Oct 31 17:19:09 2026
+NAMESPACE: monitoring
+STATUS: deployed
+REVISION: 1
+NOTES:
+kube-prometheus-stack has been installed. Check its status by running:
+  kubectl --namespace monitoring get pods -l "release=kube-prometheus-stack"
+
+Get Grafana 'admin' user password by running:
+
+  kubectl --namespace monitoring get secrets kube-prometheus-stack-grafana -o jsonpath="{.data.admin-password}" | base64 -d ; echo
+
+Access Grafana local instance:
+
+  export POD_NAME=$(kubectl --namespace monitoring get pod -l "app.kubernetes.io/name=grafana,app.kubernetes.io/instance=kube-prometheus-stack" -oname)
+  kubectl --namespace monitoring port-forward $POD_NAME 3000
+
+Get your grafana admin user password by running:
+
+  kubectl get secret --namespace monitoring -l app.kubernetes.io/component=admin-secret -o jsonpath="{.items[0].data.admin-password}" | base64 --decode ; echo
+
+
+Visit https://github.com/prometheus-operator/kube-prometheus for instructions on how to create & configure Alertmanager and Prometheus instances using the Operator.
+
+## runner step (c)3: Argo CD and Argo Rollouts, delivery
+$ kubectl create namespace argocd
+kubectl label namespace argocd pod-security.kubernetes.io/enforce=restricted \
+  pod-security.kubernetes.io/audit=restricted \
+  pod-security.kubernetes.io/warn=restricted
+kubectl create namespace argo-rollouts
+kubectl label namespace argo-rollouts pod-security.kubernetes.io/enforce=restricted
+namespace/argocd created
+namespace/argocd labeled
+namespace/argo-rollouts created
+namespace/argo-rollouts labeled
+
+$ helm install argocd oci://ghcr.io/argoproj/argo-helm/argo-cd@sha256:90f462a0695121f65a71cd053619f80023b4efef6bc211f750ffcaaa1628b5b6 \
+  -n argocd -f argocd-values.yaml --set redis.image.repository=docker.io/library/redis \
+  --wait --timeout 10m
+Pulled: ghcr.io/argoproj/argo-helm/argo-cd@sha256:90f462a0695121f65a71cd053619f80023b4efef6bc211f750ffcaaa1628b5b6
+Digest: sha256:90f462a0695121f65a71cd053619f80023b4efef6bc211f750ffcaaa1628b5b6
+NAME: argocd
+LAST DEPLOYED: Sat Oct 31 17:19:56 2026
+NAMESPACE: argocd
+STATUS: deployed
+REVISION: 1
+TEST SUITE: None
+NOTES:
+In order to access the server UI you have the following options:
+
+1. kubectl port-forward service/argocd-server -n argocd 8080:443
+
+    and then open the browser on http://localhost:8080 and accept the certificate
+
+2. enable ingress in the values file `server.ingress.enabled` and either
+      - Add the annotation for ssl passthrough: https://argo-cd.readthedocs.io/en/stable/operator-manual/ingress/#option-1-ssl-passthrough
+      - Set the `configs.params."server.insecure"` in the values file and terminate SSL at your ingress: https://argo-cd.readthedocs.io/en/stable/operator-manual/ingress/#option-2-multiple-ingress-objects-and-hosts
+
+
+After reaching the UI the first time you can login using Dex or OIDC.
+
+$ helm install argo-rollouts oci://ghcr.io/argoproj/argo-helm/argo-rollouts@sha256:09afe23380ec7f804221fb31471e0225cd6328586df2cff4da6093da62aab1ed \
+  -n argo-rollouts --wait --timeout 10m
+kubectl -n argo-rollouts rollout status deploy/argo-rollouts
+Pulled: ghcr.io/argoproj/argo-helm/argo-rollouts@sha256:09afe23380ec7f804221fb31471e0225cd6328586df2cff4da6093da62aab1ed
+Digest: sha256:09afe23380ec7f804221fb31471e0225cd6328586df2cff4da6093da62aab1ed
+NAME: argo-rollouts
+LAST DEPLOYED: Sat Oct 31 17:20:36 2026
+NAMESPACE: argo-rollouts
+STATUS: deployed
+REVISION: 1
+TEST SUITE: None
+deployment "argo-rollouts" successfully rolled out
+
+## runner step (c)4: KEDA
+$ helm repo add kedacore https://kedacore.github.io/charts
+helm repo update kedacore
+kubectl create namespace keda
+kubectl label namespace keda \
+  pod-security.kubernetes.io/enforce=restricted \
+  pod-security.kubernetes.io/audit=restricted \
+  pod-security.kubernetes.io/warn=restricted
+helm install keda kedacore/keda --version "$KEDA_CHART_VERSION" \
+  --namespace keda -f keda-values.yaml --wait --timeout 10m
+kubectl -n keda rollout status deployment/keda-operator
+"kedacore" has been added to your repositories
+Hang tight while we grab the latest from your chart repositories...
+...Successfully got an update from the "kedacore" chart repository
+Update Complete. ⎈Happy Helming!⎈
+namespace/keda created
+namespace/keda labeled
+NAME: keda
+LAST DEPLOYED: Sat Oct 31 17:20:42 2026
+NAMESPACE: keda
+STATUS: deployed
+REVISION: 1
+TEST SUITE: None
+NOTES:
+:::^.     .::::^:     :::::::::::::::    .:::::::::.                   .^.                  
+7???~   .^7????~.     7??????????????.   :?????????77!^.              .7?7.                 
+7???~  ^7???7~.       ~!!!!!!!!!!!!!!.   :????!!!!7????7~.           .7???7.                
+7???~^7????~.                            :????:    :~7???7.         :7?????7.               
+7???7????!.           ::::::::::::.      :????:      .7???!        :7??77???7.              
+7????????7:           7???????????~      :????:       :????:      :???7?5????7.             
+7????!~????^          !77777777777^      :????:       :????:     ^???7?#P7????7.            
+7???~  ^????~                            :????:      :7???!     ^???7J#@J7?????7.           
+7???~   :7???!.                          :????:   .:~7???!.    ~???7Y&@#7777????7.          
+7???~    .7???7:      !!!!!!!!!!!!!!!    :????7!!77????7^     ~??775@@@GJJYJ?????7.         
+7???~     .!????^     7?????????????7.   :?????????7!~:      !????G@@@@@@@@5??????7:        
+::::.       :::::     :::::::::::::::    .::::::::..        .::::JGGGB@@@&7:::::::::        
+                                                                      ?@@#~                  
+                                                                      P@B^                   
+                                                                    :&G:                    
+                                                                    !5.                     
+                                                                    .Kubernetes Event-driven Autoscaling (KEDA) - Application autoscaling made simple.
+
+Get started by deploying Scaled Objects to your cluster:
+    - Information about Scaled Objects : https://keda.sh/docs/latest/concepts/
+    - Samples: https://github.com/kedacore/samples
+
+Get information about the deployed ScaledObjects:
+  kubectl get scaledobject [--namespace <namespace>]
+
+Get details about a deployed ScaledObject:
+  kubectl describe scaledobject <scaled-object-name> [--namespace <namespace>]
+
+Get information about the deployed TriggerAuthentications:
+  kubectl get triggerauthentication [--namespace <namespace>]
+
+Get details about a deployed TriggerAuthentication:
+  kubectl describe triggerauthentication <trigger-authentication-name> [--namespace <namespace>]
+
+Get an overview of the Horizontal Pod Autoscalers (HPA) that KEDA is using behind the scenes:
+  kubectl get hpa [--all-namespaces] [--namespace <namespace>]
+
+Learn more about KEDA:
+- Documentation: https://keda.sh/
+- Support: https://keda.sh/support/
+- File an issue: https://github.com/kedacore/keda/issues/new/choose
+deployment "keda-operator" successfully rolled out
+
+## runner step (c)5: Kyverno
+$ helm repo add kyverno https://kyverno.github.io/kyverno/
+helm repo update kyverno
+kubectl create namespace kyverno
+kubectl label namespace kyverno pod-security.kubernetes.io/enforce=restricted \
+  pod-security.kubernetes.io/audit=restricted \
+  pod-security.kubernetes.io/warn=restricted
+helm show chart kyverno/kyverno --version "$KYVERNO_CHART_VERSION" \
+  | grep -E '^(appVersion|name|version):'
+helm install kyverno kyverno/kyverno --version "$KYVERNO_CHART_VERSION" \
+  --namespace kyverno --set admissionController.replicas=1 \
+  --set backgroundController.replicas=1 --set cleanupController.replicas=1 \
+  --set reportsController.replicas=1 --wait --timeout 10m
+"kyverno" has been added to your repositories
+Hang tight while we grab the latest from your chart repositories...
+...Successfully got an update from the "kyverno" chart repository
+Update Complete. ⎈Happy Helming!⎈
+namespace/kyverno created
+namespace/kyverno labeled
+appVersion: v1.19.2
+name: kyverno
+version: 3.9.2
+NAME: kyverno
+LAST DEPLOYED: Sat Oct 31 17:21:20 2026
+NAMESPACE: kyverno
+STATUS: deployed
+REVISION: 1
+NOTES:
+Chart version: 3.9.2
+Kyverno version: v1.19.2
+
+Thank you for installing kyverno! Your release is named kyverno.
+
+The following components have been installed in your cluster:
+- CRDs
+- Admission controller
+- Reports controller
+- Cleanup controller
+- Background controller
+
+
+⚠️  WARNING: Setting the admission controller replica count below 2 means Kyverno is not running in high availability mode.
+
+
+⚠️  WARNING: PolicyExceptions are disabled by default. To enable them, set '--enablePolicyException' to true.
+⚠️  WARNING: The legacy kyverno.io policy types are deprecated and will be removed in a future release. Migrate to their policies.kyverno.io replacements:
+    - ClusterPolicy / Policy → ValidatingPolicy, MutatingPolicy, GeneratingPolicy, ImageValidatingPolicy (and their namespaced variants)
+    - ClusterCleanupPolicy / CleanupPolicy → DeletingPolicy / NamespacedDeletingPolicy
+    - PolicyException (kyverno.io) → PolicyException (policies.kyverno.io)
+    See https://kyverno.io/docs/guides/migration-to-cel/ for the migration guide.
+
+💡 Note: There is a trade-off when deciding which approach to take regarding Namespace exclusions. Please see the documentation at https://kyverno.io/docs/installation/#security-vs-operability to understand the risks.
+
+## runner step (c)6: Velero, the controller on the CSI snapshot path
+$ kubectl apply -f velero-namespace.yaml
+umask 077
+CREDS_FILE="$(mktemp)"
+printf '[default]\naws_access_key_id=%s\naws_secret_access_key=%s\n' lab-placeholder lab-placeholder > "$CREDS_FILE"
+kubectl create secret generic velero-cloud-credentials -n velero --from-file=cloud="$CREDS_FILE"
+rm -f "$CREDS_FILE"
+namespace/velero created
+limitrange/velero-defaults created
+secret/velero-cloud-credentials created
+
+$ helm repo add vmware-tanzu https://vmware-tanzu.github.io/helm-charts
+helm repo update vmware-tanzu
+helm install velero vmware-tanzu/velero -n velero \
+  --version "$VELERO_CHART_VERSION" --wait \
+  --set image.digest="$VELERO_IMAGE_DIGEST" \
+  --set-json 'initContainers=[{"name":"velero-plugin-for-aws","image":"'"$VELERO_AWS_PLUGIN"'","imagePullPolicy":"IfNotPresent","securityContext":{"allowPrivilegeEscalation":false,"readOnlyRootFilesystem":true,"capabilities":{"drop":["ALL"]}},"volumeMounts":[{"mountPath":"/target","name":"plugins"}]}]' \
+  --set-json 'podSecurityContext={"runAsNonRoot":true,"runAsUser":1002,"runAsGroup":1000,"seccompProfile":{"type":"RuntimeDefault"}}' \
+  --set-json 'containerSecurityContext={"allowPrivilegeEscalation":false,"readOnlyRootFilesystem":true,"capabilities":{"drop":["ALL"]}}' \
+  --set resources.requests.cpu=500m \
+  --set resources.requests.memory=128Mi \
+  --set resources.limits.memory=512Mi \
+  --set configuration.features=EnableCSI \
+  --set deployNodeAgent=false \
+  --set snapshotsEnabled=false \
+  --set 'configuration.backupStorageLocation[0].name=default' \
+  --set 'configuration.backupStorageLocation[0].provider=aws' \
+  --set "configuration.backupStorageLocation[0].bucket=$VELERO_BUCKET" \
+  --set "configuration.backupStorageLocation[0].config.region=$VELERO_REGION" \
+  --set "configuration.backupStorageLocation[0].config.s3Url=$VELERO_S3_URL" \
+  --set 'configuration.backupStorageLocation[0].config.s3ForcePathStyle=true' \
+  --set credentials.existingSecret=velero-cloud-credentials
+kubectl -n velero rollout status deploy/velero
+kubectl -n velero get pods
+"vmware-tanzu" has been added to your repositories
+Hang tight while we grab the latest from your chart repositories...
+...Successfully got an update from the "vmware-tanzu" chart repository
+Update Complete. ⎈Happy Helming!⎈
+NAME: velero
+LAST DEPLOYED: Sat Oct 31 17:21:52 2026
+NAMESPACE: velero
+STATUS: deployed
+REVISION: 1
+TEST SUITE: None
+NOTES:
+Check that the velero is up and running:
+
+    kubectl get deployment/velero -n velero
+
+Check that the secret has been created:
+
+    kubectl get secret/velero -n velero
+
+Once velero server is up and running you need the client before you can use it
+1. wget https://github.com/vmware-tanzu/velero/releases/download/v1.18.2/velero-v1.18.2-darwin-amd64.tar.gz
+2. tar -xvf velero-v1.18.2-darwin-amd64.tar.gz -C velero-client
+
+More info on the official site: https://velero.io/docs
+deployment "velero" successfully rolled out
+NAME                     READY   STATUS    RESTARTS   AGE
+velero-cb65f7cf8-p94gn   1/1     Running   0          37s
+
+$ kubectl -n velero get backupstoragelocation
+NAME      PHASE         LAST VALIDATED   AGE   DEFAULT
+default   Unavailable   31s              37s   true
+
+## runner step (c): what the platform holds, before the Bookstore
+$ kubectl get ns
+NAME                 STATUS   AGE
+argo-rollouts        Active   2m43s
+argocd               Active   2m44s
+default              Active   5m27s
+keda                 Active   117s
+kube-node-lease      Active   5m27s
+kube-public          Active   5m27s
+kube-system          Active   5m27s
+kyverno              Active   79s
+local-path-storage   Active   5m23s
+metrics-server       Active   4m29s
+monitoring           Active   3m34s
+node-exporter        Active   3m33s
+traefik              Active   3m51s
+velero               Active   48s
+
+$ kubectl get pods -A --no-headers | awk '{print $1}' | sort | uniq -c
+      2 argo-rollouts
+      4 argocd
+      3 keda
+     14 kube-system
+      4 kyverno
+      1 local-path-storage
+      1 metrics-server
+      5 monitoring
+      4 node-exporter
+      1 traefik
+      1 velero
+
+$ kubectl top nodes
+NAME                      CPU(cores)   CPU(%)   MEMORY(bytes)   MEMORY(%)   
+bookstore-control-plane   268m         6%       1881Mi          11%         
+bookstore-worker          83m          2%       1346Mi          8%          
+bookstore-worker2         77m          1%       906Mi           5%          
+bookstore-worker3         18m          0%       184Mi           1%          
+
+$ free -m
+               total        used        free      shared  buff/cache   available
+Mem:           15983        4852         247          91       11318       11130
+Swap:           3071           0        3071
+
+$ df -h /
+Filesystem      Size  Used Avail Use% Mounted on
+/dev/root       145G   51G   94G  36% /
+
+## runner step (d.2): the prod overlay, with the prefix strip and the images from (b)
+$ grep -A3 '^components:' examples/bookstore/kustomize/overlays/prod/kustomization.yaml
+cat examples/bookstore/kustomize/overlays/prod/images/kustomization.yaml
+kubectl kustomize examples/bookstore/kustomize/overlays/prod | grep -c '^kind:'
+components:
+  - images
+  - ../../components/traefik-rewrite
+
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+images:
+- name: bookstore/catalog
+  newTag: dev
+- name: bookstore/orders
+  newTag: dev
+- name: bookstore/payments-worker
+  newTag: dev
+- name: bookstore/storefront
+  newTag: dev
+49
+
+$ # Namespace first: the labelled manifest, so the restricted level is in place
+kubectl apply -f examples/bookstore/raw-manifests/00-namespace.yaml
+kubectl apply -f examples/bookstore/raw-manifests/05-serviceaccounts-rbac.yaml
+kubectl apply -f examples/bookstore/raw-manifests/15-catalog-config.yaml
+# kind only: db-credentials, generated here and never committed
+DB="$(openssl rand -hex 16)"; MQ="$(openssl rand -hex 16)"
+kubectl -n bookstore create secret generic db-credentials \
+  --from-literal=POSTGRES_USER=bookstore \
+  --from-literal=POSTGRES_PASSWORD="$DB" \
+  --from-literal=POSTGRES_DB=bookstore \
+  --from-literal=RABBITMQ_DEFAULT_USER=bookstore \
+  --from-literal=RABBITMQ_DEFAULT_PASS="$MQ" \
+  --from-literal=AMQP_URL="amqp://bookstore:${MQ}@rabbitmq:5672/"
+unset DB MQ
+kubectl apply -f examples/bookstore/raw-manifests/35-priorityclasses.yaml
+
+# A self-signed certificate stands in for the one cert-manager issues in prod
+openssl req -x509 -newkey rsa:2048 -nodes -days 30 \
+  -subj "/CN=bookstore.example.com" -keyout tls.key -out tls.crt 2>/dev/null
+kubectl -n bookstore create secret tls bookstore-tls --cert=tls.crt --key=tls.key
+namespace/bookstore created
+resourcequota/bookstore-quota created
+limitrange/bookstore-limits created
+serviceaccount/catalog-sa created
+serviceaccount/storefront-sa created
+serviceaccount/orders-sa created
+serviceaccount/payments-worker-sa created
+serviceaccount/postgres-sa created
+serviceaccount/redis-sa created
+serviceaccount/rabbitmq-sa created
+serviceaccount/migrate-sa created
+role.rbac.authorization.k8s.io/catalog-config-reader created
+rolebinding.rbac.authorization.k8s.io/catalog-config-reader-binding created
+configmap/catalog-config created
+secret/db-credentials created
+priorityclass.scheduling.k8s.io/bookstore-data created
+priorityclass.scheduling.k8s.io/bookstore-critical created
+priorityclass.scheduling.k8s.io/bookstore-batch created
+secret/bookstore-tls created
+
+$ kubectl apply -k examples/bookstore/kustomize/overlays/prod
+namespace/bookstore configured
+resourcequota/bookstore-quota configured
+serviceaccount/catalog-sa configured
+serviceaccount/migrate-sa configured
+serviceaccount/orders-sa configured
+serviceaccount/payments-worker-sa configured
+serviceaccount/postgres-sa configured
+serviceaccount/rabbitmq-sa configured
+serviceaccount/redis-sa configured
+serviceaccount/storefront-sa configured
+role.rbac.authorization.k8s.io/catalog-config-reader configured
+rolebinding.rbac.authorization.k8s.io/catalog-config-reader-binding configured
+configmap/catalog-config configured
+service/catalog created
+service/orders created
+service/payments-worker created
+service/postgres created
+service/rabbitmq created
+service/redis created
+service/storefront created
+limitrange/bookstore-limits configured
+priorityclass.scheduling.k8s.io/bookstore-batch configured
+priorityclass.scheduling.k8s.io/bookstore-critical configured
+priorityclass.scheduling.k8s.io/bookstore-data configured
+deployment.apps/catalog created
+deployment.apps/orders created
+deployment.apps/payments-worker created
+deployment.apps/rabbitmq created
+deployment.apps/redis created
+deployment.apps/storefront created
+statefulset.apps/postgres created
+cronjob.batch/cleanup created
+poddisruptionbudget.policy/catalog created
+poddisruptionbudget.policy/orders created
+poddisruptionbudget.policy/storefront created
+horizontalpodautoscaler.autoscaling/catalog created
+job.batch/db-migrate created
+ingress.networking.k8s.io/bookstore created
+networkpolicy.networking.k8s.io/allow-backend-egress created
+networkpolicy.networking.k8s.io/allow-data-tier-ingress created
+networkpolicy.networking.k8s.io/allow-dns-egress created
+networkpolicy.networking.k8s.io/allow-ingress-to-http-tiers created
+networkpolicy.networking.k8s.io/allow-monitoring-scrape created
+networkpolicy.networking.k8s.io/allow-orders-to-rabbitmq created
+networkpolicy.networking.k8s.io/allow-payments-worker-egress created
+networkpolicy.networking.k8s.io/allow-storefront-egress created
+networkpolicy.networking.k8s.io/allow-storefront-to-apis created
+networkpolicy.networking.k8s.io/default-deny-all created
+middleware.traefik.io/rewrite-api-prefix created
+
+$ kubectl wait --for=condition=complete job/db-migrate -n bookstore --timeout=180s
+kubectl wait --for=condition=available deploy --all -n bookstore --timeout=300s
+kubectl get pods,svc,netpol -n bookstore
+job.batch/db-migrate condition met
+deployment.apps/catalog condition met
+deployment.apps/orders condition met
+deployment.apps/payments-worker condition met
+deployment.apps/rabbitmq condition met
+deployment.apps/redis condition met
+deployment.apps/storefront condition met
+NAME                                  READY   STATUS      RESTARTS   AGE
+pod/catalog-54d447976c-5k7x9          1/1     Running     0          32s
+pod/catalog-54d447976c-bzqwt          1/1     Running     0          31s
+pod/catalog-54d447976c-flw2h          1/1     Running     0          32s
+pod/catalog-54d447976c-swswj          1/1     Running     0          32s
+pod/db-migrate-gsdpq                  0/1     Completed   0          30s
+pod/orders-6fd9cd7d98-5znkp           1/1     Running     0          32s
+pod/orders-6fd9cd7d98-94cx6           1/1     Running     0          32s
+pod/orders-6fd9cd7d98-grc9r           1/1     Running     0          32s
+pod/payments-worker-67d5d47f4-g7wcm   1/1     Running     0          31s
+pod/postgres-0                        1/1     Running     0          31s
+pod/rabbitmq-65dd648b89-8pkr4         1/1     Running     0          31s
+pod/redis-574bb544f-7t7s5             1/1     Running     0          31s
+pod/storefront-b46747976-4cmzt        1/1     Running     0          31s
+pod/storefront-b46747976-6lqzg        1/1     Running     0          31s
+pod/storefront-b46747976-vt92m        1/1     Running     0          31s
+
+NAME                      TYPE        CLUSTER-IP      EXTERNAL-IP   PORT(S)              AGE
+service/catalog           ClusterIP   10.96.206.198   <none>        80/TCP               32s
+service/orders            ClusterIP   10.96.165.195   <none>        80/TCP               32s
+service/payments-worker   ClusterIP   None            <none>        8080/TCP             32s
+service/postgres          ClusterIP   None            <none>        5432/TCP             32s
+service/rabbitmq          ClusterIP   10.96.61.59     <none>        5672/TCP,15672/TCP   32s
+service/redis             ClusterIP   10.96.190.34    <none>        6379/TCP             32s
+service/storefront        ClusterIP   10.96.66.27     <none>        80/TCP               32s
+
+NAME                                                           POD-SELECTOR                                 AGE
+networkpolicy.networking.k8s.io/allow-backend-egress           app in (catalog,cleanup,db-migrate,orders)   30s
+networkpolicy.networking.k8s.io/allow-data-tier-ingress        app in (postgres,redis)                      30s
+networkpolicy.networking.k8s.io/allow-dns-egress               <none>                                       30s
+networkpolicy.networking.k8s.io/allow-ingress-to-http-tiers    app in (catalog,orders,storefront)           30s
+networkpolicy.networking.k8s.io/allow-monitoring-scrape        app in (catalog,orders,payments-worker)      30s
+networkpolicy.networking.k8s.io/allow-orders-to-rabbitmq       app=rabbitmq                                 30s
+networkpolicy.networking.k8s.io/allow-payments-worker-egress   app=payments-worker                          30s
+networkpolicy.networking.k8s.io/allow-storefront-egress        app=storefront                               30s
+networkpolicy.networking.k8s.io/allow-storefront-to-apis       app in (catalog,orders)                      29s
+networkpolicy.networking.k8s.io/default-deny-all               <none>                                       29s
+
+## runner step (e): the edge, from the runner and from a Pod
+$ curl -sk -o /dev/null -w '%{http_code}\n' \
+  -H 'Host: bookstore.example.com' https://localhost/api/books
+200
+
+$ curl -sk -H 'Host: bookstore.example.com' https://localhost/api/books
+[]
+$ kubectl -n bookstore get middleware.traefik.io rewrite-api-prefix -o jsonpath='{.spec.replacePathRegex}{"\n"}'
+{"regex":"^/api/(books|orders)(.*)","replacement":"/$1$2"}
+
+## runner step (e): the edge does not deliver /metrics to the app (06.01 section 4)
+$ for p in /metrics /api/books/metrics /api/orders/metrics; do
+  curl -sk -o /dev/null -w "%{http_code} $p\n" -H 'Host: bookstore.example.com' "https://localhost$p"
+done
+200 /metrics
+404 /api/books/metrics
+404 /api/orders/metrics
+
+$ for p in /metrics /api/books/metrics; do
+  printf '%s go_info lines: ' "$p"
+  curl -sk -H 'Host: bookstore.example.com' "https://localhost$p" | grep -c '^go_info'
+done
+/metrics go_info lines: 0
+/api/books/metrics go_info lines: 0
+
+$ kubectl create namespace client
+kubectl label namespace client pod-security.kubernetes.io/enforce=restricted \
+  pod-security.kubernetes.io/audit=restricted \
+  pod-security.kubernetes.io/warn=restricted
+namespace/client created
+namespace/client labeled
+
+$ kubectl apply -f edge-client.yaml
+kubectl wait --for=jsonpath='{.status.phase}'=Succeeded pod/edge-client \
+  -n client --timeout=120s
+kubectl logs pod/edge-client -n client
+pod/edge-client created
+pod/edge-client condition met
+HTTP 200
+[]
+
+## runner step (e): the refusal, a deliberate action
+$ kubectl apply -f npblock.yaml
+kubectl wait --for=jsonpath='{.status.phase}'=Succeeded pod/npblock -n bookstore --timeout=120s
+kubectl logs pod/npblock -n bookstore
+kubectl delete pod npblock -n bookstore
+pod/npblock created
+pod/npblock condition met
+curl: (28) Connection timed out after 5002 milliseconds
+BLOCKED-AS-EXPECTED
+pod "npblock" deleted from bookstore namespace
+
+## runner step (f): observability, Prometheus scraping the Bookstore through the edge traffic
+$ kubectl apply -f examples/bookstore/raw-manifests/80-servicemonitor.yaml
+kubectl apply -f examples/bookstore/raw-manifests/81-prometheusrule.yaml
+servicemonitor.monitoring.coreos.com/catalog created
+servicemonitor.monitoring.coreos.com/payments-worker created
+prometheusrule.monitoring.coreos.com/bookstore-catalog-rules created
+
+$ kubectl -n monitoring port-forward svc/kube-prometheus-stack-prometheus 9090:9090 >/dev/null 2>&1 &
+sleep 8
+
+$ for i in $(seq 1 300); do
+  curl -sk -o /dev/null -H 'Host: bookstore.example.com' https://localhost/api/books
+done
+echo sent 300 requests through the edge
+sent 300 requests through the edge
+
+$ curl -s 'localhost:9090/api/v1/targets?state=active' \
+  | jq -r '.data.activeTargets[] | select(.labels.namespace=="bookstore") | [.labels.job, .labels.namespace, .health] | @tsv' | sort
+catalog bookstore   up
+catalog bookstore   up
+catalog bookstore   up
+catalog bookstore   up
+payments-worker bookstore   up
+
+$ curl -s 'localhost:9090/api/v1/rules' \
+  | jq -r '.data.groups[] | select(.name=="bookstore-catalog.rules") | .rules[] | [.name, .state, .health] | @tsv'
+CatalogHighErrorRate    inactive    ok
+CatalogHighLatencyP95   inactive    ok
+CatalogAbsent   inactive    ok
+
+$ curl -s localhost:9090/api/v1/query --data-urlencode 'query=sum(rate(http_requests_total{namespace="bookstore"}[5m]))' \
+  | jq -r '.status, (.data.result | length), (.data.result[0].value[1] | tonumber > 0)'
+success
+1
+true
+
+$ curl -s localhost:9090/api/v1/query --data-urlencode 'query=sum(rate(http_requests_total{namespace="bookstore",code=~"5.."}[5m])) / sum(rate(http_requests_total{namespace="bookstore"}[5m]))' \
+  | jq -r '.status, (.data.result | length)'
+success
+1
+
+$ curl -s localhost:9090/api/v1/query --data-urlencode 'query=histogram_quantile(0.95, sum by (le) (rate(http_request_duration_seconds_bucket{handler="books"}[5m])))' \
+  | jq -r '.status, (.data.result | length), (.data.result[0].value[1] | tonumber > 0)'
+success
+1
+true
+
+## runner step (g): scaling, the HPA on metrics-server and KEDA on the RabbitMQ queue
+$ kubectl get hpa catalog -n bookstore
+NAME      REFERENCE            TARGETS                     MINPODS   MAXPODS   REPLICAS   AGE
+catalog   Deployment/catalog   cpu: 1%/70%, <unknown>/50   4         12        4          2m30s
+
+$ kubectl get pdb -n bookstore
+NAME         MIN AVAILABLE   MAX UNAVAILABLE   ALLOWED DISRUPTIONS   AGE
+catalog      2               N/A               2                     2m31s
+orders       1               N/A               2                     2m31s
+storefront   1               N/A               2                     2m31s
+
+$ PW="$(openssl rand -hex 24)"
+kubectl -n bookstore exec deploy/rabbitmq -- rabbitmqctl add_user keda-scaler "$PW"
+kubectl -n bookstore exec deploy/rabbitmq -- rabbitmqctl set_permissions -p / keda-scaler '^$' '^$' '^orders$'
+kubectl -n bookstore create secret generic rabbitmq-conn \
+  --from-literal=host="amqp://keda-scaler:${PW}@rabbitmq.bookstore.svc.cluster.local:5672/"
+unset PW
+Adding user "keda-scaler" ...
+Done. Don't forget to grant the user permissions to some virtual hosts! See 'rabbitmqctl help set_permissions' to learn more.
+Setting permissions for user "keda-scaler" in vhost "/" ...
+secret/rabbitmq-conn created
+
+$ kubectl apply -f examples/bookstore/raw-manifests/83-keda-scaledobject.yaml
+triggerauthentication.keda.sh/rabbitmq-trigger-auth created
+scaledobject.keda.sh/payments-worker created
+
+$ kubectl get scaledobject,hpa -n bookstore
+NAME                                   SCALETARGETKIND      SCALETARGETNAME   MIN   MAX   READY   ACTIVE    FALLBACK   PAUSED   TRIGGERS   AUTHENTICATIONS         AGE
+scaledobject.keda.sh/payments-worker   apps/v1.Deployment   payments-worker   0     10    False   Unknown   False      False    rabbitmq   rabbitmq-trigger-auth   60s
+
+NAME                                          REFERENCE            TARGETS                     MINPODS   MAXPODS   REPLICAS   AGE
+horizontalpodautoscaler.autoscaling/catalog   Deployment/catalog   cpu: 1%/70%, <unknown>/50   4         12        4          3m34s
+
+$ kubectl -n bookstore get scaledobject payments-worker -o jsonpath='{range .status.conditions[*]}{.type}{" "}{.status}{" "}{.reason}{" "}{.message}{"\n"}{end}' | sed 's|amqp://[^@]*@|amqp://REDACTED@|g'
+Ready False ScaledObjectCheckFailed failed to ensure HPA is correctly created for ScaledObject: error establishing connection to RabbitMQ: dial tcp 10.96.61.59:5672: i/o timeout
+Active Unknown UnknownState ScaledObject check failed
+Fallback False NoFallbackFound No fallbacks are active on this scaled object
+Paused False  
+
+$ kubectl describe hpa catalog -n bookstore | sed -n '/^Conditions:/,/^Events:/p'
+Conditions:
+  Type           Status  Reason               Message
+  ----           ------  ------               -------
+  AbleToScale    True    SucceededGetScale    the HPA controller was able to get the target's current scale
+  ScalingActive  False   FailedGetPodsMetric  the HPA was unable to compute the replica count: unable to get metric http_requests_per_second: unable to fetch metrics from custom metrics API: no custom metrics API (custom.metrics.k8s.io) registered
+Events:
+
+## runner step (g): a lab-only rule that admits the KEDA operator to RabbitMQ (a deliberate action)
+$ kubectl apply -f lab-allow-keda-to-rabbitmq.yaml
+networkpolicy.networking.k8s.io/lab-allow-keda-to-rabbitmq created
+
+$ kubectl get scaledobject -n bookstore
+NAME              SCALETARGETKIND      SCALETARGETNAME   MIN   MAX   READY   ACTIVE    FALLBACK   PAUSED   TRIGGERS   AUTHENTICATIONS         AGE
+payments-worker   apps/v1.Deployment   payments-worker   0     10    True    Unknown   False      False    rabbitmq   rabbitmq-trigger-auth   66s
+
+$ kubectl get scaledobject,hpa -n bookstore
+kubectl get deploy payments-worker -n bookstore
+NAME                                   SCALETARGETKIND      SCALETARGETNAME   MIN   MAX   READY   ACTIVE    FALLBACK   PAUSED   TRIGGERS   AUTHENTICATIONS         AGE
+scaledobject.keda.sh/payments-worker   apps/v1.Deployment   payments-worker   0     10    True    Unknown   False      False    rabbitmq   rabbitmq-trigger-auth   66s
+
+NAME                                                           REFERENCE                    TARGETS                     MINPODS   MAXPODS   REPLICAS   AGE
+horizontalpodautoscaler.autoscaling/catalog                    Deployment/catalog           cpu: 1%/70%, <unknown>/50   4         12        4          3m40s
+horizontalpodautoscaler.autoscaling/keda-hpa-payments-worker   Deployment/payments-worker   0/20 (avg)                  1         10        1          4s
+NAME              READY   UP-TO-DATE   AVAILABLE   AGE
+payments-worker   0/0     0            0           3m42s
+
+## runner step (h): security posture
+$ # busybox:1.36, pinned by digest as 08.03 does
+kubectl run psa-bad -n bookstore --restart=Never --dry-run=server \
+  --image=busybox@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662 \
+  --overrides='{"spec":{"containers":[{"name":"psa-bad","image":"busybox@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662","securityContext":{"privileged":true}}]}}'
+Error from server (Forbidden): pods "psa-bad" is forbidden: violates PodSecurity "restricted:latest": privileged (container "psa-bad" must not set securityContext.privileged=true), allowPrivilegeEscalation != false (container "psa-bad" must set securityContext.allowPrivilegeEscalation=false), unrestricted capabilities (container "psa-bad" must set securityContext.capabilities.drop=["ALL"]), runAsNonRoot != true (pod or container "psa-bad" must set securityContext.runAsNonRoot=true), seccompProfile (pod or container "psa-bad" must set securityContext.seccompProfile.type to "RuntimeDefault" or "Localhost")
+
+$ kubectl auth can-i --list --as=system:serviceaccount:bookstore:catalog-sa -n bookstore \
+  | grep -E '^(Resources|configmaps)'
+kubectl auth can-i get secrets --as=system:serviceaccount:bookstore:catalog-sa -n bookstore
+Resources                                       Non-Resource URLs                      Resource Names     Verbs
+configmaps                                      []                                     [catalog-config]   [get]
+no
+
+## runner step (h): Kyverno in Audit mode over the running workloads
+$ kubectl apply -f examples/bookstore/raw-manifests/70-kyverno-policy.yaml
+Warning: kyverno.io/v1 ClusterPolicy is deprecated and will be removed in a future release; migrate to ValidatingPolicy, MutatingPolicy, GeneratingPolicy or ImageValidatingPolicy (policies.kyverno.io), see https://kyverno.io/docs/guides/migration-to-cel/
+clusterpolicy.kyverno.io/bookstore-image-supply-chain created
+
+$ kubectl get clusterpolicy
+Warning: kyverno.io/v1 ClusterPolicy is deprecated and will be removed in a future release; migrate to ValidatingPolicy, MutatingPolicy, GeneratingPolicy or ImageValidatingPolicy (policies.kyverno.io), see https://kyverno.io/docs/guides/migration-to-cel/
+NAME                           ADMISSION   BACKGROUND   READY   AGE   MESSAGE
+bookstore-image-supply-chain   true        true         True    46s   Ready
+
+$ kubectl get policyreport -n bookstore
+NAME                                   KIND          NAME                         PASS   FAIL   WARN   ERROR   SKIP   AGE
+10f89ba8-5e14-45f2-9de2-9e4ee659a706   Pod           orders-6fd9cd7d98-94cx6      2      1      0      0       0      35s
+1bbc9cf1-e7b2-4bb8-8def-8cac4fea15fd   Deployment    redis                        3      0      0      0       0      35s
+1d450b61-f16b-48f1-b78c-a6c4b40d5ef7   Pod           rabbitmq-65dd648b89-8pkr4    3      0      0      0       0      35s
+1e59a6df-3b1f-4f45-834c-fd96ac9b7378   Pod           storefront-b46747976-vt92m   2      1      0      0       0      35s
+219cc2e8-6189-4240-8a62-65f7de8e5d67   Job           db-migrate                   3      0      0      0       0      35s
+221a596c-fcdd-4bbe-a8a1-df51194a2e72   Pod           catalog-54d447976c-swswj     2      1      0      0       0      35s
+426c9399-8eb1-4d05-a6aa-7c9c8b09c943   StatefulSet   postgres                     3      0      0      0       0      35s
+4ca42de4-1437-499f-a17a-542bbadd8f30   ReplicaSet    redis-574bb544f              3      0      0      0       0      35s
+4dd097bc-ede0-4d32-9c63-1508d73cf288   ReplicaSet    storefront-b46747976         2      1      0      0       0      35s
+679f0e45-07e0-4cba-bc95-47e541b4937d   Pod           redis-574bb544f-7t7s5        3      0      0      0       0      35s
+75edd797-982c-4832-ba84-aa06839235f0   Deployment    storefront                   2      1      0      0       0      35s
+7daf760c-89e7-47d8-8363-52eb03fccf83   CronJob       cleanup                      3      0      0      0       0      35s
+84d51e6a-e9e0-4536-a479-f11ab2dbdc5c   Deployment    rabbitmq                     3      0      0      0       0      34s
+9298c7ef-5ad7-4e04-9092-55b9cf848156   Pod           orders-6fd9cd7d98-grc9r      2      1      0      0       0      35s
+962ad17c-db69-4ab4-8b95-a7f08142bb0a   Pod           postgres-0                   3      0      0      0       0      35s
+97f508df-3287-44f2-a13d-459a8bfb6d79   Pod           catalog-54d447976c-bzqwt     2      1      0      0       0      35s
+a525927f-3c1d-4243-9b2c-d65f3638725e   Pod           db-migrate-gsdpq             3      0      0      0       0      35s
+a96ee719-234a-4931-8384-9cee39545beb   Pod           catalog-54d447976c-flw2h     2      1      0      0       0      35s
+ab1414c5-e945-452b-b375-dcb8cfaa00c2   Deployment    orders                       2      1      0      0       0      35s
+b0b86d2d-7bbd-486e-a967-4b06c0194a43   ReplicaSet    orders-6fd9cd7d98            2      1      0      0       0      35s
+b6b6e0d0-5b9a-4aaa-b81a-4e1dc876c556   Pod           storefront-b46747976-4cmzt   2      1      0      0       0      35s
+c4e8dacf-6725-468c-b160-bff7b8dfe443   ReplicaSet    payments-worker-67d5d47f4    2      1      0      0       0      35s
+d10d811b-d86b-4e17-abe9-d706ce1b371c   ReplicaSet    catalog-54d447976c           2      1      0      0       0      35s
+d4b12bf6-f1eb-4151-9bd6-2eb4f2d3facd   Pod           catalog-54d447976c-5k7x9     2      1      0      0       0      35s
+e484522e-010c-4481-bc81-84b198f82871   Pod           orders-6fd9cd7d98-5znkp      2      1      0      0       0      35s
+efb3344b-35f1-42f7-9f19-09d1d0c18597   Deployment    payments-worker              2      1      0      0       0      35s
+f33b00f5-98c0-4ae4-9852-4b5dde40d482   ReplicaSet    rabbitmq-65dd648b89          3      0      0      0       0      35s
+f87b537e-c613-4b73-964c-29333a481a9c   Pod           storefront-b46747976-6lqzg   2      1      0      0       0      35s
+fba135d5-bbac-46d0-b236-1a64ec24f63e   Deployment    catalog                      2      1      0      0       0      35s
+
+$ kubectl get policyreport -n bookstore -o json | jq -c '[.items[].summary] | {pass: (map(.pass) | add), fail: (map(.fail) | add)}'
+{"pass":69,"fail":18}
+
+$ kubectl get policyreport -n bookstore -o json \
+  | jq -r '[.items[].results[]? | select(.result=="fail") | .policy + " " + .rule] | group_by(.) | .[] | "\(.[0]) \(length)"'
+bookstore-image-supply-chain autogen-require-image-digest 8
+bookstore-image-supply-chain require-image-digest 10
+
+## runner step (i): the controllers that the delivery steps need
+$ kubectl get pods -n argocd
+kubectl get pods -n argo-rollouts
+kubectl get crd applications.argoproj.io appprojects.argoproj.io rollouts.argoproj.io analysistemplates.argoproj.io
+NAME                                  READY   STATUS    RESTARTS   AGE
+argocd-application-controller-0       1/1     Running   0          6m58s
+argocd-redis-8f88c7899-89mhc          1/1     Running   0          6m58s
+argocd-repo-server-59b65b86b9-tpbt6   1/1     Running   0          6m58s
+argocd-server-7b4c5bdf58-rdd74        1/1     Running   0          6m58s
+NAME                             READY   STATUS    RESTARTS   AGE
+argo-rollouts-6695f965fc-k9j2b   1/1     Running   0          6m32s
+argo-rollouts-6695f965fc-nwjkl   1/1     Running   0          6m32s
+NAME                            SCOPE        VERSIONS            CREATED AT
+applications.argoproj.io        Namespaced   v1alpha1(storage)   2026-10-31T17:20:10Z
+appprojects.argoproj.io         Namespaced   v1alpha1(storage)   2026-10-31T17:20:10Z
+rollouts.argoproj.io            Namespaced   v1alpha1(storage)   2026-10-31T17:20:37Z
+analysistemplates.argoproj.io   Namespaced   v1alpha1(storage)   2026-10-31T17:20:37Z
+
+## runner step (j): the Velero controller, with no object store behind it
+$ kubectl -n velero get backupstoragelocation
+kubectl get crd -o name | grep -c '\.velero\.io$'
+NAME      PHASE         LAST VALIDATED   AGE    DEFAULT
+default   Unavailable   51s              5m7s   true
+13
+
+## runner step (k): day-2 sampler, a debug container on distroless catalog
+$ POD=$(kubectl get pods -n bookstore -l app=catalog -o jsonpath='{.items[0].metadata.name}')
+# gcr.io/distroless/static:debug-nonroot, pinned by the digest below
+# A runner has no terminal, so stdin is a pipe that stays open for the attach.
+sleep 20 | kubectl debug -n bookstore pod/$POD --target=catalog --profile=restricted \
+  --image=gcr.io/distroless/static@sha256:c7b8faacc4439b8f5c41ca7ce4a3f8ff3e8520cb0c3444fae7292f687b00d0dd \
+  --container=debugger -i --quiet -- /busybox/sh -c \
+  'id -u; nc -z -w 3 postgres.bookstore.svc.cluster.local 5432 && echo PG-REACHABLE'
+echo "attach exit: $?"
+kubectl logs -n bookstore $POD -c debugger
+warning: couldn't attach to pod/catalog-54d447976c-5k7x9, falling back to streaming logs: unable to upgrade connection: container debugger not found in pod catalog-54d447976c-5k7x9_bookstore
+65532
+PG-REACHABLE
+attach exit: 0
+65532
+PG-REACHABLE
+
+## runner step (c): the platform and the Bookstore together
+$ kubectl get pods -A --no-headers | awk '{print $1}' | sort | uniq -c
+      2 argo-rollouts
+      4 argocd
+     14 bookstore
+      1 client
+      3 keda
+     14 kube-system
+      4 kyverno
+      1 local-path-storage
+      1 metrics-server
+      5 monitoring
+      4 node-exporter
+      1 traefik
+      1 velero
+
+$ kubectl get pods -A --no-headers | awk '{split($3,a,"/"); if ($4 != "Running" && $4 != "Completed") print $1, $2, $4}'
+
+$ kubectl top nodes
+NAME                      CPU(cores)   CPU(%)   MEMORY(bytes)   MEMORY(%)   
+bookstore-control-plane   291m         7%       2107Mi          13%         
+bookstore-worker          95m          2%       1604Mi          10%         
+bookstore-worker2         132m         3%       1525Mi          9%          
+bookstore-worker3         45m          1%       279Mi           1%          
+
+$ free -m
+               total        used        free      shared  buff/cache   available
+Mem:           15983        5405         293         143       10772       10577
+Swap:           3071           0        3071
+
+$ helm list -A
+NAME                    NAMESPACE       REVISION    UPDATED                                 STATUS      CHART                           APP VERSION
+argo-rollouts           argo-rollouts   1           2026-10-31 17:20:36.617988292 +0000 UTC deployed    argo-rollouts-2.43.8            v1.10.1    
+argocd                  argocd          1           2026-10-31 17:19:56.700990813 +0000 UTC deployed    argo-cd-10.11.6                 v3.5.6     
+keda                    keda            1           2026-10-31 17:20:42.523205294 +0000 UTC deployed    keda-2.21.0                     2.21.0     
+kube-prometheus-stack   monitoring      1           2026-10-31 17:19:09.14536668 +0000 UTC  deployed    kube-prometheus-stack-92.16.1   v0.94.2    
+kyverno                 kyverno         1           2026-10-31 17:21:20.748827911 +0000 UTC deployed    kyverno-3.9.2                   v1.19.2    
+metrics-server          metrics-server  1           2026-10-31 17:18:10.41836468 +0000 UTC  deployed    metrics-server-3.14.0           0.9.0      
+traefik                 traefik         1           2026-10-31 17:18:50.144902616 +0000 UTC deployed    traefik-42.2.0                  v3.7.16    
+velero                  velero          1           2026-10-31 17:21:52.78445134 +0000 UTC  deployed    velero-12.2.2                   1.18.2     
+
+## runner step (l): teardown, as the chapter does on a shared cluster
+$ helm uninstall traefik -n traefik
+kubectl delete namespace client bookstore traefik
+kubectl get namespace bookstore
+kubectl get ingressclass traefik
+release "traefik" uninstalled
+namespace "client" deleted
+namespace "bookstore" deleted
+namespace "traefik" deleted
+Error from server (NotFound): namespaces "bookstore" not found
+Error from server (NotFound): ingressclasses.networking.k8s.io "traefik" not found
