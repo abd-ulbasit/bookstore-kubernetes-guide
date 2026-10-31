@@ -38,7 +38,7 @@
 
 **Estimated time:** ~60 min read · half-day hands-on
 **Prerequisites:** [Part 12 ch.02-07](02-gpus-and-accelerators.md) — all Part 12 capabilities this capstone assembles · [Part 10 ch.06](../10-cloud-and-managed-kubernetes/06-node-autoscaling-cost-multicloud.md) — Karpenter + spot economics underneath ML cost · [Part 11 ch.10](../11-advanced-production-patterns/10-platform-engineering.md) — IDP shape the ML platform plugs into
-**You'll know after this:** • place a team on the MLOps maturity ladder (L0 → L3) and name the next rung · • assemble the full ML stack (compute + data + train + notebook + serve + orchestrate + track + register + monitor) on K8s · • model GPU $/hr economics with on-demand vs spot vs MIG slice + sharing levers · • compare Kubeflow-the-distribution vs the a-la-carte stack this part built · • design a Backstage software-template for a new ML project (namespace + queue + WorkflowTemplate)
+**You'll know after this:** • place a team on the MLOps maturity ladder (L0 → L3) and name the next rung · • assemble the full ML stack (compute + data + train + notebook + serve + orchestrate + track + register + monitor) on K8s · • model GPU $/hr economics with on-demand vs spot vs MIG slice + sharing levers · • compare Kubeflow-the-distribution vs the a-la-carte stack this part built · • design a Backstage software-template for a new ML project (namespace + queue + WorkflowTemplate) · • cap GPU spend, job count and tracker access with the controls this chapter adds
 
 <!-- tags: ml, mlops, cost, finops, platform-engineering, gpu -->
 
@@ -69,7 +69,7 @@ three jobs at once:
    the *next* rung.
 2. **It frames cost as a first-class concern, with concrete levers.** ML
    on Kubernetes is the **most expensive workload most clusters will
-   ever run** — GPUs at $X-XX/hr, idle notebooks at $50-150/mo, retrain
+   ever run**: GPUs billed by the hour, idle notebooks left running, retrain
    jobs that nobody remembered to schedule, inference that should be
    scale-to-zero. Each lever has a chapter behind it; this one
    *assembles* them into a FinOps story and points at OpenCost/Kubecost
@@ -122,7 +122,8 @@ explicit cost levers and a clear maturity ladder**.**
   ([ch.02](02-gpus-and-accelerators.md)) decide how many workloads
   share one physical GPU. (2) **Spot for training**: training Jobs are
   bounded-time + checkpoint-restartable -> spot instances are the right
-  fit, ~70% cheaper. (3) **On-demand for inference**: a serving Pod
+  fit, at the provider's spot discount. (3) **On-demand for inference**:
+  a serving Pod
   evicted mid-request is a user-visible incident. (4) **Right-sizing
   training Pods** with VPA recommendations
   ([Part 06 ch.04](../06-production-readiness/04-autoscaling.md))
@@ -131,8 +132,9 @@ explicit cost levers and a clear maturity ladder**.**
   with KServe+Knative, or KEDA with `minReplicaCount: 0`) is free
   money for spiky endpoints. (6) **Idle-singleuser-Jupyter culling**
   ([ch.05](05-notebooks-and-interactive.md)) prevents the most common
-  ML cost line item: forgotten GPU notebooks at $5-15/hr. Visibility
-  ties them together: **OpenCost** (CNCF; Kubecost is the commercial
+  ML cost line item: forgotten GPU notebooks, which bill for every hour they
+  stay up. Visibility
+  ties them together: **OpenCost** (open source; Kubecost is the commercial
   superset) attributes cost per namespace, per workload, per pipeline
   run (Argo Workflows annotations).
 - **Build-vs-buy: Kubeflow-the-distribution vs the a-la-carte stack
@@ -184,6 +186,22 @@ ch.06](../10-cloud-and-managed-kubernetes/06-node-autoscaling-cost-multicloud.md
 ch.10](../11-advanced-production-patterns/10-platform-engineering.md)
 (IDP / Backstage / Crossplane — the *paved-road* pattern). It does
 **not** re-teach any of them.
+
+## Threats and controls
+
+Only threats specific to shared spend and a shared model store appear here.
+The Pod baseline comes from [the baseline](../01-core-workloads/01-pods.md#baseline),
+the namespace labels from [Part 05 ch.02](../05-security/02-pod-security.md),
+and the one registered exception, the GPU stack, from [ch.02](02-gpus-and-accelerators.md).
+
+| Threat | Control taught here | Deeper |
+|---|---|---|
+| A loop, a retry storm or a stuck run holds GPUs for hours, or leaves a backlog of Jobs | A job count cap in the team namespace (section 2), `backoffLimit` and `activeDeadlineSeconds` on every GPU Job. The GPU ceiling is the quota from [ch.03](03-batch-and-gang-scheduling.md), set from the team's budget | [Part 01 ch.03](../01-core-workloads/03-resources-and-qos.md), [Part 06 ch.06](../06-production-readiness/06-capacity-and-cost.md) |
+| Anyone who reaches the tracker can register, overwrite or promote a model | Tracker authentication on (`--app-name basic-auth`), an admin password from a Secret, ClusterIP only, and a default-deny ingress policy that admits only the `bookstore-ml` namespace | [Part 05 ch.01](../05-security/01-authn-authz-rbac.md); mTLS in [Part 11 ch.04](../11-advanced-production-patterns/04-service-mesh.md) |
+| The tracker's bundled database and object store ship with their own defaults | Neither is deployed. The backing database and the artifact bucket are external, and their URIs and keys live only in a Secret | [Part 03 ch.02](../03-config-and-storage/02-secrets.md) |
+| Cost data shows spend and cluster shape to anyone who can reach OpenCost's API | ClusterIP only, the MCP server and UI off, and an exporter whose ClusterRole grants get, list and watch and nothing else | [Part 08 ch.05](../08-day-2-operations/05-operators-and-crds.md) |
+| A scaffolder with cluster credentials can create anything its form asks for | The scaffolder holds no cluster credentials. It writes to Git and Argo CD applies. The team name is pattern-checked before any step runs | [Part 11 ch.10](../11-advanced-production-patterns/10-platform-engineering.md), [Part 08 ch.04](../08-day-2-operations/04-multi-tenancy-and-namespaces.md) |
+| A run's lineage points at an image tag someone re-pushed | Training and serving images are recorded by digest in the run's parameters | [Part 05 ch.03](../05-security/03-supply-chain.md) |
 
 ## Diagrams
 
@@ -295,25 +313,175 @@ flowchart TB
 
 **Assumed working directory: the guide repo root (`full-guide/`).** All
 prereqs are the namespaces and images from earlier Part 12 chapters; this
-chapter installs only the *cost* and *tracking* slices, then walks the
+chapter installs the *cost* and *tracking* slices and adds the spend caps,
+then walks the
 capstone exercise that composes every piece together.
 
-### 1. The cost story: OpenCost (visibility) + the levers
+### 1. Cost visibility: OpenCost, installed with hardened values
 
-The visibility layer goes first — without it, every other "cost lever"
-discussion is faith-based. **OpenCost** is the CNCF cost-accounting
-standard; **Kubecost** is the commercial superset that ships with extra
-UI/reporting. Either works.
+The visibility layer goes first. Without it, every later cost lever is
+guesswork. **OpenCost** is an open-source cost-allocation project, and
+**Kubecost** is a commercial product built on the same model. This chapter
+installs OpenCost.
+
+The chart is pinned to `2.5.33`, which ships OpenCost `1.121.3`. Both were
+read from the chart repository with `helm show chart`, and the exporter
+image's digest was checked against the registry. The chart's defaults also
+run a UI and an MCP server this chapter does not need, so the values turn
+both off. The chart's own NetworkPolicy allows egress only to Prometheus,
+which would cut the exporter off from the API server it reads. The values
+turn that policy off, and the namespace gets the policy below instead.
+
+The exporter runs as UID 1001, the UID its image declares, with a read-only
+root filesystem and `/tmp` on an emptyDir. It reads the API, so its
+ServiceAccount token stays mounted. The chart creates that ServiceAccount for
+OpenCost alone, and it is the one place this chapter turns the token on.
+
+Save the namespace as `opencost-namespace.yaml`:
+
+```yaml
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: opencost
+  labels:
+    app.kubernetes.io/part-of: platform-cost
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/audit-version: latest
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/warn-version: latest
+```
+
+Save the policies as `opencost-netpol.yaml`. The default-deny policy comes
+first, as in [02.06](02-gpus-and-accelerators.md). The second admits
+Prometheus to the metrics port and lets the exporter reach the API server
+and Prometheus. The API address is a placeholder that the apply step fills
+in from the cluster's `kubernetes` endpoint:
+
+```yaml
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny
+  namespace: opencost
+spec:
+  podSelector: {}
+  policyTypes: ["Ingress", "Egress"]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: opencost-api-and-prometheus
+  namespace: opencost
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: opencost
+  policyTypes: ["Ingress", "Egress"]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: prometheus-system
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: prometheus
+      ports:
+        - protocol: TCP
+          port: 9003
+  egress:
+    - to:
+        - ipBlock:
+            cidr: 192.0.2.10/32   # replaced with the API server address at apply time
+      ports:
+        - protocol: TCP
+          port: 6443
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: prometheus-system
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: prometheus
+      ports:
+        - protocol: TCP
+          port: 9090
+```
+
+Save the values as `opencost-values.yaml`. Each key is a hardening setting,
+and the comments say which default it replaces:
+
+```yaml
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1001
+  runAsGroup: 1001
+  seccompProfile:
+    type: RuntimeDefault
+extraVolumes:
+  - name: tmp
+    emptyDir: {}
+networkPolicies:
+  enabled: false        # the chart's policy would block the API server
+opencost:
+  mcp:
+    enabled: false      # default on; this chapter does not use it
+  updateCaTrust:
+    enabled: false      # default off; it would run a root container
+  ui:
+    enabled: false      # default on; the API on 9003 is all this chapter uses
+  exporter:
+    extraVolumeMounts:
+      - name: tmp
+        mountPath: /tmp
+    securityContext:
+      allowPrivilegeEscalation: false
+      readOnlyRootFilesystem: true
+      capabilities:
+        drop: ["ALL"]
+```
 
 ```sh
-# Install OpenCost via pinned Helm into its own namespace
-# (the same shape as Part 10 ch.06's example).
-OPENCOST_VERSION="1.108.1"        # bump deliberately
+kubectl apply -f opencost-namespace.yaml
+APISERVER_IP=$(kubectl get endpoints kubernetes -n default \
+  -o jsonpath='{.subsets[0].addresses[0].ip}')
+sed "s#192.0.2.10/32#${APISERVER_IP}/32#" opencost-netpol.yaml \
+  | kubectl apply -f -
 helm repo add opencost https://opencost.github.io/opencost-helm-chart
-helm install opencost opencost/opencost \
-  --version "$OPENCOST_VERSION" \
-  -n opencost --create-namespace --wait
+helm install opencost opencost/opencost --version 2.5.33 \
+  -n opencost -f opencost-values.yaml --wait
+```
 
+Before the install, the lab rendered the chart with these values and sent the
+result to the server as a dry run. The server accepted all five objects under
+`restricted`, and the exporter's image is pinned by the digest the registry
+returned:
+
+```sh
+helm template opencost opencost/opencost --version 2.5.33 \
+  -n opencost -f opencost-values.yaml | kubectl apply --dry-run=server -f -
+```
+
+<!-- gate: output -->
+```
+serviceaccount/opencost created (server dry run)
+clusterrole.rbac.authorization.k8s.io/opencost created (server dry run)
+clusterrolebinding.rbac.authorization.k8s.io/opencost created (server dry run)
+service/opencost created (server dry run)
+deployment.apps/opencost created (server dry run)
+```
+
+<!-- gate: output -->
+```
+image: ghcr.io/opencost/opencost:1.121.3@sha256:4cdd173253e5abba048dfe2cfa968707a5b59d774157d5356940d0d923a6c281
+```
+
+The allocation numbers come from Prometheus, which the values point at as
+`prometheus-server` in `prometheus-system`. This chapter does not install it.
+
+```sh
 # OpenCost reads kube-state-metrics + cAdvisor + node prices to compute
 # allocation per namespace / workload / label. Browse:
 kubectl port-forward -n opencost svc/opencost 9003:9003 &
@@ -332,14 +500,14 @@ The six concrete levers, mapped to manifests already in the guide:
 | Lever | Where it lives | What it saves |
 |---|---|---|
 | **Accelerator sharing**: time-slice / MPS / **MIG** | [ch.02](02-gpus-and-accelerators.md) GPU Operator config | 1 GPU serves many small jobs/models; MIG = isolated slices on A100/H100 |
-| **Spot for training** | [Part 10 ch.06](../10-cloud-and-managed-kubernetes/06-node-autoscaling-cost-multicloud.md) + [`../examples/bookstore/cloud/karpenter-nodepool.yaml`](../examples/bookstore/cloud/karpenter-nodepool.yaml) (GPU NodePool tagged spot) | ~70% off on-demand; safe because training jobs checkpoint and Kueue gang-admit retries |
+| **Spot for training** | [Part 10 ch.06](../10-cloud-and-managed-kubernetes/06-node-autoscaling-cost-multicloud.md) + [`../examples/bookstore/cloud/karpenter-nodepool.yaml`](../examples/bookstore/cloud/karpenter-nodepool.yaml) (GPU NodePool tagged spot) | The provider's spot discount; safe because training jobs checkpoint and Kueue gang-admit retries |
 | **On-demand for inference** | A second NodePool, non-spot, taint-/tolerated by `InferenceService` Pods | predictability >> price for user-facing requests |
 | **Right-size training Pods** | `VerticalPodAutoscaler` in `recommendation` mode on training Pods ([Part 06 ch.04](../06-production-readiness/04-autoscaling.md)) | catches "asked for 4 GPUs, used 1" + "asked for 32Gi, peaked at 8Gi" |
 | **Scale-to-zero for inference** | KServe + Knative ([ch.06](06-model-serving-and-inference.md)) or KEDA `minReplicaCount: 0` | spiky endpoints cost zero when idle |
 | **Idle-Jupyter culling** | z2jh `cull.timeout` ([ch.05](05-notebooks-and-interactive.md)) | a forgotten GPU notebook is a single line item bigger than every CI runner combined |
 
 > **GPU $/hr honesty.** Concrete numbers age fast; the shape does not.
-> On any cloud right now: **spot** is ~50-80% off **on-demand**;
+> On any cloud right now: **spot** is a deep discount on **on-demand**;
 > **MIG slices** (1g/2g/3g/7g of an A100/H100) cost a *fraction* of the
 > whole GPU; **time-sliced** sharing is *free* but adds latency
 > contention. The cost-aware design is **MIG for inference of small
@@ -347,25 +515,361 @@ The six concrete levers, mapped to manifests already in the guide:
 > latency-critical inference**. Specific prices: read your cloud's
 > page on the day; do not bake numbers into a guide.
 
-### 2. The tracking + registry slice (MLflow) — what to add if you want L2-with-real-lineage
+### 2. Cap the spend: a job count, a run deadline and retries
 
-[ch.07](07-ml-pipelines-and-workflows.md)'s `register` step is a kind-
-runnable proxy (a ConfigMap). The real shape is **MLflow** (the most
-common open-source tracker + registry) or **KFP Model Registry** (the
-Kubeflow-native option). MLflow is the smaller add-on; install it pinned:
+The GPU ceiling from [ch.03](03-batch-and-gang-scheduling.md) bounds how many
+GPUs a namespace may hold at once. It does not bound two other things: how
+many runs a loop leaves queued, and how long one run may hold its GPUs. A job
+count cap bounds the first. The run caps below bound the second.
+
+The count cap is a ResourceQuota on Job objects. Queued and running Jobs both
+count against it, so a suspended Job takes a place in it. Save as
+`ml-job-cap.yaml`:
+
+```yaml
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: ml-job-cap
+  namespace: bookstore-ml
+spec:
+  hard:
+    count/jobs.batch: "2"   # small on purpose, so the cap shows on kind
+```
+
+The probe is one complete Job. It is suspended, so no Pod starts and no GPU
+is claimed on a node. It carries the baseline, with the UID the guide's own
+training image declares (65532) and the ServiceAccount that
+[ch.04](04-distributed-training.md) creates for training. Save as
+`cap-probe.yaml`:
+
+```yaml
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: cap-probe
+  namespace: bookstore-ml
+spec:
+  suspend: true         # no Pod starts; Kueue suspends queued Jobs the same way
+  backoffLimit: 1
+  activeDeadlineSeconds: 21600
+  template:
+    spec:
+      serviceAccountName: recommender-train
+      automountServiceAccountToken: false
+      restartPolicy: Never
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: train
+          image: bookstore/recommender-train:dev   # built by ch.04
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              cpu: 500m
+              memory: 1Gi
+              nvidia.com/gpu: "1"
+            limits:
+              memory: 1Gi
+              nvidia.com/gpu: "1"
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
+```
+
+Apply the quota, then two probes. The third probe is over the cap, so the
+server refuses it. That refusal is a deliberate action, and the dry run stores
+nothing:
 
 ```sh
-# Pin via Bitnami's chart (one of the maintained MLflow Helm charts).
-# Bump deliberately; bitnami's chart README documents the MLflow version.
-MLFLOW_CHART_VERSION="2.5.0"      # ChartVersion (Bitnami); appVersion in chart README
-helm repo add bitnami https://charts.bitnami.com/bitnami
-helm install mlflow bitnami/mlflow \
-  --version "$MLFLOW_CHART_VERSION" \
-  -n mlflow --create-namespace --wait
-# (MLflow needs a backing store and an artifact store -- the chart
-#  configures PostgreSQL + MinIO by default; replace with managed
-#  Postgres + S3/GCS in prod.)
+kubectl apply -f ml-job-cap.yaml
+kubectl apply -f cap-probe.yaml
+sed 's/name: cap-probe$/name: cap-probe-2/' cap-probe.yaml | kubectl apply -f -
+# Deliberate denial: a third Job over the cap, sent as a server dry run.
+sed 's/name: cap-probe$/name: cap-probe-3/' cap-probe.yaml > cap-probe-3.yaml
+kubectl apply --dry-run=server -f cap-probe-3.yaml
 ```
+
+<!-- gate: output -->
+```
+job.batch/cap-probe created
+# ...
+job.batch/cap-probe-2 created
+# ...
+Error from server (Forbidden): error when creating "cap-probe-3.yaml": jobs.batch "cap-probe-3" is forbidden: exceeded quota: ml-job-cap, requested: count/jobs.batch=1, used: count/jobs.batch=2, limited: count/jobs.batch=2
+```
+
+The quota now reads two of two, so the cap, not the node, refused the third:
+
+```sh
+kubectl get resourcequota ml-job-cap -n bookstore-ml
+```
+
+<!-- gate: output -->
+```
+NAME         REQUEST                 LIMIT   AGE
+ml-job-cap   count/jobs.batch: 2/2           1s
+```
+
+The two run caps go on every GPU Job, including the one from ch.04. Both are
+fields under `spec`:
+
+- `backoffLimit` is the number of retries before the Job is marked failed.
+  Each retry asks for GPUs again, so a retry storm multiplies the bill. Keep
+  it low.
+- `activeDeadlineSeconds` is a wall-clock limit that starts when the Job runs.
+  When it passes, the Job's Pods are stopped and the Job fails. The value above
+  is an example of six hours, not a recommendation. Set it from the longest run
+  the budget allows.
+
+```yaml
+# Fields to add under spec: of the GPU Job in ch.04. A fragment, so no kind:
+spec:
+  backoffLimit: 1
+  activeDeadlineSeconds: 21600
+```
+
+These caps bound the backlog and the run length. The GPU ceiling bounds the
+GPUs, and the OpenCost query in section 1 shows spend per namespace, which is
+how you check that the ceiling was set from the budget and not from a guess.
+
+### 3. The tracking and registry: MLflow with authentication
+
+The register step in [ch.07](07-ml-pipelines-and-workflows.md) writes a
+ConfigMap. That is enough to run the pipeline on kind. It is not a shared
+registry, and a shared registry is where the threat sits: whoever can write to
+it can promote a model. So this section is about who can write.
+
+The chart is not the install. Bitnami's MLflow chart (5.1.17, app 3.3.2) names
+the image `docker.io/bitnami/mlflow:3.3.2-debian-12-r0`, and that tag does not
+resolve on the registry as of this run, so the chart cannot start as shipped.
+Its default Service type is `LoadBalancer`, and its defaults deploy a
+PostgreSQL and a MinIO, which this guide does not run. This section uses the
+upstream image instead, `ghcr.io/mlflow/mlflow` at `v3.3.2`, pinned by the
+digest of its image index, as a plain Deployment with the baseline.
+
+Basic authentication is built into MLflow and turns on with
+`--app-name basic-auth`. The admin password comes from the
+`MLFLOW_AUTH_ADMIN_PASSWORD` variable or from `admin_password` in the config
+file. The server refuses to start with neither set, so this chapter ships no
+default password. The config's default permission is `READ` for every user, so
+the config below sets `NO_PERMISSIONS`. Its `database_uri` defaults to SQLite
+in the working directory, which a read-only root filesystem does not allow, so
+the config points it at an external database. Sources: the `basic_auth.ini`
+file and the basic HTTP auth page in the MLflow repository.
+
+The upstream image declares no user, so the Deployment sets UID 65532 itself,
+the UID the guide's own Python images run as. The first start is the check that
+the image runs under it. The lab did not start the server.
+
+Create the secret from three inputs, none of them in Git. The config file is
+`basic_auth.ini`:
+
+```ini
+[mlflow]
+default_permission = NO_PERMISSIONS
+database_uri = <the external auth database URI, kept in the Secret only>
+admin_username = admin
+```
+
+The manifests follow. The default-deny policy admits nothing into the
+namespace except the policy's allow, and that allow admits only the
+`bookstore-ml` namespace on port 5000. Egress to the database and the bucket
+is left open here. Narrow it with the same policy pattern once their addresses
+are known. Save as `mlflow.yaml`:
+
+```yaml
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: mlflow
+  labels:
+    app.kubernetes.io/part-of: mlflow
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/audit-version: latest
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/warn-version: latest
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: mlflow
+  namespace: mlflow
+automountServiceAccountToken: false
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny
+  namespace: mlflow
+spec:
+  podSelector: {}
+  policyTypes: ["Ingress"]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-bookstore-ml
+  namespace: mlflow
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: mlflow
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              app.kubernetes.io/part-of: bookstore-ml
+      ports:
+        - protocol: TCP
+          port: 5000
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mlflow
+  namespace: mlflow
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: mlflow
+  ports:
+    - name: http
+      port: 5000
+      targetPort: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mlflow
+  namespace: mlflow
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: mlflow
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: mlflow
+    spec:
+      serviceAccountName: mlflow
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532        # the image declares no user; see the text
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: mlflow
+          # ghcr.io/mlflow/mlflow:v3.3.2, pinned to the image index digest
+          image: ghcr.io/mlflow/mlflow@sha256:b166428a3ab479e396f14d671987a70b27741a8d9b22f9d69a559c1fbf09d551
+          command: ["/bin/sh", "-c"]
+          args:
+            - >-
+              exec mlflow server --host 0.0.0.0 --port 5000
+              --app-name basic-auth
+              --backend-store-uri "$(cat /etc/mlflow-auth/backend-store-uri)"
+              --artifacts-destination "$ARTIFACT_ROOT"
+          env:
+            - name: MLFLOW_AUTH_CONFIG_PATH
+              value: /etc/mlflow-auth/basic_auth.ini
+            - name: MLFLOW_AUTH_ADMIN_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: mlflow-auth
+                  key: admin-password
+            - name: ARTIFACT_ROOT
+              value: s3://example-bucket/mlflow   # placeholder: your bucket
+          ports:
+            - name: http
+              containerPort: 5000
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              memory: 1Gi
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+            - name: auth
+              mountPath: /etc/mlflow-auth
+              readOnly: true
+      volumes:
+        - name: tmp
+          emptyDir: {}
+        - name: auth
+          secret:
+            secretName: mlflow-auth
+            items:
+              - key: basic_auth.ini
+                path: basic_auth.ini
+              - key: backend-store-uri
+                path: backend-store-uri
+```
+
+Before the Secret exists, a server dry run accepts the manifests under
+`restricted`. The namespace line is left out here, since the lab created it
+first:
+
+```sh
+kubectl apply --dry-run=server -f mlflow.yaml
+```
+
+<!-- gate: output -->
+```
+# ...
+serviceaccount/mlflow created (server dry run)
+networkpolicy.networking.k8s.io/default-deny created (server dry run)
+networkpolicy.networking.k8s.io/allow-bookstore-ml created (server dry run)
+service/mlflow created (server dry run)
+deployment.apps/mlflow created (server dry run)
+```
+
+The `backend-store-uri` file holds one line, the external PostgreSQL URI. Apply
+the manifests, then create the secret. The admin password is generated and
+never printed:
+
+```sh
+kubectl apply -f mlflow.yaml
+kubectl create secret generic mlflow-auth -n mlflow \
+  --from-file=basic_auth.ini=./basic_auth.ini \
+  --from-file=backend-store-uri=./backend-store-uri \
+  --from-literal=admin-password="$(openssl rand -base64 24)"
+```
+
+The artifact bucket needs its own identity, which [Part 10 ch.03](../10-cloud-and-managed-kubernetes/03-cloud-identity.md)
+covers. That identity is the only reason to turn the ServiceAccount token on,
+and it would apply to this ServiceAccount alone.
+
+Two claims here are not demonstrated. This chapter did not start the server,
+so the refusal of an unauthenticated request is cited to the MLflow repository,
+not captured. And the UID 65532 is a choice the image does not declare. The
+first start is the check that it works.
+
+The pipeline reaches this tracker with its own credential. Promotion stays a
+Git commit, as [ch.07](07-ml-pipelines-and-workflows.md) describes.
 
 To wire the Bookstore pipeline to MLflow: replace the `register` step's
 `kubectl create configmap` with an MLflow `log_model` / `log_artifact`
@@ -374,7 +878,7 @@ change). The chapter calls this out **without** mutating the existing
 `ml/pipeline/recommender-workflow.yaml` — the swap is a deliberate next
 step that the platform team would land as a separate PR.
 
-### 3. The capstone exercise — the Bookstore ML platform end-to-end on kind
+### 4. The capstone exercise: the Bookstore ML platform end-to-end on kind
 
 Compose every piece the guide built, in one sequence, against a kind
 cluster. Each step has appeared in the chapters individually; this is
@@ -394,12 +898,8 @@ kubectl label namespace bookstore-ml \
 # B. The Bookstore app (dev overlay -> 45 objects; staging -> 49; prod -> 48).
 kubectl apply -k examples/bookstore/kustomize/overlays/dev
 
-# C. Batch scheduling layer (ch.03)
-JOBSET_VERSION="0.11.1"; KUEUE_VERSION="0.17.0"
-helm install jobset oci://registry.k8s.io/jobset/charts/jobset \
-  --version "$JOBSET_VERSION" -n jobset-system --create-namespace --wait
-helm install kueue  oci://registry.k8s.io/kueue/charts/kueue \
-  --version "$KUEUE_VERSION"  -n kueue-system  --create-namespace --wait
+# C. Batch scheduling layer (ch.03): run its install commands first, which
+#    pin both charts and set the queue-label control in kueue-values.yaml
 kubectl apply -f examples/bookstore/ml/batch/kueue-resourceflavor.yaml
 kubectl apply -f examples/bookstore/ml/batch/kueue-clusterqueue.yaml
 kubectl apply -f examples/bookstore/ml/batch/kueue-localqueue.yaml
@@ -420,8 +920,13 @@ kubectl rollout status deploy/recommender -n bookstore-ml --timeout=120s
 
 # F. The pipeline (ch.07)
 helm repo add argo https://argoproj.github.io/argo-helm
+kubectl create namespace argo
+kubectl label namespace argo \
+  pod-security.kubernetes.io/enforce=restricted \
+  pod-security.kubernetes.io/audit=restricted \
+  pod-security.kubernetes.io/warn=restricted
 helm install argo-workflows argo/argo-workflows \
-  --version 0.42.0 -n argo --create-namespace --wait
+  --version 0.42.0 -n argo --wait
 kubectl apply -f examples/bookstore/ml/pipeline/recommender-workflow.yaml
 kubectl apply -f examples/bookstore/ml/pipeline/recommender-cronworkflow.yaml
 argo submit --from workflowtemplate/recommender-pipeline -n bookstore-ml --watch
@@ -454,7 +959,7 @@ install and one set of manifests; no migration.
 > namespace via the Backstage scaffolder ([Part 11 ch.10](../11-advanced-production-patterns/10-platform-engineering.md));
 > the scaffolder commits a PR; the loop closes by itself.
 
-### 4. The IDP touch-point — a Backstage template for "create a new ML project"
+### 5. The IDP touch-point: a Backstage template for "create a new ML project"
 
 The existing
 [`examples/bookstore/platform/backstage-template.yaml`](../examples/bookstore/platform/backstage-template.yaml)
@@ -469,6 +974,17 @@ a starter **`WorkflowTemplate`** scaffold (train/eval/register/promote — the
 a per-team `ResourceQuota` ([Part 08 ch.04](../08-day-2-operations/04-multi-tenancy-and-namespaces.md)),
 and Argo CD `Application` glue. The result: a new ML team self-services
 the *whole stack* in minutes, bounded by the platform's guardrails.
+
+The scaffolder is where a developer's form input reaches the platform first,
+so it gets the least privilege. In the design this section describes, it
+holds a GitHub token that can create a repository and no cluster credentials.
+Argo CD applies what lands in Git ([Part 07 ch.04](../07-delivery/04-gitops-argocd.md)).
+The `team` parameter has a pattern because it becomes a namespace name, a
+queue name and a repository name in one step. A value with a `/` or a `&` in
+it fails the form before any step runs. The `gpuCeiling` parameter becomes the
+`requests.nvidia.com/gpu` quota from [ch.03](03-batch-and-gang-scheduling.md).
+An earlier draft asked for GPU hours, which a ResourceQuota cannot enforce, so
+the template takes the one number a quota can hold.
 
 The guide does not mutate the existing
 `examples/bookstore/platform/backstage-template.yaml`; the ML template is
@@ -497,14 +1013,14 @@ same `scaffolder.backstage.io/v1beta3` shape.
   a JobSet has `successPolicy` + restart on spot eviction; KubeRay /
   PyTorchJob restart from checkpoint. A spot node going away mid-train
   = a retry, not a lost run, *provided* the training code checkpoints.
-  Karpenter NodePool `disruption.budgets` / `consolidation: WhenEmpty`
-  / a `karpenter.sh/disruption: do-not-evict` annotation on the
+  Karpenter NodePool `disruption.budgets` / `consolidationPolicy: WhenEmpty`
+  / a `karpenter.sh/do-not-disrupt: "true"` annotation on the
   serving Pods (which live on a separate, on-demand NodePool) keeps
   the policy correct: training spot, serving on-demand.
 - **Scale-to-zero is *only* free when cold-start fits the SLO.** A
   Knative cold-start = (Pod schedule) + (container start) + (model load).
-  For a small CPU recommender it is ~seconds; for a 50 GiB LLM it is
-  tens of seconds and unacceptable for user-facing traffic. **Pick by
+  For a small CPU recommender it is short; for a large language model it is
+  often too long for user-facing traffic. **Pick by
   SLO**: scale-to-zero for *spiky internal* or *async* inference; warm
   pool (`min-scale: 1` or higher) for *user-facing low-latency*.
 - **MIG vs time-slice vs MPS — the cost framing.** [ch.02](02-gpus-and-accelerators.md)
@@ -530,7 +1046,7 @@ same `scaffolder.backstage.io/v1beta3` shape.
   GitOps + a small set of cross-namespace CRDs. **Most platform teams
   end up with a-la-carte after Kubeflow** because the latter's "all or
   nothing" matters less and less as each component becomes excellent
-  on its own; smaller teams (5-50 engineers) often *start* with
+  on its own; smaller teams often *start* with
   Kubeflow exactly because the glue is hard. Either is correct;
   document the choice.
 - **The IDP for ML is Backstage scaffolder + Crossplane Composition.**
@@ -540,7 +1056,7 @@ same `scaffolder.backstage.io/v1beta3` shape.
   XR -> a Composition that expands into the namespace + Kueue queue +
   Argo Workflow scaffold + InferenceService scaffold + Quota +
   NetworkPolicy + Argo CD `Application`. The developer fills in three
-  fields ("team name, queue size, expected GPU hours"); the road builds
+  fields (team name, namespace size, GPU ceiling); the road builds
   the rest.
 - **GitOps for ML works the same as for apps, with one wrinkle.** The
   *model artifact* itself is **not in Git** — it is too big, and Git's
@@ -606,8 +1122,9 @@ same `scaffolder.backstage.io/v1beta3` shape.
 > separate paved road; the *workloads* are different, the *platform
 > primitives* are the same.
 
-> **In production:** **PSA-`restricted` on every Pod the platform
-> produces — no exceptions for ML**. The biggest "ML pod won't start"
+> **In production:** **PSA-`restricted` on every workload Pod the
+> platform produces. The one registered exception is the GPU stack's namespace
+> ([ch.02](02-gpus-and-accelerators.md)), and it runs no workload Pods.** The biggest "ML pod won't start"
 > incidents the guide foreshadows in [ch.01](01-why-ml-on-kubernetes.md),
 > [ch.02](02-gpus-and-accelerators.md), [ch.05](05-notebooks-and-interactive.md)
 > are PSA violations from upstream CUDA/Jupyter base images. The
@@ -693,17 +1210,26 @@ That is the through-line: one platform, one posture, many workloads.
 ## Quick Reference
 
 ```sh
-# Cost visibility (pinned Helm, own namespace)
-OPENCOST_VERSION="1.108.1"
+# Cost visibility: namespace, policies, hardened values, pinned chart (section 1)
+kubectl apply -f opencost-namespace.yaml
+APISERVER_IP=$(kubectl get endpoints kubernetes -n default \
+  -o jsonpath='{.subsets[0].addresses[0].ip}')
+sed "s#192.0.2.10/32#${APISERVER_IP}/32#" opencost-netpol.yaml \
+  | kubectl apply -f -
 helm repo add opencost https://opencost.github.io/opencost-helm-chart
-helm install opencost opencost/opencost \
-  --version "$OPENCOST_VERSION" -n opencost --create-namespace --wait
+helm install opencost opencost/opencost --version 2.5.33 \
+  -n opencost -f opencost-values.yaml --wait
 
-# Tracking + registry (the L2+ swap from ch.07's ConfigMap proxy)
-MLFLOW_CHART_VERSION="2.5.0"
-helm repo add bitnami https://charts.bitnami.com/bitnami
-helm install mlflow bitnami/mlflow \
-  --version "$MLFLOW_CHART_VERSION" -n mlflow --create-namespace --wait
+# Spend caps (section 2): the job count, then the probes
+kubectl apply -f ml-job-cap.yaml
+kubectl apply -f cap-probe.yaml
+
+# Tracker with authentication (section 3): manifests, then the secret
+kubectl apply -f mlflow.yaml
+kubectl create secret generic mlflow-auth -n mlflow \
+  --from-file=basic_auth.ini=./basic_auth.ini \
+  --from-file=backend-store-uri=./backend-store-uri \
+  --from-literal=admin-password="$(openssl rand -base64 24)"
 
 # Re-summon the full capstone (every prior chapter's slice, in order)
 kubectl apply -k examples/bookstore/kustomize/overlays/dev
@@ -722,51 +1248,46 @@ kubectl get configmap -n bookstore-ml \
   -l app.kubernetes.io/component=recommender-model-registry
 ```
 
-Minimal skeleton (a Backstage scaffolder `Template` for "an ML project"
+The parameter schema of an ML project (a Backstage scaffolder `Template`
 — the IDP touch-point parallel to `examples/bookstore/platform/backstage-template.yaml`):
 
 ```yaml
-apiVersion: scaffolder.backstage.io/v1beta3
-kind: Template
-metadata:
-  name: ml-project
-  title: New ML Project (paved road)
-spec:
-  owner: platform-team
-  type: ml-project
-  parameters:
-    - title: Team
-      properties:
-        team: { type: string, title: "Team name" }
-        size: { type: string, enum: ["xs","s","m","l"], default: "s" }
-        gpuHoursPerMonth: { type: integer, default: 100 }
-  steps:
-    - id: fetch
-      action: fetch:template
-      input:
-        url: ./skeleton                      # contains: namespace + Kueue queue +
-                                              # WorkflowTemplate + InferenceService
-        values:
-          team: ${{ parameters.team }}
-          size: ${{ parameters.size }}
-    - id: publish
-      action: publish:github
-      input:
-        repoUrl: github.com?repo=${{ parameters.team }}-ml&owner=...
-    - id: register
-      action: catalog:register
-      input: { repoContentsUrl: ${{ steps.publish.output.repoContentsUrl }} }
+# The parameter schema of the ML project template. The full template, with
+# its steps, is examples/bookstore/ml/platform/ml-project-template.yaml.
+parameters:
+  - title: Team
+    required: [team, size, gpuCeiling]
+    properties:
+      team:
+        title: Team name
+        type: string
+        maxLength: 30
+        pattern: '^[a-z][a-z0-9-]{1,28}[a-z0-9]$'
+      size:
+        title: Namespace size
+        type: string
+        enum: ["xs", "s", "m", "l"]
+        default: "s"
+      gpuCeiling:
+        title: GPUs the team may hold at once
+        type: integer
+        minimum: 0
+        maximum: 8        # example cap; set it from the cluster's GPU count
+        default: 2
 ```
 
 Checklist:
 
 - [ ] **MLOps maturity rung known**: team is at LX; the next pain points the LX+1 rung
 - [ ] **Cost visibility installed** (OpenCost or Kubecost); workflow + training + serving Pods labelled for attribution
-- [ ] **Spot for training, on-demand for inference** (separate Karpenter NodePools / tolerations / `do-not-evict` on serving)
+- [ ] **Spot for training, on-demand for inference** (separate Karpenter NodePools / tolerations / `karpenter.sh/do-not-disrupt` on serving)
 - [ ] **Scale-to-zero for inference** chosen deliberately per endpoint SLO (cold-start budget understood)
 - [ ] **A model registry** is in use (MLflow / KFP / OCI) — *not* a ConfigMap in prod
 - [ ] **Lineage** = dataset URI + image SHA + hyperparameters recorded per pipeline run
 - [ ] **GitOps wires it all** — pipeline manifests, serving manifests, NodePools, Helm releases all in Git, reconciled by Argo CD
+- [ ] **Spend capped**: a GPU ceiling from ch.03, a job count cap, and `backoffLimit` and `activeDeadlineSeconds` on every GPU Job
+- [ ] **Tracker authenticated**: `--app-name basic-auth`, admin password from a Secret, ClusterIP only, default-deny ingress
+- [ ] **Scaffolder holds no cluster credentials**, and the team name is pattern-checked before any step runs
 
 ## Test your understanding
 
@@ -786,10 +1307,10 @@ Checklist:
 
    </details>
 
-3. **You're spending $20k/month on the ML platform. Walk through the cost-attribution attack: where do you point OpenCost, what labels do you need, and what's the answer to "what did the recommendations team cost last month?"**
+3. **Your ML platform's monthly bill keeps growing. Walk through the cost-attribution attack: where do you point OpenCost, what labels do you need, and what's the answer to "what did the recommendations team cost last month?"**
    <details><summary>Show answer</summary>
 
-   Install OpenCost in its own namespace with cloud-bill integration. Every ML namespace gets a label `team=recommendations` (or `tenant=acme-books`). Every Pod inherits the namespace label, plus per-pipeline-run labels (`pipeline.argoproj.io/run-name`) that OpenCost can group by. Per-resource: training Pods on spot show lower $/hr than serving Pods on on-demand. The answer flows: tenant -> namespace -> Pods -> GPU/CPU/memory/PVC -> $ per resource × hours -> total. The dashboard answers "team recommendations spent $4,200 last month, of which $3,100 was GPU training, $900 was serving, $200 was notebooks." Without labels seeded by the platform (Crossplane onboarding, see [Part 13 ch.10](../13-grand-capstone-bookstore-platform/10-cost-opencost-per-tenant-finops.md)), the bill is opaque.
+   Install OpenCost in its own namespace with cloud-bill integration. Every ML namespace gets a label `team=recommendations` (or `tenant=acme-books`). Every Pod inherits the namespace label, plus per-pipeline-run labels (`pipeline.argoproj.io/run-name`) that OpenCost can group by. Per-resource: training Pods on spot show lower $/hr than serving Pods on on-demand. The answer flows: tenant -> namespace -> Pods -> GPU/CPU/memory/PVC -> $ per resource × hours -> total. The dashboard answers "team recommendations spent N last month, of which G was GPU training, S was serving and B was notebooks," with every figure read from OpenCost and none estimated. Without labels seeded by the platform (Crossplane onboarding, see [Part 13 ch.10](../13-grand-capstone-bookstore-platform/10-cost-opencost-per-tenant-finops.md)), the bill is opaque.
 
    </details>
 
@@ -821,6 +1342,21 @@ Checklist:
 
    </details>
 
+8. **Security: a teammate proposes putting the MLflow admin password in a
+   values file, so the chart picks it up on install. Why is that refused, and
+   what does this chapter use instead?**
+   <details><summary>Show answer</summary>
+
+   A values file is committed to Git, so the password would stay in the
+   repository's history for as long as the history exists, and anyone with read
+   access could see it. This chapter generates the password with `openssl rand`
+   into a Secret, never prints it, and the Deployment reads it through a
+   `secretKeyRef`. The config file holds no admin password. Its database URI
+   lives in the same Secret. A check is that `git log -p` finds no password and
+   that the Pod gets the value from its environment, not from a file in Git.
+
+   </details>
+
 ## Further reading
 
 - **Rosso et al., _Production Kubernetes_, ch.13 "Capacity Planning"** —
@@ -840,6 +1376,14 @@ Checklist:
 - **Microsoft — "MLOps maturity model"**
   <https://learn.microsoft.com/azure/architecture/ai-ml/guide/mlops-maturity-model>
   — the Azure variant, finer-grained (Levels 0-4).
+- Kubernetes: **ResourceQuota** <https://kubernetes.io/docs/concepts/policy/resource-quotas/>;
+  **Jobs** (`suspend`, `backoffLimit`, `activeDeadlineSeconds`)
+  <https://kubernetes.io/docs/concepts/workloads/controllers/job/>;
+  **Pod Security Standards** <https://kubernetes.io/docs/concepts/security/pod-security-standards/>.
+- **MLflow basic authentication**: the basic HTTP auth page in the MLflow
+  repository, <https://github.com/mlflow/mlflow/blob/master/docs/docs/self-hosting/security/basic-http-auth.mdx>.
+- **Karpenter disruption** (the `karpenter.sh/do-not-disrupt` annotation and
+  NodePool budgets) <https://karpenter.sh/docs/concepts/disruption/>.
 - Official: **Argo Workflows** <https://argo-workflows.readthedocs.io/>;
   **KServe** <https://kserve.github.io/website/>; **MLflow**
   <https://mlflow.org/docs/latest/>; **OpenCost**
