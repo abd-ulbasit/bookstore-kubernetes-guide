@@ -84,7 +84,7 @@ the bounds and access rules around the scaler, not the HPA algorithm.
 | A traffic spike or a message flood scales the workload past what you can pay for (a cost attack) | `maxReplicas` on the HPA and `maxReplicaCount` on the ScaledObject, both inside the namespace ResourceQuota | [01.03](../01-core-workloads/03-resources-and-qos.md), [06.06](06-capacity-and-cost.md) |
 | A subject that can edit an HPA or ScaledObject raises its bounds or retargets it | No workload ServiceAccount holds rights on autoscaling objects; only the team that owns the scaling writes them | [05.01](../05-security/01-authn-authz-rbac.md) |
 | The metric source is forged or drifts, so someone else's number sets the replica count | Scale on a backlog that only trusted producers can write, and give the scaler a broker user that can read queue length and nothing else | [05.01](../05-security/01-authn-authz-rbac.md) |
-| The external metrics API serves a value nobody checks, or goes down | The APIService that serves `external.metrics.k8s.io` is cluster-wide. Install it from a pinned chart, keep its RBAC narrow and monitor it. When it is down the HPA freezes | [06.01](01-observability-metrics.md) |
+| The external metrics API serves a value nobody checks, or goes down | The APIService that serves `external.metrics.k8s.io` is cluster-wide. Install it from a pinned chart, keep its RBAC narrow and monitor it. When it is down the HPA cannot read that metric and skips the scale-downs the others suggest | [06.01](01-observability-metrics.md) |
 | The scaler's broker credential is readable by tenants | The credential sits in a Secret that a TriggerAuthentication names, never inline in the ScaledObject | [03.02](../03-config-and-storage/02-secrets.md) |
 | Pending Pods grow the node pool without limit | The node autoscaler's own maximum, set by the platform, bounds the nodes that `maxReplicas` asks for | [10.06](../10-cloud-and-managed-kubernetes/06-node-autoscaling-cost-multicloud.md) |
 
@@ -133,7 +133,7 @@ flowchart LR
 ```
  LAYER         SCALES        TRIGGER                  BOOKSTORE USE
  ─────────────────────────────────────────────────────────────────────────────
- HPA           replicas      CPU / mem / custom /     catalog (CPU + req/s)
+ HPA           replicas      CPU / mem / custom /     catalog (CPU)
                              external metric          orders (CPU) — optional
  VPA           requests      observed usage history   sizing tool, ch.06
                              (recommend | auto)       (recommend mode on catalog)
@@ -162,17 +162,34 @@ its namespaces had other names. The commands use the chapter's names.
 
 ### 0. Prerequisites (self-bootstrapping)
 
-Bring up the cluster + Bookstore as in
-[ch.01 step 0](01-observability-metrics.md) **including metrics-server**
-(the HPA's CPU metric needs it). Also apply the async backends:
+Bring up the cluster and the Bookstore as in
+[ch.01 step 0](01-observability-metrics.md). Also apply the async backends:
 
 ```sh
 kubectl apply -f examples/bookstore/raw-manifests/13-rabbitmq.yaml
 kubectl rollout status deployment/rabbitmq -n bookstore
 ```
 
-The CPU metric needs metrics-server, which ch.01 step 1 installs. Without
-it the HPA reports `<unknown>` and does not scale. Step 2 shows that state.
+The HPA's CPU metric needs a resource metrics API, which metrics-server serves.
+[ch.01 step 1](01-observability-metrics.md) installs it and shows that on a
+kind node its kubelet certificate is refused, so a kind cluster built as this
+guide builds it serves no resource metrics. On a managed cluster, whose
+metrics-server serves, step 2 shows live CPU values. On the lab run for this
+chapter the APIService was not registered at all, which has the same effect.
+The checks below show that state:
+
+```sh
+kubectl get apiservice v1beta1.metrics.k8s.io
+kubectl top nodes
+```
+
+<!-- gate: output -->
+```
+Error from server (NotFound): apiservices.apiregistration.k8s.io "v1beta1.metrics.k8s.io" not found
+# ...
+error: Metrics API not available
+```
+
 
 ### 1. Add the payments-worker Deployment
 
@@ -237,11 +254,12 @@ manifest:
 {"time":"2026-10-31T01:16:51.837100283Z","level":"INFO","msg":"consuming queue","queue":"orders"}
 ```
 
-### 2. An HPA on catalog (CPU + a custom req/s metric)
+### 2. An HPA on catalog (CPU)
 
 New file
 [`examples/bookstore/raw-manifests/82-hpa-catalog.yaml`](../examples/bookstore/raw-manifests/82-hpa-catalog.yaml)
-— a **built-in** `autoscaling/v2` object (no CRD; dry-runs cleanly):
+is a **built-in** `autoscaling/v2` object, so it dry-runs cleanly with no CRD.
+It scales catalog on CPU utilization, the one metric metrics-server serves:
 
 ```yaml
 apiVersion: autoscaling/v2
@@ -252,52 +270,61 @@ spec:
   minReplicas: 2                    # user-facing: never below 2 (stay HA)
   maxReplicas: 6                    # bounded by the namespace ResourceQuota (00-)
   metrics:
-    - type: Resource               # needs metrics-server (ch.01)
+    - type: Resource                # needs metrics-server (ch.01)
       resource:
         name: cpu
         target: { type: Utilization, averageUtilization: 70 }
-    - type: Pods                   # ILLUSTRATIVE: needs the Prometheus Adapter
-      pods:
-        metric: { name: http_requests_per_second }
-        target: { type: AverageValue, averageValue: "50" }
   behavior:
     scaleUp:
       stabilizationWindowSeconds: 60
       policies:
-        - { type: Percent, value: 100, periodSeconds: 60 }   # at most 2x …
-        - { type: Pods,    value: 2,   periodSeconds: 60 }    # … or +2 Pods
+        - { type: Percent, value: 100, periodSeconds: 60 }   # at most 2x
+        - { type: Pods,    value: 2,   periodSeconds: 60 }    # or +2 Pods
       selectPolicy: Max
     scaleDown:
       stabilizationWindowSeconds: 300   # scale IN slowly (anti-thrash)
       policies: [{ type: Percent, value: 50, periodSeconds: 60 }]
 ```
 
-> **Honest about the second metric (as [ch.03](03-tracing.md) was about app
-> instrumentation).** The **CPU** metric works with just metrics-server. The
-> **Pods** custom metric (`http_requests_per_second`) requires the
-> **Prometheus Adapter** to publish it through `custom.metrics.k8s.io` from
-> the catalog metrics [ch.01](01-observability-metrics.md) already exports —
-> without that adapter the HPA reports `<UNKNOWN>` for it and scales on CPU
-> alone. The manifest header says so; it is included to show a real
-> multi-metric HPA and the RED "Rate" signal as a scaling input.
+> **Why the applied file has no req/s metric.** A Pods metric such as
+> `http_requests_per_second` is served through `custom.metrics.k8s.io`, and
+> only an adapter such as the Prometheus Adapter serves that API. Without one,
+> the HPA reports `<unknown>` for that metric. The HPA also skips a scale-down
+> when a metric cannot be fetched and the metrics it can fetch suggest one
+> ([HPA algorithm details](https://kubernetes.io/docs/tasks/run-application/horizontal-pod-autoscale/#algorithm-details)).
+> A dead custom metric therefore blocks scale-in, and after a flood catalog
+> would stay at its peak. The fragment below shows how the metric is added once
+> an adapter serves it. It has no `kind:` and is not applied.
+
+```yaml
+# Fragment, not applied. Add under spec.metrics once the Prometheus Adapter
+# serves custom.metrics.k8s.io for http_requests_per_second.
+- type: Pods
+  pods:
+    metric:
+      name: http_requests_per_second
+    target:
+      type: AverageValue
+      averageValue: "50"
+```
+
+Apply the HPA to its target Deployment, then read it:
 
 ```sh
 kubectl apply -f examples/bookstore/raw-manifests/10-catalog-deploy.yaml   # the target
 kubectl apply -f examples/bookstore/raw-manifests/82-hpa-catalog.yaml
-kubectl get hpa catalog -n bookstore -w        # TARGETS shows current/target
+kubectl get hpa catalog -n bookstore
 kubectl describe hpa catalog -n bookstore      # per-metric values + events
 ```
 
-The lab run for this chapter had no working resource metrics API. The
-`metrics.k8s.io` APIService was registered to a metrics-server with no
-endpoints, so the HPA could not read CPU and did not scale. The output below
-is that state. It is the failure the production notes describe: the HPA
-freezes at its current count.
+On a cluster whose metrics-server serves, TARGETS shows the live CPU value
+against the 70% target. The lab cluster for this run served no resource
+metrics, so the HPA shows the state it reached:
 
 <!-- gate: output -->
 ```
-NAME      REFERENCE            TARGETS                            MINPODS   MAXPODS   REPLICAS   AGE
-catalog   Deployment/catalog   cpu: <unknown>/70%, <unknown>/50   2         6         3          45s
+NAME      REFERENCE            TARGETS              MINPODS   MAXPODS   REPLICAS   AGE
+catalog   Deployment/catalog   cpu: <unknown>/70%   2         6         3          0s
 ```
 
 The describe output says why:
@@ -308,45 +335,109 @@ Conditions:
   Type           Status  Reason                   Message
   ----           ------  ------                   -------
   AbleToScale    True    SucceededGetScale        the HPA controller was able to get the target's current scale
-  ScalingActive  False   FailedGetResourceMetric  the HPA was unable to compute the replica count: failed to get cpu utilization: unable to get metrics for resource cpu: unable to fetch metrics from resource metrics API: the server is currently unable to handle the request (get pods.metrics.k8s.io)
+  ScalingActive  False   FailedGetResourceMetric  the HPA was unable to compute the replica count: failed to get cpu utilization: unable to get metrics for resource cpu: unable to fetch metrics from resource metrics API: the server could not find the requested resource (get pods.metrics.k8s.io)
 ```
 
 <!-- gate: output -->
 ```
-  Type     Reason                        Age                From                       Message
-  ----     ------                        ----               ----                       -------
-  Warning  FailedGetResourceMetric       15s (x3 over 46s)  horizontal-pod-autoscaler  failed to get cpu utilization: unable to get metrics for resource cpu: unable to fetch metrics from resource metrics API: the server is currently unable to handle the request (get pods.metrics.k8s.io)
-  Warning  FailedGetPodsMetric           15s (x3 over 46s)  horizontal-pod-autoscaler  unable to get metric http_requests_per_second: unable to fetch metrics from custom metrics API: no custom metrics API (custom.metrics.k8s.io) registered
-  Warning  FailedComputeMetricsReplicas  15s (x3 over 46s)  horizontal-pod-autoscaler  invalid metrics (2 invalid out of 2), first error is: failed to get cpu resource metric value: failed to get cpu utilization: unable to get metrics for resource cpu: unable to fetch metrics from resource metrics API: the server is currently unable to handle the request (get pods.metrics.k8s.io)
+  Type     Reason                        Age   From                       Message
+  ----     ------                        ----  ----                       -------
+  Warning  FailedGetResourceMetric       10s   horizontal-pod-autoscaler  failed to get cpu utilization: unable to get metrics for resource cpu: unable to fetch metrics from resource metrics API: the server could not find the requested resource (get pods.metrics.k8s.io)
+  Warning  FailedComputeMetricsReplicas  10s   horizontal-pod-autoscaler  invalid metrics (1 invalid out of 1), first error is: failed to get cpu resource metric value: failed to get cpu utilization: unable to get metrics for resource cpu: unable to fetch metrics from resource metrics API: the server could not find the requested resource (get pods.metrics.k8s.io)
 ```
 
-The `MAXPODS` column is the ceiling the controls in the threats table protect.
-This run never reached it, because no metric reached the HPA.
+`MAXPODS` is the ceiling that the threats table protects. This run never
+reached it, because no metric reached the HPA. The ceiling does not need a
+metric to show, though. The namespace ResourceQuota is the hard limit under
+`maxReplicas`. Scale catalog past what the quota allows, and the ReplicaSet is
+refused:
 
-The HPA's own access is the other half of that control. The lines below come
-from a shell loop that prints each answer with its ServiceAccount's name:
+```sh
+kubectl scale deployment/catalog -n bookstore --replicas=40
+kubectl get events -n bookstore --field-selector reason=FailedCreate --sort-by=.lastTimestamp | tail -3
+kubectl scale deployment/catalog -n bookstore --replicas=3
+```
 
 <!-- gate: output -->
 ```
-catalog-sa patch-hpa: no
-payments-worker-sa patch-hpa: no
-orders-sa patch-hpa: no
-orders-sa update-deployment-scale: no
+24s         Warning   FailedCreate   replicaset/catalog-d994db675   Error creating: pods "catalog-d994db675-v7zqs" is forbidden: exceeded quota: bookstore-quota, requested: limits.cpu=250m, used: limits.cpu=3950m, limited: limits.cpu=4
+24s         Warning   FailedCreate   replicaset/catalog-d994db675   Error creating: pods "catalog-d994db675-jt8vk" is forbidden: exceeded quota: bookstore-quota, requested: limits.cpu=250m, used: limits.cpu=3950m, limited: limits.cpu=4
+22s         Warning   FailedCreate   replicaset/catalog-d994db675   (combined from similar events): Error creating: pods "catalog-d994db675-sdx6z" is forbidden: exceeded quota: bookstore-quota, requested: limits.cpu=250m, used: limits.cpu=3950m, limited: limits.cpu=4
 ```
 
-Each answer is `no`. None of these ServiceAccounts can raise a ceiling, and
-`orders-sa` cannot write a replica count either.
+The refusal names `bookstore-quota` and `limits.cpu`. The namespace had 3950m
+of its 4 CPU limit in use when the next catalog Pod asked for 250m, so the Pod
+never starts. The quota is the limit a flood runs into when the HPA's
+`maxReplicas` is set too high.
+
+The HPA's own access is the other half of that control. Each `can-i` asks
+whether a subject may act. The last check is the positive control: the admin
+identity may patch an HPA, so the `no` answers mean something.
+
+```sh
+kubectl auth can-i patch horizontalpodautoscalers -n bookstore --as=system:serviceaccount:bookstore:catalog-sa
+kubectl auth can-i patch horizontalpodautoscalers -n bookstore --as=system:serviceaccount:bookstore:payments-worker-sa
+kubectl auth can-i update deployments/scale -n bookstore --as=system:serviceaccount:bookstore:orders-sa
+kubectl auth can-i patch horizontalpodautoscalers -n bookstore
+```
+
+The four answers, in order (catalog-sa, payments-worker-sa, orders-sa, then
+the admin control):
+
+<!-- gate: output -->
+```
+no
+# ...
+no
+# ...
+no
+# ...
+yes
+```
+
+None of the workload ServiceAccounts can raise a ceiling, and `orders-sa`
+cannot write a replica count either. The admin answer is the control.
 
 ### 3. KEDA: scale payments-worker on RabbitMQ queue depth
 
-Install KEDA into its own `keda` namespace. Create the namespace and label it
-first at `restricted`. The rendered Deployments set every field that
-`restricted` checks: `runAsNonRoot`, the `RuntimeDefault` seccomp profile, no
-privilege escalation, a read-only root filesystem and all capabilities dropped.
-So the namespace should need no exception. The lab did not run admission
-against these pods. Use Helm, not a raw `releases/latest/download` URL, because
-that URL names a version-pinned file that stops matching when KEDA ships a new
-tag.
+Install KEDA into its own `keda` namespace, labelled `restricted` before the
+install. The chart's three images are pinned by digest in a values file, with
+the version kept in the tag beside each digest, as the baseline asks of
+third-party images. The rendered Deployments set every field that `restricted`
+checks: non-root, the `RuntimeDefault` seccomp profile, no privilege
+escalation, a read-only root filesystem and all capabilities dropped. Install
+with Helm, not a raw `releases/latest/download` URL, because that URL names a
+version-pinned file that stops matching when KEDA ships a new tag.
+
+Save this as `keda-values.yaml`:
+
+```yaml
+image:
+  keda:
+    tag: "2.21.0@sha256:81fe6547ce8d1cc29273f887b76507e9b853e5bc1f875ec23fe60061a38ed809"
+  metricsApiServer:
+    tag: "2.21.0@sha256:255375037fe592732eeb554743aae360c2da88cf0b9b1258d0a987ef885f0881"
+  webhooks:
+    tag: "2.21.0@sha256:e1969628cca6123e32eea13c47c75817091af2657fa68d9d0d58a8620d1b75b1"
+```
+
+Check that the render uses those digests:
+
+```sh
+helm template keda kedacore/keda --version 2.21.0 --namespace keda \
+  -f keda-values.yaml --include-crds | grep -E 'image: .*ghcr.io/kedacore'
+```
+
+<!-- gate: output -->
+```
+          image: "ghcr.io/kedacore/keda:2.21.0@sha256:81fe6547ce8d1cc29273f887b76507e9b853e5bc1f875ec23fe60061a38ed809"
+          image: "ghcr.io/kedacore/keda-metrics-apiserver:2.21.0@sha256:255375037fe592732eeb554743aae360c2da88cf0b9b1258d0a987ef885f0881"
+          image: "ghcr.io/kedacore/keda-admission-webhooks:2.21.0@sha256:e1969628cca6123e32eea13c47c75817091af2657fa68d9d0d58a8620d1b75b1"
+```
+
+Before the install, dry-run the render in the labelled namespace. A server-side
+dry run runs the PodSecurity admission check on each Deployment's pod template,
+so the count of PodSecurity warnings should be zero:
 
 ```sh
 helm repo add kedacore https://kedacore.github.io/charts
@@ -356,30 +447,74 @@ kubectl label namespace keda \
   pod-security.kubernetes.io/enforce=restricted \
   pod-security.kubernetes.io/audit=restricted \
   pod-security.kubernetes.io/warn=restricted
-helm install keda kedacore/keda --version 2.21.0 \
-  --namespace keda --wait
-kubectl -n keda rollout status deployment/keda-operator
+helm template keda kedacore/keda --version 2.21.0 --namespace keda \
+  -f keda-values.yaml --include-crds > keda-render.yaml
+kubectl apply --server-side --dry-run=server -f keda-render.yaml 2>&1 | grep -c "server dry run"
+kubectl apply --server-side --dry-run=server -f keda-render.yaml 2>&1 | grep -ci podsecurity
 ```
 
-The lab run for this chapter could not install KEDA on the shared cluster at
-that time. It rendered the chart with `helm template` and dry-ran the render,
-so the install block above is the upstream command and has not run in the lab.
-The render's security contexts, printed by a short script, are:
+The first count is the number of objects the server accepts, and the second is
+the number of PodSecurity warnings:
 
 <!-- gate: output -->
 ```
-keda-operator pod: {'runAsNonRoot': True}
-    keda-operator container: {'allowPrivilegeEscalation': False, 'capabilities': {'drop': ['ALL']}, 'readOnlyRootFilesystem': True, 'seccompProfile': {'type': 'RuntimeDefault'}}
-keda-operator-metrics-apiserver pod: {'runAsNonRoot': True}
-    keda-operator-metrics-apiserver container: {'allowPrivilegeEscalation': False, 'capabilities': {'drop': ['ALL']}, 'readOnlyRootFilesystem': True, 'seccompProfile': {'type': 'RuntimeDefault'}}
-keda-admission-webhooks pod: {'runAsNonRoot': True}
-    keda-admission-webhooks container: {'allowPrivilegeEscalation': False, 'capabilities': {'drop': ['ALL']}, 'readOnlyRootFilesystem': True, 'seccompProfile': {'type': 'RuntimeDefault'}}
+29
+# ...
+0
 ```
 
+A zero count means something only if the check can fail. As a control, dry-run
+a Deployment whose container sets `privileged: true` in the same namespace. It
+draws the warning:
+
+<!-- gate: output -->
+```
+Warning: would violate PodSecurity "restricted:latest": privileged (container "app" must not set securityContext.privileged=true), allowPrivilegeEscalation != false (container "app" must set securityContext.allowPrivilegeEscalation=false), unrestricted capabilities (container "app" must set securityContext.capabilities.drop=["ALL"]), runAsNonRoot != true (pod or container "app" must set securityContext.runAsNonRoot=true), seccompProfile (pod or container "app" must set securityContext.seccompProfile.type to "RuntimeDefault" or "Localhost")
+```
+
+Install the chart with the same values file:
+
+```sh
+helm install keda kedacore/keda --version 2.21.0 \
+  --namespace keda -f keda-values.yaml --wait
+kubectl -n keda rollout status deployment/keda-operator
+```
+
+The scaler's broker credential is a user of its own. The `guest` user that the
+other Pods share is not used. The new user may read the `orders` queue and
+nothing else: its configure and write permissions match no resource. The
+password comes from `openssl`, is never printed, and lives only in the Secret:
+
+```sh
+PW="$(openssl rand -hex 24)"
+kubectl -n bookstore exec deploy/rabbitmq -- rabbitmqctl add_user keda-scaler "$PW"
+kubectl -n bookstore exec deploy/rabbitmq -- rabbitmqctl set_permissions -p / keda-scaler '^$' '^$' '^orders$'
+kubectl -n bookstore exec deploy/rabbitmq -- rabbitmqctl list_user_permissions keda-scaler --formatter json
+kubectl -n bookstore create secret generic rabbitmq-conn \
+  --from-literal=host="amqp://keda-scaler:$PW@rabbitmq.bookstore.svc.cluster.local:5672/"
+unset PW
+```
+
+The broker's answer:
+
+<!-- gate: output -->
+```
+[
+{"vhost":"/","configure":"^$","write":"^$","read":"^orders$"}
+]
+```
+
+Each permission is a regular expression, and `^orders$` matches exactly one
+queue. Read on `orders` is the only grant. This lab run did not install KEDA
+on the shared lab cluster, and the scaler itself was not run. The render, the
+restricted dry run and the broker's grant above are the evidence in this
+chapter. The install, the scale-out and the scale-to-zero are not run here.
+Run them on a cluster you own, after the install above.
 
 New file
 [`examples/bookstore/raw-manifests/83-keda-scaledobject.yaml`](../examples/bookstore/raw-manifests/83-keda-scaledobject.yaml)
-(a Secret + `TriggerAuthentication` + `ScaledObject`). Core object:
+(a `TriggerAuthentication` and a `ScaledObject`, which names the Secret that
+step 3 creates above). Core object:
 
 ```yaml
 apiVersion: keda.sh/v1alpha1
@@ -416,11 +551,12 @@ as it did in the lab run. That is expected, not a defect, the same as the
 Gateway API and Kyverno objects in earlier chapters. The `19-` Deployment and
 the `82-` HPA are built-ins and dry-run cleanly.
 
+
 ### 4. Load tests: left for you to run
 
 This lab run did not reach the scale-out. The HPA had no metric to read, and
 KEDA was not installed, so neither the catalog HPA nor the queue scaler moved.
-Run the load yourself once steps 2 and 3 show live metrics. Use a load
+Run the load yourself on a cluster whose metrics-server serves, once the KEDA install in step 3 has rolled out. Use a load
 generator image pinned by digest, and give it the same restricted
 securityContext as the workloads.
 
@@ -497,7 +633,7 @@ changes. The orders log from the lab run shows the unset state:
 > **In production:** HPA for stateless request services, **KEDA for
 > event/queue consumers**. Sizing a queue worker by CPU is a lagging,
 > wrong proxy — scale it by the **backlog** (queue length / lag). The
-> Bookstore does exactly this: catalog→HPA(CPU+req/s), payments-worker→KEDA
+> Bookstore does exactly this: catalog→HPA(CPU), payments-worker→KEDA
 > (RabbitMQ depth) with scale-to-zero so an idle consumer costs nothing
 > ([ch.06](06-capacity-and-cost.md)).
 
@@ -525,8 +661,9 @@ changes. The orders log from the lab run shows the unset state:
 > **In production:** the custom/external metrics path is real
 > infrastructure. An HPA on req/s or queue depth needs the **Prometheus
 > Adapter** or **KEDA** registered as a metrics API server, monitored like
-> any other dependency — if the metrics API is down the HPA freezes at its
-> last replica count (it does **not** scale to zero or to max).
+> any other dependency. If the metrics API is down, an HPA cannot read that
+> metric. It still scales up on the metrics it can read, but it skips a
+> scale-down those metrics suggest, so the count can stay high.
 
 ## Quick Reference
 
@@ -595,8 +732,8 @@ Checklist:
 
    The HPA holds `maxReplicas`, the ceiling. An attacker who can patch the HPA
    can raise that ceiling and let the bill follow the attack. Writing the scale
-   subresource only sets the count for now, and the HPA controller overwrites
-   it on its next pass, so the ceiling is the control that matters. The lab run
+   subresource only sets the count until the HPA controller's next sync
+   overwrites it, so the ceiling is the control that matters. The lab run
    checked the workload ServiceAccounts: each one got `no` for patching HPAs,
    and `orders-sa` got `no` for updating a Deployment's scale (see step 2).
    Keep both rights away from workloads, and let only the team that owns the

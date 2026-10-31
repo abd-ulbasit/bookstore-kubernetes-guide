@@ -301,3 +301,12 @@ namespace "p06-02-logging" deleted
 namespace "p06-02-client" deleted
 no p06-02 namespaces left
 
+
+## note on later chapter edits (not re-run)
+# The lab copies above dropped every priorityClassName line, so the priority
+# classes were not needed to admit the Pods. The chapter now applies
+# 35-priorityclasses.yaml in step 0, and the lab has not been repeated with
+# the classes in place. Three Pods in this chapter also gained dedicated
+# ServiceAccounts (leaky-app-sa, loadgen-sa, probe-client-sa, probe-bookstore-sa,
+# log-reader-sa) after this run; none of the captured outputs print an
+# ServiceAccount name.

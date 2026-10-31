@@ -246,9 +246,13 @@ not teach it. The [metrics-server
 FAQ](https://github.com/kubernetes-sigs/metrics-server/blob/master/FAQ.md)
 names the secure setup: validate the kubelet certificate with
 `--kubelet-certificate-authority`, and keep the insecure flags off. Serving
-certificates that the cluster CA signs come from the CSR flow, which
-`--rotate-server-certificates` turns on ([kubelet
+certificates that the cluster CA signs come from the CSR flow. The kubelet
+config file turns that flow on with `serverTLSBootstrap: true`. The
+`--rotate-server-certificates` flag that older guides use is marked deprecated
+in favour of that setting ([kubelet
 reference](https://kubernetes.io/docs/reference/command-line-tools-reference/kubelet/)).
+Each serving certificate request then waits for approval, with
+`kubectl certificate approve`, before the kubelet serves its certificate.
 A kind configuration would have to set that up, and this lab cluster does not
 have one. So on kind this chapter stops at the refusal. Until metrics-server
 serves, `kubectl get apiservice v1beta1.metrics.k8s.io` reports `False
@@ -370,7 +374,7 @@ kubectl -n monitoring port-forward svc/kube-prometheus-stack-grafana 3000:80 &
 
 ### 3. Scrape the Bookstore: a ServiceMonitor
 
-Prometheus does not know about catalog yet. We do **not** edit
+Prometheus does not scrape catalog at this point in the chapter. We do **not** edit
 `prometheus.yml` — the Operator turns a `ServiceMonitor` custom resource into
 scrape config. New file
 [`examples/bookstore/raw-manifests/80-servicemonitor.yaml`](../examples/bookstore/raw-manifests/80-servicemonitor.yaml)
@@ -560,8 +564,9 @@ go_info{version="go1.26.10"} 1
 ```
 
 That is the residual exposure, and the lock does not close it. The fix is a
-metrics port that only Prometheus can reach, which catalog does not have yet, or
-a layer-7 policy that matches the path, which this chapter does not build.
+metrics port that only Prometheus can reach, or a layer-7 policy that matches
+the path. This chapter builds neither: catalog serves its metrics on the same
+port as its API, so the lock above is the only control on that port.
 
 > **The public route.** No Ingress or Gateway rule may send `/metrics` to the
 > app. The Gateway example in [02.05](../02-networking/05-gateway-api.md) meets
@@ -571,9 +576,9 @@ a layer-7 policy that matches the path, which this chapter does not build.
 > `/api/books(/|$)(.*)` keeps the suffix, and `rewrite-target: /$2` would turn
 > `/api/books/metrics` into `/metrics`
 > ([ingress-nginx rewrite](https://kubernetes.github.io/ingress-nginx/examples/rewrite/)).
-> That is a defect in Part 02's example, and the fix belongs there: rewrite to
-> the fixed `/books` path. Until it is fixed, the Ingress example would route
-> `/metrics` to catalog.
+> The Ingress example in [02.04](../02-networking/04-ingress.md) does not follow
+> this rule. Its rewrite keeps the suffix, so that example would route `/metrics`
+> to catalog. Do not apply that example where `/metrics` must stay private.
 
 ### 5. Query the Bookstore with PromQL
 

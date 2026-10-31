@@ -49,6 +49,12 @@
 #    ServiceMonitor target shows "context deadline exceeded" once a policy
 #    CNI is enforcing.
 #
+# Part 06 ch.03 increment (additive): rule 11 gives the three services that
+#  emit spans an egress rule to the Collector in the `tracing` namespace on
+#  TCP 4318, the OTLP/HTTP port. Its ingress half is the `tracing` namespace's
+#  allow-spans-into-collector policy (03-tracing.md, section 3). Nothing else in
+#  this namespace may reach `tracing`.
+#
 # Requires (objects to enforce against):
 #   kubectl apply -f examples/bookstore/raw-manifests/00-namespace.yaml
 #   kubectl apply -f examples/bookstore/raw-manifests/{10,11,13,14,19,20}-*.yaml
@@ -385,3 +391,35 @@ spec:
               app.kubernetes.io/name: prometheus
       ports:
         - { protocol: TCP, port: 8080 }
+---
+# 11) Part 06 ch.03 - Egress side of the span hop. default-deny egress (rule 1)
+#     blocks the OTLP export from storefront, orders and payments-worker unless
+#     the SOURCE Pod is granted egress. The destination is the Collector Pod in
+#     the `tracing` namespace, on TCP 4318 only: the services send OTLP over
+#     HTTP, and the Collector's gRPC port stays closed to them. Rule 2 (DNS)
+#     lets each Pod resolve the Collector's Service name first. Both selectors
+#     sit in one `to` entry, so both must match.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-span-egress
+  namespace: bookstore
+  labels:
+    app.kubernetes.io/part-of: bookstore
+spec:
+  podSelector:
+    matchExpressions:
+      - key: app
+        operator: In
+        values: ["storefront", "orders", "payments-worker"]
+  policyTypes: ["Egress"]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: tracing
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: opentelemetry-collector
+      ports:
+        - { protocol: TCP, port: 4318 }

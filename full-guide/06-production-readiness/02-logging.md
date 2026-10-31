@@ -83,6 +83,8 @@ app crashes with a batch still buffered. Generally an anti-pattern.
 | A chart grants more than the agent needs | The values turn off the chart's sidecar, which would read every ConfigMap and Secret, and the chart's own RBAC. | [05.01](../05-security/01-authn-authz-rbac.md) |
 | Whoever holds `pods/log` reads the raw lines | Namespaced read grants to named ServiceAccounts only. Removal at the source is the real fix. | [05.01](../05-security/01-authn-authz-rbac.md) |
 | Old logs keep a leaked value readable | Seven-day retention in the Loki values. | (none) |
+| A compromised agent sends the logs it reads to any HTTPS endpoint, because its API egress names no destination | Residual in this chapter's policy. In production, scope the API rule with an `ipBlock` for the API server address. | [05.01](../05-security/01-authn-authz-rbac.md) |
+| Log lines cross the cluster network in cleartext, from the agent to Loki | Accepted in this chapter. The push stays on the cluster network, and the NetworkPolicy admits only the agent and Grafana to Loki. TLS on that hop belongs with workload TLS in [11.04](../11-advanced-production-patterns/04-service-mesh.md). | [11.04](../11-advanced-production-patterns/04-service-mesh.md) |
 
 ## Diagrams
 
@@ -155,6 +157,7 @@ and the network policies. The Deployments name the Part 04 priority classes,
 so those must exist first.
 
 ```sh
+kubectl apply -f examples/bookstore/raw-manifests/35-priorityclasses.yaml
 kubectl apply -f examples/bookstore/raw-manifests/00-namespace.yaml \
   -f examples/bookstore/raw-manifests/05-serviceaccounts-rbac.yaml \
   -f examples/bookstore/raw-manifests/15-catalog-config.yaml \
@@ -210,6 +213,8 @@ the DSN and logs the error.
 kubectl -n bookstore create secret generic dsn-demo \
   --from-literal=PASSWORD=FAKE-PLANTED-PASSWORD
 ```
+
+Save this Pod as `dsn-demo.yaml`:
 
 ```yaml
 apiVersion: v1
@@ -401,15 +406,17 @@ spec:
       app.kubernetes.io/name: alloy
   policyTypes: ["Egress"]
   egress:
-    - to:                                  # push to Loki, nothing else here
+    - to:                                  # push to Loki on 3100
         - podSelector:
             matchLabels:
               app.kubernetes.io/name: loki
       ports:
         - { protocol: TCP, port: 3100 }
+    # RESIDUAL: no `to`, so any destination on 443 and 6443. Scope it with an
+    # ipBlock for the API server address (kubectl get endpoints kubernetes).
     - ports:                               # read logs from the API server
-        - { protocol: TCP, port: 443 }     # no `to`: the API server sits on a
-        - { protocol: TCP, port: 6443 }    # node address that differs per cluster
+        - { protocol: TCP, port: 443 }
+        - { protocol: TCP, port: 6443 }
 ---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
@@ -448,6 +455,8 @@ kubectl apply -f logging-base.yaml
 
 Loki runs in single-binary mode. The values pin its image by digest, run it as
 the UID the image declares, and turn off everything this lab does not use.
+
+Save this as `loki-values.yaml`:
 
 ```yaml
 deploymentMode: SingleBinary
@@ -543,6 +552,8 @@ until the compactor deletes it, so the window is the exposure.
 
 The Alloy agent is a DaemonSet. Its config reads only the pods on its own
 node, redacts two patterns, and pushes to Loki.
+
+Save this as `alloy-values.yaml`:
 
 ```yaml
 image:
@@ -697,7 +708,16 @@ This Pod stands in for an app that logs a token and a DSN with a password. It
 is deliberately bad, and it runs at `restricted` like everything else. It
 writes one line every five seconds. The values are fake.
 
+Save this Pod as `leaky-app.yaml`:
+
 ```yaml
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: leaky-app-sa
+  namespace: bookstore
+automountServiceAccountToken: false
+---
 apiVersion: v1
 kind: Pod
 metadata:
@@ -706,6 +726,7 @@ metadata:
   labels:
     app: leaky-app
 spec:
+  serviceAccountName: leaky-app-sa
   automountServiceAccountToken: false
   securityContext:
     runAsNonRoot: true
@@ -781,7 +802,16 @@ Generate traffic from a Pod labelled `app: storefront`. The storefront is the
 real caller of orders, so this Pod gets the same network path the storefront
 has.
 
+Save this Job as `loadgen.yaml`:
+
 ```yaml
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: loadgen-sa
+  namespace: bookstore
+automountServiceAccountToken: false
+---
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -795,6 +825,7 @@ spec:
         app: storefront
     spec:
       restartPolicy: Never
+      serviceAccountName: loadgen-sa
       automountServiceAccountToken: false
       securityContext:
         runAsNonRoot: true
@@ -862,7 +893,16 @@ kubectl create namespace client
 kubectl label namespace client pod-security.kubernetes.io/enforce=restricted
 ```
 
+Save this Pod as `probe-client.yaml`:
+
 ```yaml
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: probe-client-sa
+  namespace: client
+automountServiceAccountToken: false
+---
 apiVersion: v1
 kind: Pod
 metadata:
@@ -871,6 +911,7 @@ metadata:
   labels:
     app: client
 spec:
+  serviceAccountName: probe-client-sa
   automountServiceAccountToken: false
   securityContext:
     runAsNonRoot: true
@@ -893,8 +934,56 @@ spec:
         limits: { memory: 64Mi }
 ```
 
-The Bookstore probe is the same Pod with `app: other` in the `bookstore`
-namespace. Apply both.
+Save the Bookstore probe as `probe-bookstore.yaml`. It is the same Pod in the
+`bookstore` namespace, with `app: other` and its own ServiceAccount:
+
+```yaml
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: probe-bookstore-sa
+  namespace: bookstore
+automountServiceAccountToken: false
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: probe-client-sa
+  namespace: client
+automountServiceAccountToken: false
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: probe-bookstore
+  namespace: bookstore
+  labels:
+    app: other
+spec:
+  serviceAccountName: probe-bookstore-sa
+  automountServiceAccountToken: false
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 65534
+    runAsGroup: 65534
+    seccompProfile:
+      type: RuntimeDefault
+  restartPolicy: Never
+  containers:
+    - name: probe
+      image: curlimages/curl@sha256:d9b4541e214bcd85196d6e92e2753ac6d0ea699f0af5741f8c6cccbfcf00ef4b  # curlimages/curl:8.10.1
+      command: ["sh", "-c", "curl -s -m 5 -o /dev/null -w 'status=%{http_code}\\n' http://loki.logging.svc.cluster.local:3100/ready; echo rc=$?"]
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop: ["ALL"]
+      resources:
+        requests: { cpu: 10m, memory: 16Mi }
+        limits: { memory: 64Mi }
+```
+
+Apply both.
 
 ```sh
 kubectl apply -f probe-client.yaml -f probe-bookstore.yaml
@@ -916,6 +1005,8 @@ A policy that allowed the whole cluster would make that first line disappear.
 
 Now the readers. A log reader is anyone who holds `pods/log`. Grant it with a
 Role in one namespace, to one named ServiceAccount.
+
+Save this as `log-reader.yaml`:
 
 ```yaml
 apiVersion: v1
@@ -983,10 +1074,12 @@ Clean up:
 ```sh
 helm uninstall alloy -n logging
 helm uninstall loki -n logging
-kubectl delete clusterrolebinding alloy-log-reader loki-clusterrolebinding
-kubectl delete clusterrole alloy-log-reader loki-clusterrole
-kubectl delete namespace logging client
-kubectl delete -f log-reader.yaml -f loadgen.yaml -f leaky-app.yaml -f dsn-demo.yaml
+kubectl delete clusterrolebinding alloy-log-reader --ignore-not-found
+kubectl delete clusterrole alloy-log-reader --ignore-not-found
+kubectl delete namespace logging client --ignore-not-found
+kubectl delete -f log-reader.yaml -f loadgen.yaml -f leaky-app.yaml -f dsn-demo.yaml \
+  -f probe-bookstore.yaml --ignore-not-found
+kubectl -n bookstore delete secret dsn-demo --ignore-not-found
 ```
 
 ## Production notes
