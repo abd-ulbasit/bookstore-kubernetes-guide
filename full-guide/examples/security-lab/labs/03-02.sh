@@ -7,9 +7,12 @@
 # chapter names the bookstore namespace; this script applies the same files
 # with only the namespace replaced.
 #
-# The db-credentials value is generated when the script starts. The script
-# writes it into 16-db-credentials.yaml in place of the demo literal, and never
-# prints it. Checks compare hashes, lengths and key names instead.
+# Step 2 first applies the 03.01 Secret, db-credentials, as 03.01 does, with
+# its demo literal. It then creates db-credentials-generated, a second Secret
+# with a value generated when the script starts. Every later step uses the
+# generated one, because the database already uses db-credentials. The value
+# is written into the manifest by sed, and the script never prints it. Checks
+# compare hashes, lengths and key names instead.
 set +e
 
 K="${KUBECTL:-kubectl}"
@@ -66,23 +69,27 @@ automountServiceAccountToken: false
 EOF
 echo
 
-echo "## step 2: the db-credentials Secret, with a value generated now"
+echo "## step 2: the 03.01 Secret, then a second Secret with a value generated now"
+show "sed -e 's/namespace: bookstore/namespace: $NS/' $MANI/16-db-credentials.yaml | kubectl apply -f -   # 03.01's Secret, demo literal"
+sed -e "s/namespace: bookstore/namespace: $NS/" "$MANI/16-db-credentials.yaml" | "$K" apply -f - 2>&1
+show "kubectl get secret db-credentials -n $NS -o name"
+"$K" get secret db-credentials -n "$NS" -o name 2>&1
 PW="$(openssl rand -hex 16)"
 show 'PW=$(openssl rand -hex 16)   # generated now, never printed'
-show "sed -e 's/devpassword/\$PW/' -e 's/namespace: bookstore/namespace: $NS/' $MANI/16-db-credentials.yaml | kubectl apply -f -"
-sed -e "s/devpassword/$PW/" -e "s/namespace: bookstore/namespace: $NS/" "$MANI/16-db-credentials.yaml" | "$K" apply -f - 2>&1
-show "kubectl get secret db-credentials -n $NS -o jsonpath='{.data.POSTGRES_DB}'; echo"
-"$K" get secret db-credentials -n "$NS" -o jsonpath='{.data.POSTGRES_DB}'; echo
-show "kubectl get secret db-credentials -n $NS -o jsonpath='{.data.POSTGRES_DB}' | base64 -d; echo"
-"$K" get secret db-credentials -n "$NS" -o jsonpath='{.data.POSTGRES_DB}' | base64 -d; echo
-show "kubectl get secret db-credentials -n $NS -o jsonpath='{.data.POSTGRES_PASSWORD}' | base64 -d | wc -c | tr -d ' '"
-"$K" get secret db-credentials -n "$NS" -o jsonpath='{.data.POSTGRES_PASSWORD}' | base64 -d | wc -c | tr -d ' '
+show "sed -e 's/devpassword/\$PW/' -e 's/name: db-credentials/name: db-credentials-generated/' -e 's/namespace: bookstore/namespace: $NS/' $MANI/16-db-credentials.yaml | kubectl apply -f -"
+sed -e "s/devpassword/$PW/" -e "s/name: db-credentials/name: db-credentials-generated/" -e "s/namespace: bookstore/namespace: $NS/" "$MANI/16-db-credentials.yaml" | "$K" apply -f - 2>&1
+show "kubectl get secret db-credentials-generated -n $NS -o jsonpath='{.data.POSTGRES_DB}'; echo"
+"$K" get secret db-credentials-generated -n "$NS" -o jsonpath='{.data.POSTGRES_DB}'; echo
+show "kubectl get secret db-credentials-generated -n $NS -o jsonpath='{.data.POSTGRES_DB}' | base64 -d; echo"
+"$K" get secret db-credentials-generated -n "$NS" -o jsonpath='{.data.POSTGRES_DB}' | base64 -d; echo
+show "kubectl get secret db-credentials-generated -n $NS -o jsonpath='{.data.POSTGRES_PASSWORD}' | base64 -d | wc -c | tr -d ' '"
+"$K" get secret db-credentials-generated -n "$NS" -o jsonpath='{.data.POSTGRES_PASSWORD}' | base64 -d | wc -c | tr -d ' '
 show 'decoded POSTGRES_PASSWORD equals $PW (compared, not printed)'
-if [ "$("$K" get secret db-credentials -n "$NS" -o jsonpath='{.data.POSTGRES_PASSWORD}' | base64 -d)" = "$PW" ]; then echo yes; else echo no; fi
-show "kubectl get secret db-credentials -n $NS -o jsonpath='{.metadata.annotations.kubectl\.kubernetes\.io/last-applied-configuration}' | grep -c stringData"
-"$K" get secret db-credentials -n "$NS" -o jsonpath='{.metadata.annotations.kubectl\.kubernetes\.io/last-applied-configuration}' | grep -c stringData
-show "kubectl get secret db-credentials -n $NS -o jsonpath='{...last-applied-configuration}' | grep -c \"\$PW\"   # the generated value, counted not printed"
-"$K" get secret db-credentials -n "$NS" -o jsonpath='{.metadata.annotations.kubectl\.kubernetes\.io/last-applied-configuration}' | grep -c "$PW"
+if [ "$("$K" get secret db-credentials-generated -n "$NS" -o jsonpath='{.data.POSTGRES_PASSWORD}' | base64 -d)" = "$PW" ]; then echo yes; else echo no; fi
+show "kubectl get secret db-credentials-generated -n $NS -o jsonpath='{.metadata.annotations.kubectl\.kubernetes\.io/last-applied-configuration}' | grep -c stringData"
+"$K" get secret db-credentials-generated -n "$NS" -o jsonpath='{.metadata.annotations.kubectl\.kubernetes\.io/last-applied-configuration}' | grep -c stringData
+show "kubectl get secret db-credentials-generated -n $NS -o jsonpath='{...last-applied-configuration}' | grep -c \"\$PW\"   # the generated value, counted not printed"
+"$K" get secret db-credentials-generated -n "$NS" -o jsonpath='{.metadata.annotations.kubectl\.kubernetes\.io/last-applied-configuration}' | grep -c "$PW"
 show "grep -n 'password=\$(POSTGRES_PASSWORD)' $MANI/10-catalog-deploy.yaml $MANI/14-orders-deploy.yaml"
 grep -n 'password=\$(POSTGRES_PASSWORD)' "$MANI/10-catalog-deploy.yaml" "$MANI/14-orders-deploy.yaml" 2>&1
 echo
@@ -98,7 +105,7 @@ metadata:
 rules:
   - apiGroups: [""]
     resources: ["secrets"]
-    resourceNames: ["db-credentials"]
+    resourceNames: ["db-credentials-generated"]
     verbs: ["get", "list", "create"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
@@ -115,14 +122,14 @@ subjects:
     name: secret-reader
     namespace: $NS
 EOF
-for q in "get secret/db-credentials" "get secret/other-creds" "get secrets" "list secrets" "create secrets"; do
+for q in "get secret/db-credentials-generated" "get secret/other-creds" "get secrets" "list secrets" "create secrets"; do
   show "kubectl auth can-i $q -n $NS --as=$SA:secret-reader"
   "$K" auth can-i $q -n "$NS" --as="$SA:secret-reader" 2>&1
 done
 show "kubectl get secrets -n $NS --as=$SA:secret-reader -o name"
 "$K" get secrets -n "$NS" --as="$SA:secret-reader" -o name 2>&1
-show "kubectl get secrets -n $NS --as=$SA:secret-reader --field-selector metadata.name=db-credentials -o name"
-"$K" get secrets -n "$NS" --as="$SA:secret-reader" --field-selector metadata.name=db-credentials -o name 2>&1
+show "kubectl get secrets -n $NS --as=$SA:secret-reader --field-selector metadata.name=db-credentials-generated -o name"
+"$K" get secrets -n "$NS" --as="$SA:secret-reader" --field-selector metadata.name=db-credentials-generated -o name 2>&1
 show "kubectl create secret generic extra -n $NS --from-literal=k=v --as=$SA:secret-reader"
 "$K" create secret generic extra -n "$NS" --from-literal=k=v --as="$SA:secret-reader" 2>&1
 echo
@@ -158,7 +165,7 @@ show "kubectl get secrets -n $NS --as=$SA:secret-lister -o json | grep -o '\"POS
 "$K" get secrets -n "$NS" --as="$SA:secret-lister" -o json 2>&1 | grep -o '"POSTGRES_[A-Z]*"' | sort -u
 echo
 
-echo "## step 5: a Pod that may only create Pods reads the Secret"
+echo "## step 5: a subject that may only create Pods reads the Secret through a Pod"
 show "kubectl apply -f -   # Role pod-creator (create pods) and its RoleBinding in $NS"
 "$K" apply -f - 2>&1 <<EOF
 apiVersion: rbac.authorization.k8s.io/v1
@@ -189,8 +196,8 @@ show "kubectl auth can-i create pods -n $NS --as=$SA:pod-creator"
 "$K" auth can-i create pods -n "$NS" --as="$SA:pod-creator" 2>&1
 show "kubectl auth can-i get secrets -n $NS --as=$SA:pod-creator"
 "$K" auth can-i get secrets -n "$NS" --as="$SA:pod-creator" 2>&1
-show "kubectl apply -f -   # secret-reveal: runs as pod-creator, mounts db-credentials, prints checksums"
-"$K" apply -f - 2>&1 <<EOF
+show "kubectl create -f - --as=$SA:pod-creator   # secret-reveal: created by pod-creator, mounts db-credentials-generated, prints checksums"
+"$K" create -f - --as="$SA:pod-creator" 2>&1 <<EOF
 apiVersion: v1
 kind: Pod
 metadata:
@@ -227,7 +234,7 @@ spec:
   volumes:
     - name: creds
       secret:
-        secretName: db-credentials
+        secretName: db-credentials-generated
     - name: tmp
       emptyDir:
         sizeLimit: 16Mi
@@ -243,8 +250,8 @@ show "kubectl delete pod secret-reveal -n $NS --now"
 "$K" delete pod secret-reveal -n "$NS" --now 2>&1
 echo
 
-echo "## step 6: the Secret as files, and the mode an inspection Pod sees"
-show "kubectl apply -f -   # secret-files: runs as secret-reader, mounts db-credentials with defaultMode 0440 and fsGroup 65532"
+echo "## step 6: the Secret as files, the mode an inspection Pod sees, and exec"
+show "kubectl apply -f -   # secret-files: runs as secret-reader, mounts db-credentials-generated with defaultMode 0440 and fsGroup 65532, then sleeps"
 "$K" apply -f - 2>&1 <<EOF
 apiVersion: v1
 kind: Pod
@@ -272,6 +279,7 @@ spec:
           id
           ls -lnL /etc/creds
           grep ' /etc/creds ' /proc/mounts
+          sleep 300
       securityContext:
         allowPrivilegeEscalation: false
         readOnlyRootFilesystem: true
@@ -289,16 +297,18 @@ spec:
   volumes:
     - name: creds
       secret:
-        secretName: db-credentials
+        secretName: db-credentials-generated
         defaultMode: 0440
     - name: tmp
       emptyDir:
         sizeLimit: 16Mi
 EOF
-show "kubectl wait pod/secret-files -n $NS --for='jsonpath={.status.phase}=Succeeded' --timeout=300s"
-"$K" wait pod/secret-files -n "$NS" --for='jsonpath={.status.phase}=Succeeded' --timeout=300s 2>&1
+show "kubectl wait pod/secret-files -n $NS --for=condition=Ready --timeout=300s"
+"$K" wait pod/secret-files -n "$NS" --for=condition=Ready --timeout=300s 2>&1
 show "kubectl logs secret-files -n $NS"
 "$K" logs secret-files -n "$NS" 2>&1
+show "kubectl exec secret-files -n $NS -- sh -c 'wc -c < /etc/creds/POSTGRES_PASSWORD'"
+"$K" exec secret-files -n "$NS" -- sh -c 'wc -c < /etc/creds/POSTGRES_PASSWORD' 2>&1
 show "kubectl delete pod secret-files -n $NS --now"
 "$K" delete pod secret-files -n "$NS" --now 2>&1
 echo

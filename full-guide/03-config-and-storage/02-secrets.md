@@ -3,8 +3,9 @@
 > A Secret holds the sensitive part of your configuration, and by default it
 > is encoded, not encrypted. This chapter decodes one on the cluster to show
 > that, then sets the RBAC that decides who can read Secrets, mounts a Secret
-> as files, and makes a Secret immutable. The Bookstore's Postgres password
-> moves out of a Pod template and into a Secret.
+> as files, and makes a Secret immutable. [03.01](01-configmaps.md) already
+> put the Bookstore's Postgres password into the `db-credentials` Secret. This
+> chapter shows who can read a Secret like that, and how it reaches a Pod.
 
 **Estimated time:** ~30 min read · ~60 min hands-on
 **Prerequisites:** [Part 03 ch.01](01-configmaps.md): ConfigMap consumption, which Secret consumption mirrors · [Part 01 ch.04](../01-core-workloads/04-replicasets-and-deployments.md): the Deployment that reads `DB_DSN` · [01.01](../01-core-workloads/01-pods.md): the [baseline](../01-core-workloads/01-pods.md#baseline) every Pod here carries
@@ -15,13 +16,14 @@
 ## Why this exists
 
 [ch.01](01-configmaps.md) moved catalog's non-secret config out of its
-Deployment. The Bookstore still carries the credential it deferred in
-[Part 01 ch.05](../01-core-workloads/05-statefulsets.md): the Postgres
-StatefulSet's password is an inline env value in the Pod template, with a
-`# TODO(Phase 3)` marker. Catalog and orders cannot reach the database until
-`DB_DSN`, which embeds that password, is set. A password in a pod template
-shows in `kubectl get statefulset -o yaml`, in every Git diff, and in the
-history of its ReplicaSets. That is the value this chapter moves.
+Deployment, and applied `db-credentials`, the Secret that holds the Postgres
+password. Before Part 03, that password was an inline env value in the
+Postgres StatefulSet's pod template, with a `# TODO(Phase 3)` marker, which
+[Part 01 ch.05](../01-core-workloads/05-statefulsets.md) deferred. A password
+in a pod template shows in `kubectl get statefulset -o yaml`, in every Git
+diff, and in the ControllerRevisions that keep a StatefulSet's pod-template
+history. A Secret keeps the value out of the template. This chapter tests what
+that does and does not protect.
 
 A **Secret** is the Kubernetes object for sensitive key/value data. It is
 almost a ConfigMap: the same env and file shapes, but a separate RBAC surface,
@@ -38,9 +40,10 @@ Three differences matter:
   and `base64 -d` returns the value in one command. Encoding lets arbitrary
   bytes survive JSON and YAML. It gives no secrecy: anyone who can read the
   object, or the etcd data behind it, reads the value.
-- **It has its own RBAC surface and its own mount.** A role can allow
-  `get configmaps` and deny `get secrets`. kubelet mounts a Secret volume on
-  tmpfs, so its files are never written to node disk.
+- **It has its own RBAC surface and its own mount.** A Role can grant
+  `get configmaps` and not `get secrets`, because RBAC has grants and no
+  denies. kubelet mounts a Secret volume on tmpfs, so its files are never
+  written to node disk.
 - **It has typed variants** the platform acts on: `kubernetes.io/tls`,
   `kubernetes.io/dockerconfigjson` (an image pull secret),
   `kubernetes.io/basic-auth` and `kubernetes.io/service-account-token`. The
@@ -59,7 +62,7 @@ whether it can change under a running workload.
 
 | Threat | Control taught here | Goes deeper |
 |---|---|---|
-| A credential is written into a manifest or a pod template, and anyone who reads the workload reads it | The Secret is made from a value generated at apply time, and no manifest holds a real one. Step 2 explains the one demo file the Part applies | [07.03](../07-delivery/03-cicd-pipeline.md) scans commits; external stores in 11.05 |
+| A credential is written into a manifest or a pod template, and anyone who reads the workload reads it | The Secret is made from a value generated at apply time, and no manifest holds a real one. Step 2 generates one | [07.03](../07-delivery/03-cicd-pipeline.md) scans commits; external stores in 11.05 |
 | A reader decodes base64 and treats the value as protected | Treat `data` as cleartext. Step 3 decodes one value and counts another | Encryption at rest in 05.04 |
 | A subject reads or changes Secrets it does not need. `get` and `list` both return values, and a subject that can create a Pod can mount any Secret in the namespace | Name the Secret in a grant with `resourceNames` where the verb allows it, and check with `kubectl auth can-i`. Steps 4 to 6 show where names stop working | [05.01](../05-security/01-authn-authz-rbac.md) for RBAC; [05.02](../05-security/02-pod-security.md) for Pod creation |
 | An env var is copied into the process and into every child it starts, and it is frozen until the next rollout | Mount the Secret as files, with the mode and group the app needs. Step 7 | [03.03 step 6](03-volumes.md#6-secret-volumes-tmpfs-defaultmode-and-fsgroup) for `defaultMode` and `fsGroup` |
@@ -162,34 +165,47 @@ serviceaccount/secret-lister created
 serviceaccount/pod-creator created
 ```
 
-### 2. Create the `db-credentials` Secret
+### 2. Create a Secret with a generated value
 
-The file
-[`16-db-credentials.yaml`](../examples/bookstore/raw-manifests/16-db-credentials.yaml)
-is the Secret the rest of Part 03 applies. It holds a **demo literal**,
-`devpassword`. The literal is in the repository only because this guide is a
-throwaway local lab. Apply the file as written on that kind of cluster:
+[03.01](01-configmaps.md) applied `16-db-credentials.yaml`, so the
+`db-credentials` Secret already exists in `bookstore`. Check that it does:
 
 ```sh
-kubectl apply -f examples/bookstore/raw-manifests/16-db-credentials.yaml
-```
-
-On a cluster that holds anything real, generate the value when you apply it,
-so the value never sits in a file in Git. The lab run did this with a value it
-made when it started, and wrote that value over the demo literal:
-
-```sh
-PW="$(openssl rand -hex 16)"
-sed -e "s/devpassword/$PW/" examples/bookstore/raw-manifests/16-db-credentials.yaml | kubectl apply -f -
+kubectl get secret db-credentials -n bookstore -o name
 ```
 
 <!-- gate: output -->
 ```text
-secret/db-credentials created
+secret/db-credentials
 ```
 
-Generation keeps the value out of the file, but not out of the cluster.
-`kubectl apply` stores what it applied, and step 3 shows where that lands.
+That Secret holds the demo literal `devpassword`, and the database uses it. The
+official Postgres image reads `POSTGRES_PASSWORD` when it initialises an empty
+data directory, and ignores it after that
+([docker-library postgres](https://github.com/docker-library/docs/blob/master/postgres/README.md)).
+So a new value written into `db-credentials` does not change the password the
+database accepts, and the catalog and orders would fail at their next restart.
+Do not apply a generated value over `db-credentials`. This step creates a
+second Secret, `db-credentials-generated`, that no workload reads, and every
+later step uses it:
+
+```sh
+PW="$(openssl rand -hex 16)"
+sed -e "s/devpassword/$PW/" \
+    -e "s/name: db-credentials/name: db-credentials-generated/" \
+    examples/bookstore/raw-manifests/16-db-credentials.yaml | kubectl apply -f -
+```
+
+<!-- gate: output -->
+```text
+secret/db-credentials-generated created
+```
+
+The `devpassword` literal in the file is the value this step replaces. The file
+on disk does not change: `sed` writes the generated value only into the stream
+that `kubectl apply` reads. Generation keeps the value out of the file, but not
+out of the cluster. `kubectl apply` stores what it applied, and step 3 shows
+where that lands.
 
 ### 3. Decode it: base64 is encoding
 
@@ -197,9 +213,9 @@ Read the stored values back and decode them. The first key holds a plain
 name, and the second holds the password:
 
 ```sh
-kubectl get secret db-credentials -n bookstore -o jsonpath='{.data.POSTGRES_DB}'; echo
-kubectl get secret db-credentials -n bookstore -o jsonpath='{.data.POSTGRES_DB}' | base64 -d; echo
-kubectl get secret db-credentials -n bookstore -o jsonpath='{.data.POSTGRES_PASSWORD}' | base64 -d | wc -c | tr -d ' '
+kubectl get secret db-credentials-generated -n bookstore -o jsonpath='{.data.POSTGRES_DB}'; echo
+kubectl get secret db-credentials-generated -n bookstore -o jsonpath='{.data.POSTGRES_DB}' | base64 -d; echo
+kubectl get secret db-credentials-generated -n bookstore -o jsonpath='{.data.POSTGRES_PASSWORD}' | base64 -d | wc -c | tr -d ' '
 ```
 
 <!-- gate: output -->
@@ -213,8 +229,10 @@ bookstore
 
 The stored value is base64 text, and `base64 -d` returns the original in one
 command. No key and no privilege beyond `get` on this Secret were needed. The
-captured run printed `32`, the length of its generated value. With the demo
-file, the same command prints `devpassword`, the literal in the repository.
+captured run printed `32`, the length of its generated value. On the 03.01
+Secret, the same last command prints `11`, the length of the demo literal
+`devpassword`. The count is the only thing these commands show: the value
+itself is never printed by the chapter.
 
 `kubectl apply` also keeps the manifest it applied, in the
 `kubectl.kubernetes.io/last-applied-configuration` annotation. Written with
@@ -223,7 +241,7 @@ Secret discloses it even though `data` is base64. The check counts the
 `stringData` key:
 
 ```sh
-kubectl get secret db-credentials -n bookstore -o jsonpath='{.metadata.annotations.kubectl\.kubernetes\.io/last-applied-configuration}' | grep -c stringData
+kubectl get secret db-credentials-generated -n bookstore -o jsonpath='{.metadata.annotations.kubectl\.kubernetes\.io/last-applied-configuration}' | grep -c stringData
 ```
 
 <!-- gate: output -->
@@ -231,9 +249,9 @@ kubectl get secret db-credentials -n bookstore -o jsonpath='{.metadata.annotatio
 1
 ```
 
-Run the same pipeline with `| grep -c "$PW"` after the generated form, and the
-count is `1` too. The lab checked it that way. Treat the annotation as part of
-the Secret: anyone who can read the Secret can read it.
+In the same shell, replace the pattern with `grep -c "$PW"`. The count is `1`
+too, so the generated value sits in the annotation as well. Treat the
+annotation as part of the Secret: anyone who can read the Secret can read it.
 
 ### The gap the Bookstore still has
 
@@ -255,15 +273,22 @@ to put the password into one `DB_DSN` string. The Go services read that string
 with `os.Getenv`, so the password reaches the process as an environment
 variable. There, `/proc/<pid>/environ` returns it, and child processes inherit
 it. This is a **known gap**: the file form is not used for catalog or orders.
-Postgres itself reads its password from a file, as
-[03.05](05-stateful-data-patterns.md) shows. Closing the gap for the services
-is a change to the services, which
-would read a file. It is not a manifest change.
+The Postgres StatefulSet has the same exposure. Its
+[`20-postgres-statefulset.yaml`](../examples/bookstore/raw-manifests/20-postgres-statefulset.yaml)
+takes the three keys with `envFrom.secretRef`, so `postgres-0` gets
+`POSTGRES_PASSWORD` as an environment variable. The db-migrate Job in
+[`21-db-migrate-job.yaml`](../examples/bookstore/raw-manifests/21-db-migrate-job.yaml)
+reads its keys with `secretKeyRef`, mapped to the libpq `PG*` names. Only the
+throwaway restore Pod in [03.05](05-stateful-data-patterns.md) reads the file
+form, through `POSTGRES_PASSWORD_FILE`. Closing the gap for the services is a
+change to the services, which would read a file. It is not a manifest change.
 
 ### 4. Who can read one Secret: `get` by name
 
 A Role names one Secret and lists three verbs an application might want. The
-RoleBinding gives them to `secret-reader`:
+grant names `db-credentials-generated`, the Secret from step 2, so the
+Bookstore's own `db-credentials` is not part of this step. The RoleBinding
+gives the verbs to `secret-reader`:
 
 ```sh
 kubectl apply -f - <<'EOF'
@@ -275,7 +300,7 @@ metadata:
 rules:
   - apiGroups: [""]
     resources: ["secrets"]
-    resourceNames: ["db-credentials"]
+    resourceNames: ["db-credentials-generated"]
     verbs: ["get", "list", "create"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
@@ -303,7 +328,7 @@ rolebinding.rbac.authorization.k8s.io/db-credentials-reader created
 Ask the API server what the ServiceAccount may do. `can-i` changes nothing:
 
 ```sh
-kubectl auth can-i get secret/db-credentials -n bookstore --as=system:serviceaccount:bookstore:secret-reader
+kubectl auth can-i get secret/db-credentials-generated -n bookstore --as=system:serviceaccount:bookstore:secret-reader
 kubectl auth can-i get secret/other-creds -n bookstore --as=system:serviceaccount:bookstore:secret-reader
 kubectl auth can-i get secrets -n bookstore --as=system:serviceaccount:bookstore:secret-reader
 kubectl auth can-i list secrets -n bookstore --as=system:serviceaccount:bookstore:secret-reader
@@ -327,12 +352,12 @@ The `get` on the named Secret is the only read this subject has. The `get` on
 the collection is refused, and so is a `get` on any other name. The `list` and
 `create` answers are the surprise. A `list` request carries no name, and a
 `create` request names its object in the body, not in the URL. The rule names
-`db-credentials`, so it has nothing to match in either request. Two commands
-show the refusals, plus the one list that works:
+`db-credentials-generated`, so it has nothing to match in either request. Two
+commands show the refusals, plus the one list that works:
 
 ```sh
 kubectl get secrets -n bookstore --as=system:serviceaccount:bookstore:secret-reader -o name
-kubectl get secrets -n bookstore --as=system:serviceaccount:bookstore:secret-reader --field-selector metadata.name=db-credentials -o name
+kubectl get secrets -n bookstore --as=system:serviceaccount:bookstore:secret-reader --field-selector metadata.name=db-credentials-generated -o name
 kubectl create secret generic extra -n bookstore --from-literal=k=v --as=system:serviceaccount:bookstore:secret-reader
 ```
 
@@ -340,7 +365,7 @@ kubectl create secret generic extra -n bookstore --from-literal=k=v --as=system:
 ```text
 Error from server (Forbidden): secrets is forbidden: User "system:serviceaccount:p03-02-secrets:secret-reader" cannot list resource "secrets" in API group "" in the namespace "p03-02-secrets"
 # ...
-secret/db-credentials
+secret/db-credentials-generated
 # ...
 error: failed to create secret secrets is forbidden: User "system:serviceaccount:p03-02-secrets:secret-reader" cannot create resource "secrets" in API group "" in the namespace "p03-02-secrets"
 ```
@@ -397,9 +422,10 @@ rolebinding.rbac.authorization.k8s.io/secret-lister created
 
 The `grep` prints key names only. The same response holds every value, in
 `data`, base64. So `list` on Secrets is a read of every value in the
-namespace. Grant it only where that read is intended.
+namespace, and that includes the Bookstore's `db-credentials` from 03.01. Grant
+it only where that read is intended.
 
-### 6. A Pod that may only create Pods reads the Secret
+### 6. A subject that may only create Pods reads a Secret
 
 This subject can create Pods and nothing else. It cannot read a Secret:
 
@@ -443,13 +469,19 @@ yes
 no
 ```
 
-Now it creates a Pod that mounts the Secret. The Pod below is the deliberate
-part. It is not wrong in shape: it carries the full baseline, so admission
-accepts it, and it runs as `pod-creator`, a ServiceAccount with no Secret
-rights. It prints a checksum of the password and the names of the keys:
+Now the subject creates a Pod that mounts the Secret. The `--as` flag makes
+that request as `pod-creator`, so the create is the subject's own request. The
+Pod is the deliberate part. It is not wrong in shape: it carries the full
+baseline, so admission accepts it. It prints a checksum of the password and the
+names of the keys. Its `serviceAccountName` is `pod-creator`, which sets only
+the Pod's own identity. That identity has no token and plays no part in the
+kubelet's read of the Secret, because the kubelet fetches the Secret for the Pod
+it runs. The `tmp` volume is an `emptyDir` with a `sizeLimit`, which caps what
+the Pod can write to it. [03.03 step 5](03-volumes.md#5-size-caps-eviction-on-disk-enospc-in-memory)
+explains the cap.
 
 ```sh
-kubectl apply -f - <<'EOF'
+kubectl create -f - --as=system:serviceaccount:bookstore:pod-creator <<'EOF'
 apiVersion: v1
 kind: Pod
 metadata:
@@ -486,7 +518,7 @@ spec:
   volumes:
     - name: creds
       secret:
-        secretName: db-credentials
+        secretName: db-credentials-generated
     - name: tmp
       emptyDir:
         sizeLimit: 16Mi
@@ -501,17 +533,20 @@ pod/secret-reveal created
 # ...
 pod/secret-reveal condition met
 # ...
-5a40a4a0c10e4630b75eb7bb63b6787d58cb989785d7cd1bda6e7401aac7cd14  /creds/POSTGRES_PASSWORD
+8975cb8f1ad5d41046739ae649557b8f24f4f29acacdfcf71d9cce756dfc525f  /creds/POSTGRES_PASSWORD
 POSTGRES_DB
 POSTGRES_PASSWORD
 POSTGRES_USER
 ```
 
-The first line is a checksum of the value, not the value. To confirm that the
-Pod read the same value the Secret holds, hash the decoded value and compare:
+The first line is a checksum of the value, not the value. `pod-creator` has no
+`pods/log` right, so the administrator reads the logs. The point is the mount:
+the Pod read the Secret because the subject could create it, and no `get
+secrets` was needed. The checksum shows which value was read. To confirm that
+it is the value the Secret holds, hash the decoded value and compare:
 
 ```sh
-kubectl get secret db-credentials -n bookstore -o jsonpath='{.data.POSTGRES_PASSWORD}' | base64 -d | sha256sum
+kubectl get secret db-credentials-generated -n bookstore -o jsonpath='{.data.POSTGRES_PASSWORD}' | base64 -d | sha256sum
 ```
 
 The grant is the mistake, not the Pod. `create pods` lets its holder mount any
@@ -531,7 +566,8 @@ kubectl delete pod secret-reveal -n bookstore --now
 
 A Secret mounted as files gives the app one file per key. This inspection Pod
 runs as `secret-reader`, with the baseline, and mounts the Secret with
-`defaultMode: 0440` and `fsGroup: 65532`:
+`defaultMode: 0440` and `fsGroup: 65532`. After it prints what it sees, it
+sleeps, so that `kubectl exec` can reach it:
 
 ```sh
 kubectl apply -f - <<'EOF'
@@ -561,6 +597,7 @@ spec:
           id
           ls -lnL /etc/creds
           grep ' /etc/creds ' /proc/mounts
+          sleep 300
       securityContext:
         allowPrivilegeEscalation: false
         readOnlyRootFilesystem: true
@@ -578,14 +615,15 @@ spec:
   volumes:
     - name: creds
       secret:
-        secretName: db-credentials
+        secretName: db-credentials-generated
         defaultMode: 0440
     - name: tmp
       emptyDir:
         sizeLimit: 16Mi
 EOF
-kubectl wait pod/secret-files -n bookstore --for='jsonpath={.status.phase}=Succeeded' --timeout=300s
+kubectl wait pod/secret-files -n bookstore --for=condition=Ready --timeout=300s
 kubectl logs secret-files -n bookstore
+kubectl exec secret-files -n bookstore -- sh -c 'wc -c < /etc/creds/POSTGRES_PASSWORD'
 ```
 
 <!-- gate: output -->
@@ -596,26 +634,36 @@ pod/secret-files condition met
 # ...
 uid=65532 gid=65532 groups=65532
 total 12
--r--r-----    1 0        65532            9 Oct 31 02:02 POSTGRES_DB
--r--r-----    1 0        65532           32 Oct 31 02:02 POSTGRES_PASSWORD
--r--r-----    1 0        65532            9 Oct 31 02:02 POSTGRES_USER
+-r--r-----    1 0        65532            9 Oct 31 02:27 POSTGRES_DB
+-r--r-----    1 0        65532           32 Oct 31 02:27 POSTGRES_PASSWORD
+-r--r-----    1 0        65532            9 Oct 31 02:27 POSTGRES_USER
 tmpfs /etc/creds tmpfs ro,relatime,size=65536k,inode64,noswap 0 0
+# ...
+32
 ```
 
 The app runs as UID 65532. The files are owned by root and readable by group
 65532, which is the `fsGroup`. The mount is `tmpfs`, read-only, so the values
 never reach node disk. The file sizes are the value lengths: `32` is the
-generated password, and with the demo file the same column shows the length of
-`devpassword`. The mode and the group are the two settings the app depends on,
-and [03.03 step 6](03-volumes.md#6-secret-volumes-tmpfs-defaultmode-and-fsgroup)
-shows the same Secret failing with `0400` and passing with `0440`. Root bypasses
-file modes, so the mode guards against other UIDs in the Pod, not against
-root.
+generated password. The last command runs `wc -c` inside the running container
+through `kubectl exec`, and it reads the same mounted file the app reads. The
+mode and the group are the two settings the app depends on.
+[03.03 step 6](03-volumes.md#6-secret-volumes-tmpfs-defaultmode-and-fsgroup)
+runs the same Pod shape on a demo Secret and shows it failing with `0400` and
+passing with `0440`. Root bypasses file modes, so the mode guards against other
+UIDs in the Pod, not against root.
 
 Files also rotate. The kubelet re-syncs them when the Secret changes, and an
 env var does not. An env var is a start-time copy that stays in the process
 and its children. Mount credentials as files, and use an env var only when an
-application cannot read a file, with that exposure written down.
+application cannot read a file, with that exposure written down. A file
+re-syncs only when its Secret changes in place, and
+[step 8](#8-an-immutable-secret-refuses-an-in-place-change) shows that
+`immutable: true` refuses such a change. With an immutable Secret, rotation is
+a new name and a rollout, so the remaining benefit of a file is that the value
+stays out of the environment.
+[03.01 step 5](01-configmaps.md#5-what-an-env-var-exposes) shows that
+exposure.
 
 Delete the inspection Pod:
 
@@ -627,7 +675,8 @@ kubectl delete pod secret-files -n bookstore --now
 
 An in-place edit reaches every Pod that mounts the Secret, with no review
 step. `immutable: true` makes the API server refuse it. Create a separate
-example Secret to try this on, with a value generated now:
+example Secret to try this on, with a value generated now. The `patch` below is
+deliberate, and it fails:
 
 ```sh
 TOK="$(openssl rand -hex 16)"
@@ -683,8 +732,8 @@ gitleaks dir --config ../.gitleaks.toml --no-banner --no-color --redact examples
 ```text
 8.30.1
 # ...
-7:02AM INF scanned ~162680 bytes (162.68 KB) in 24.5ms
-7:02AM INF no leaks found
+7:27AM INF scanned ~162680 bytes (162.68 KB) in 18.8ms
+7:27AM INF no leaks found
 ```
 
 The scan passes the demo file, because the default rules do not flag it. A pass
@@ -696,10 +745,11 @@ entry stays until no ref holds that commit.
 
 ### 10. Clean up
 
-Keep `db-credentials`: the rest of Part 03 uses it. Delete what this chapter
-added:
+Keep `db-credentials`: the database and the rest of Part 03 use it. Delete what
+this chapter added:
 
 ```sh
+kubectl delete secret db-credentials-generated -n bookstore
 kubectl delete rolebinding db-credentials-reader secret-lister pod-creator -n bookstore
 kubectl delete role db-credentials-reader secret-lister pod-creator -n bookstore
 kubectl delete serviceaccount secret-reader secret-lister pod-creator -n bookstore
@@ -732,10 +782,11 @@ kubectl delete serviceaccount secret-reader secret-lister pod-creator -n booksto
   does not update.
 - **File over environment.** An env var is a start-time snapshot, so a rotated
   value needs a rollout. It is also copied into `/proc/<pid>/environ`, into
-  every child process, and into any crash dump or log line that prints the
-  environment. A mounted file re-syncs on change, and it is not copied into the
-  environment of every process. Use env for a credential only when the application cannot read a
-  file.
+  every child process, and into any log line or crash dump that prints the
+  environment. [03.01 step 5](01-configmaps.md#5-what-an-env-var-exposes)
+  demonstrates the `/proc` and child-process exposure. A mounted file re-syncs
+  on change, and it is not copied into the environment of every process. Use
+  env for a credential only when the application cannot read a file.
 - **RBAC on Secrets.** `get`, `list` and `watch` on `secrets` all return
   values, so each is a credential disclosure. A grant with `resourceNames`
   narrows `get` to the named object. It does not reach a plain `list` or a
@@ -743,18 +794,21 @@ kubectl delete serviceaccount secret-reader secret-lister pod-creator -n booksto
   match. The `metadata.name` field selector is the one `list` form the names
   match ([step 4](#4-who-can-read-one-secret-get-by-name)). Check every grant
   with `kubectl auth can-i`.
-- **Pod creation discloses too.** `pods/exec` runs a command in a
-  running container, and that command reads its environment and its mounted
-  files. `pods/attach` and `pods/portforward` reach the container's streams
-  and ports, and they belong in the same review. `create pods` can mount any
-  Secret in the namespace, and no `get secrets` permission is needed
-  ([step 6](#6-a-pod-that-may-only-create-pods-reads-the-secret)). Restricting
+- **Pod creation discloses too.** `pods/exec` runs a command in a running
+  container, and that command reads what the container can read, including its
+  environment and mounted files. [Step 7](#7-the-secret-as-files-and-the-mode-the-app-sees)
+  runs `kubectl exec` on a Pod that mounts a Secret, and reads the mounted file.
+  `pods/attach` and `pods/portforward` reach the container's streams and ports,
+  and they belong in the same review. `create pods` can mount any Secret in the
+  namespace, and no `get secrets` permission is needed
+  ([step 6](#6-a-subject-that-may-only-create-pods-reads-a-secret)). Restricting
   `get` while leaving those open is a false sense of security. Lock them down
   together ([05.01](../05-security/01-authn-authz-rbac.md) and
   [05.02](../05-security/02-pod-security.md)).
 - **Immutable Secrets.** `immutable: true` makes `data` and `stringData`
   read-only. The API server refuses an in-place write. A change is a new name
-  and a rollout.
+  and a rollout. The kubelet does not watch an immutable Secret, so its mounted
+  files never update in place.
 - **NetworkPolicy does not apply to delivery.** A Secret reaches a Pod through
   the kubelet, not over the Pod network. The default-deny NetworkPolicy in
   [Part 02 ch.06](../02-networking/06-network-policies.md) needs no rule for
@@ -798,19 +852,23 @@ volumeMounts: [ { name: creds, mountPath: /etc/creds, readOnly: true } ]
 volumes:      [ { name: creds, secret: { secretName: app-creds, defaultMode: 0440 } } ]
 ```
 
+With `immutable: true` the mounted file never re-syncs. Prefer the file form
+for the environment exposure it avoids, not for rotation.
+
 Checklist:
 
 - [ ] Sensitive data in a Secret, never a ConfigMap or a manifest
--  [ ] Understood: base64 is encoding, and `kubectl apply` keeps a
+- [ ] Understood: base64 is encoding, and `kubectl apply` keeps a
   `stringData` value in an annotation
--  [ ] `get`, `list`, `watch` and Pod `create` each disclose values, so each
+- [ ] `get`, `list`, `watch` and Pod `create` each disclose values, so each
   is granted on purpose
--  [ ] `resourceNames` narrows `get` only; `list` needs the field selector and
+- [ ] `resourceNames` narrows `get` only; `list` needs the field selector and
   `create` cannot be named
--  [ ] Mount Secrets as files with `defaultMode` and `fsGroup`; env only with
+- [ ] Mount Secrets as files with `defaultMode` and `fsGroup`; env only with
   a written reason
 - [ ] `immutable: true` on Secrets that rotate by replacement
-- [ ] The Bookstore's `DB_DSN` gap is known, and new workloads avoid it
+- [ ] The Bookstore's env-var gap (catalog, orders and `postgres-0`) is known,
+  and new workloads avoid it
 - [ ] Encryption at rest and external stores are planned: 05.04 and 11.05
 
 ## Test your understanding
@@ -832,21 +890,23 @@ Checklist:
    rest (05.04 <!-- link-later: 05.04 -->); (c) grant `get`, `list` and Pod
    `create` on Secrets only where needed ([step
    4](#4-who-can-read-one-secret-get-by-name)
-   to [step 6](#6-a-pod-that-may-only-create-pods-reads-the-secret)).
+   to [step 6](#6-a-subject-that-may-only-create-pods-reads-a-secret)).
 
    </details>
 
-2. **You deny everyone `get secrets` in `prod` and consider yourself secure.
+2. **You grant no one `get secrets` in `prod` and consider yourself secure.
    A colleague points out what is still open. What, and why does the grant not
    cover it?**
    <details><summary>Show answer</summary>
 
-   `pods/exec`, `pods/attach` and `pods/portforward` read the environment and
-   mounted files of a running Pod. `create pods` mounts any Secret in the
-   namespace. Neither needs `get secrets`, and the kubelet reads the Secret
-   for the Pod, not for the creator. Restricting `get` while leaving those
-   verbs open is a false sense of security. Lock them down together ([step
-   6](#6-a-pod-that-may-only-create-pods-reads-the-secret),
+   `pods/exec` runs a command in a running container, and that command reads
+   the container's mounted files, as [step 7](#7-the-secret-as-files-and-the-mode-the-app-sees)
+   shows. `create pods` mounts any Secret in the namespace. `pods/attach` and
+   `pods/portforward` reach the container's streams and ports, so they belong
+   in the same review. None of these needs `get secrets`, and the kubelet reads
+   the Secret for the Pod, not for the creator. Restricting `get` while leaving
+   those verbs open is a false sense of security. Lock them down together
+   ([step 6](#6-a-subject-that-may-only-create-pods-reads-a-secret),
    [05.01](../05-security/01-authn-authz-rbac.md)).
 
    </details>
@@ -856,13 +916,16 @@ Checklist:
    still not get?**
    <details><summary>Show answer</summary>
 
-   A mounted file re-syncs when the Secret changes, so the app can pick up a
-   new value without a rollout, and the value stays out of
-   `/proc/<pid>/environ` and out of the child processes. The Bookstore's Go
-   services read `DB_DSN` with `os.Getenv`, so a file gives them nothing until
-   the services read a file ([the known
-   gap](#the-gap-the-bookstore-still-has)). Postgres already reads its
-   password from a file ([03.05](05-stateful-data-patterns.md)).
+   For a Secret that is not immutable, a mounted file re-syncs when the Secret
+   changes, so the app can pick up a new value without a rollout. The value
+   also stays out of `/proc/<pid>/environ` and out of the child processes. The
+   Bookstore's Go services read `DB_DSN` with `os.Getenv`, so a file gives them
+   nothing until the services read a file ([the known
+   gap](#the-gap-the-bookstore-still-has)). The Postgres StatefulSet is in the
+   same position: `postgres-0` takes its password as an environment variable
+   through `envFrom`. Only the restore Pod in
+   [03.05](05-stateful-data-patterns.md) reads the file form, through
+   `POSTGRES_PASSWORD_FILE`.
 
    </details>
 
@@ -898,7 +961,8 @@ Checklist:
 
 - Kubernetes, Secrets:
   <https://kubernetes.io/docs/concepts/configuration/secret/>. The page
-  covers the types, the mount behavior and the encoding of `data`.
+  covers the types, the mount behavior, the encoding of `data` and immutable
+  Secrets.
 - Kubernetes, Using RBAC authorization:
   <https://kubernetes.io/docs/reference/access-authn-authz/rbac/>. The
   `resourceNames` and verb rules used in steps 4 to 6.
