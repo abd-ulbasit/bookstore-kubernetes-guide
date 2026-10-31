@@ -208,9 +208,9 @@ The Bookstore example for review is
 
 > **What the lab run covered.** The captured output below came from a lab
 > kind cluster whose cluster and node names differ from the ones shown here.
-> The lab used the namespace `p12-05-jupyter` where this chapter says
-> `jupyter`, and the transcript header records that substitution. The
-> transcript is committed at
+> The lab used a namespace of its own where this chapter says `jupyter`.
+> Captured lines keep the lab's name, which ends in `jupyter`, and the
+> transcript header records that substitution. The transcript is committed at
 > [`evidence/12-05.txt`](../examples/security-lab/evidence/12-05.txt), and the
 > script is [`labs/12-05.sh`](../examples/security-lab/labs/12-05.sh). The run
 > checked the chart and the Pods by server dry run, and it refused one Pod on
