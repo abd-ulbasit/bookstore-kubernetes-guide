@@ -46,8 +46,10 @@ lint-test  →  integration-test  →  scan  →  build-sign-push  →  update-g
 
 - **lint-test**: golangci-lint + `go vet` + `go test -race`. Module + build
   cache keyed by `go.sum`.
-- **integration-test**: `go test -tags=integration` with real service
-  containers (Postgres, RabbitMQ where relevant).
+- **integration-test**: the Postgres contract test
+  (`TestPostgresRepo_Contract`), which starts its own Postgres through
+  testcontainers. Orders and payments-worker declare Postgres and RabbitMQ
+  service containers for the integration suites they will have.
 - **scan**: Trivy filesystem scan on the Go modules. `--exit-code 1` on
   HIGH/CRITICAL.
 - **build-sign-push**: `docker buildx` multi-arch (amd64 + arm64), push by
@@ -75,7 +77,7 @@ lint-test  →  integration-test  →  scan  →  build-sign-push  →  update-g
 
 3. **Provision the IAM role** with ECR push permissions scoped to that
    single repository, trusted to your repo + branch via the OIDC provider
-   set up by the Phase 14-R terraform workflow.
+   set up by the Terraform apply workflow (Part 14 ch.07).
 
 4. **Set the GitHub repo secrets and variables** below.
 
@@ -132,8 +134,7 @@ explains this in detail.
 
 ## Where this fits in the bigger picture
 
-Forward references to chapters owned by parallel phases (plain text — they
-do not exist yet at the time this file ships):
+Related chapters:
 
 - **Part 15 ch.04** (multi-env promotion) — how the digest gets promoted
   from `dev` → `staging` → `prod` via ApplicationSet + reviewed PRs.
@@ -151,7 +152,7 @@ Backward references (these chapters exist):
 - **Part 07 ch.04** (GitOps with Argo CD) — what the merged PR triggers.
 - **Part 05 ch.03** (supply chain: SBOM + cosign) — the conceptual basis
   for the signing flow here.
-- **Part 14 ch.07** (Phase 14b's CI/CD + drift) — the *infrastructure* side
+- **Part 14 ch.07** (CI/CD and drift) — the *infrastructure* side
   of the same pattern, in Terraform.
 - **Part 14 ch.12** (Kyverno verifyImages in cloud) — the cluster-side
   verification of the keyless signatures produced here.
