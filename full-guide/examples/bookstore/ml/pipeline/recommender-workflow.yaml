@@ -1,60 +1,51 @@
-# Bookstore — Part 12 ch.07 "ML pipelines and workflows": the recommender
+# Bookstore, Part 12 ch.07 "ML pipelines and workflows": the recommender
 # pipeline as an Argo Workflows `WorkflowTemplate` that runs the
-# train -> eval -> register -> promote DAG. The first artifact of Part 12
-# that *orchestrates* the per-chapter pieces (X3a-c) into ONE pipeline.
+# train -> eval -> register -> promote DAG.
 #
-# !!! CRD-INTRINSIC DRY-RUN (identical precedent to raw-manifests/51-/70-/83-,
+# !!! CRD-INTRINSIC DRY-RUN (same precedent as raw-manifests/51-/70-/83-,
 #     argocd/, operators/, chaos/, ml/batch/, ml/serve/recommender-inference-
 #     service.yaml) !!!
-#   `WorkflowTemplate` is an Argo Workflows CRD
-#   (argoproj.io/v1alpha1). WITHOUT Argo Workflows installed a client dry-run
-#   prints:
+#   `WorkflowTemplate` is an Argo Workflows CRD (argoproj.io/v1alpha1).
+#   Without Argo Workflows installed, a client dry-run prints:
 #     no matches for kind "WorkflowTemplate" in version "argoproj.io/v1alpha1"
-#   EXPECTED and SCHEMA-CORRECT — install Argo Workflows first (Part 12 ch.07
-#   Hands-on: pinned Helm `argo/argo-workflows --version 0.42.0` -> ns `argo`).
-#   Schema verified against argoproj.io/v1alpha1 (entrypoint / templates /
-#   dag / inputs.parameters / podSpecPatch).
+#   That is expected. Install the chart first (argo-workflows-values.yaml).
 #
-# WHAT IT DOES (the four steps of the MLOps loop, on kind)
-#   1. train    — runs `bookstore/recommender-train:dev` (the SAME image as
+# The first document (ServiceAccounts, Roles and RoleBindings) dry-runs cleanly
+# anywhere; it is applied before the WorkflowTemplate.
+#
+# WHAT IT DOES (the four steps of the MLOps loop)
+#   1. train   , runs `bookstore/recommender-train:dev` (the SAME image as
 #                 ../train/recommender-train-job.yaml) and writes `model.joblib`
 #                 to the shared PVC `recommender-model`.
-#   2. eval     — runs a tiny Python evaluator INSIDE the same train image
-#                 (sklearn + joblib are present) — loads `model.joblib`, checks
-#                 a sanity signal (the average top-1 cosine similarity over
-#                 the synthetic dataset is non-trivial — proves the model
-#                 actually learnt the planted affinities), writes
-#                 `metrics.json` next to the model.
-#   3. register — runs `kubectl create configmap` (with a small RBAC-scoped
-#                 ServiceAccount) to STAMP the model URI + score + timestamp
-#                 into a ConfigMap `recommender-model-registry-<workflow>`.
-#                 KIND-RUNNABLE PROXY for a real model registry (MLflow / KFP
-#                 Model Registry). Honestly marked in the README.
-#   4. promote  — runs `kubectl annotate / rollout restart` on the recommender
-#                 Deployment so the serving Pod re-reads the model PVC. In
-#                 PROD this step is a GitOps commit that bumps the
-#                 InferenceService `storageUri` (Part 07 ch.04) — also
-#                 honestly marked.
+#   2. eval    , runs a tiny Python evaluator in the same train image. It
+#                 mounts the model read-only, writes its metrics to /tmp,
+#                 gates on `min-score`, and emits two output parameters:
+#                 `score` and `model-sha256` (the digest of the exact bytes it
+#                 evaluated).
+#   3. register, stamps the model URI, score, model digest and dataset
+#                 lineage into a ConfigMap. KIND-RUNNABLE PROXY for a real
+#                 model registry (MLflow / KFP Model Registry).
+#   4. promote , annotates and rolls the `recommender` Deployment so its Pod
+#                 re-reads the model. In prod this step is a GitOps commit
+#                 that bumps the InferenceService `storageUri` (Part 07 ch.04).
 #
-# WHY a WorkflowTemplate (and not a one-shot Workflow)
-#   `WorkflowTemplate` is the REUSABLE shape: install once, run many times via
-#   `argo submit --from workflowtemplate/<name>` OR by reference from a
-#   `CronWorkflow` (see recommender-cronworkflow.yaml in this dir) OR from an
-#   Argo Events `Sensor` (recommender-sensor.yaml). The one-shot `Workflow`
-#   would only support a single run. The teaching artifact is the template;
-#   running it is one command.
+# IDENTITY: one ServiceAccount per step that calls the API
+#   argo-workflow       the default for every step; its only right is the
+#                       executor's (workflowtaskresults). Train and eval get no
+#                       API token at all.
+#   recommender-register  may get, create and patch ConfigMaps in bookstore-ml.
+#   recommender-promote   may get, list, watch and patch the one Deployment
+#                         named `recommender`.
+# Every ServiceAccount that runs a step also holds the executor Role, because
+# the wait sidecar in each step Pod uses the step's identity to report results.
 #
-# PSA — every step's pod template carries the restricted SC via
-# `podSpecPatch` + each container's `securityContext`. The Argo Workflows
-# controller installs into its OWN namespace (`argo`); the workflow Pods this
-# template spawns land in `bookstore-ml` (PSA: enforce restricted) under the
-# `argo-workflow` ServiceAccount this file creates.
+# PSA, every workflow Pod, the step container and the wait sidecar included,
+# meets the restricted level. The pod-level settings come from podSpecPatch
+# below; the wait sidecar's settings come from the chart's `executor` values
+# (argo-workflows-values.yaml).
 ---
-# Minimal ServiceAccount + Role + RoleBinding so the WorkflowTemplate's
-# `register` and `promote` steps can write a ConfigMap and restart a
-# Deployment in the bookstore-ml namespace. Argo Workflows REQUIRES a
-# workflow-runner ServiceAccount; we keep its permissions tight (no
-# cluster-wide rights, no secrets access, namespace-scoped).
+# Identity for the default step and the executor. The wait sidecar uses this
+# token because `executor.serviceAccountName` names it below.
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -63,52 +54,135 @@ metadata:
   labels:
     app.kubernetes.io/part-of: bookstore-ml
     app.kubernetes.io/component: ml-pipeline
-automountServiceAccountToken: false
+automountServiceAccountToken: true
 ---
-apiVersion: rbac.authorization.k8s.io/v1
-kind: Role
+apiVersion: v1
+kind: ServiceAccount
 metadata:
-  name: argo-workflow
+  name: recommender-register
   namespace: bookstore-ml
   labels:
     app.kubernetes.io/part-of: bookstore-ml
+    app.kubernetes.io/component: ml-pipeline
+automountServiceAccountToken: true
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: recommender-promote
+  namespace: bookstore-ml
+  labels:
+    app.kubernetes.io/part-of: bookstore-ml
+    app.kubernetes.io/component: ml-pipeline
+automountServiceAccountToken: true
+---
+# The executor's own rights. The chart's default workflow Role grants exactly
+# these two verbs on workflowtaskresults, and nothing else is needed here.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: pipeline-executor
+  namespace: bookstore-ml
+  labels:
+    app.kubernetes.io/part-of: bookstore-ml
+    app.kubernetes.io/component: ml-pipeline
 rules:
-  # Argo Workflows controller needs to manage workflow Pods + their logs.
-  - apiGroups: [""]
-    resources: ["pods", "pods/log"]
-    verbs: ["get", "list", "watch", "create", "delete", "patch", "update"]
-  # The register step writes a ConfigMap; the promote step reads/annotates
-  # the recommender Deployment so the serving Pod re-loads the model PVC.
-  - apiGroups: [""]
-    resources: ["configmaps"]
-    verbs: ["get", "list", "create", "patch", "update"]
-  # reads (get/list) and patches (annotate + rollout restart) the Deployment
-  # — both are PATCH verbs in the API (update is NOT needed).
-  - apiGroups: ["apps"]
-    resources: ["deployments"]
-    verbs: ["get", "list", "patch"]
-  # Argo Workflows uses these for artifact GC + workflow-task results.
   - apiGroups: ["argoproj.io"]
-    resources: ["workflowtaskresults", "workflowtasksets"]
-    verbs: ["get", "list", "watch", "create", "patch", "update"]
+    resources: ["workflowtaskresults"]
+    verbs: ["create", "patch"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
-  name: argo-workflow
+  name: pipeline-executor
   namespace: bookstore-ml
   labels:
     app.kubernetes.io/part-of: bookstore-ml
+    app.kubernetes.io/component: ml-pipeline
 subjects:
   - kind: ServiceAccount
     name: argo-workflow
     namespace: bookstore-ml
+  - kind: ServiceAccount
+    name: recommender-register
+    namespace: bookstore-ml
+  - kind: ServiceAccount
+    name: recommender-promote
+    namespace: bookstore-ml
 roleRef:
   kind: Role
-  name: argo-workflow
+  name: pipeline-executor
   apiGroup: rbac.authorization.k8s.io
 ---
-# The WorkflowTemplate: train -> eval -> register -> promote
+# register: create is the verb that cannot be narrowed by name. RBAC ignores
+# resourceNames on create, so this identity can create any ConfigMap in
+# bookstore-ml. Keep secrets out of ConfigMaps, and give the registry its own
+# namespace once the registry is real (Part 12 ch.08).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: recommender-register
+  namespace: bookstore-ml
+  labels:
+    app.kubernetes.io/part-of: bookstore-ml
+    app.kubernetes.io/component: ml-pipeline
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "create", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: recommender-register
+  namespace: bookstore-ml
+  labels:
+    app.kubernetes.io/part-of: bookstore-ml
+    app.kubernetes.io/component: ml-pipeline
+subjects:
+  - kind: ServiceAccount
+    name: recommender-register
+    namespace: bookstore-ml
+roleRef:
+  kind: Role
+  name: recommender-register
+  apiGroup: rbac.authorization.k8s.io
+---
+# promote: the verbs are limited to one named Deployment. The name must match
+# the `DEPLOY` value in the promote-step script. Changing one without the other
+# breaks the step, which fails closed.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: recommender-promote
+  namespace: bookstore-ml
+  labels:
+    app.kubernetes.io/part-of: bookstore-ml
+    app.kubernetes.io/component: ml-pipeline
+rules:
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    resourceNames: ["recommender"]
+    verbs: ["get", "list", "watch", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: recommender-promote
+  namespace: bookstore-ml
+  labels:
+    app.kubernetes.io/part-of: bookstore-ml
+    app.kubernetes.io/component: ml-pipeline
+subjects:
+  - kind: ServiceAccount
+    name: recommender-promote
+    namespace: bookstore-ml
+roleRef:
+  kind: Role
+  name: recommender-promote
+  apiGroup: rbac.authorization.k8s.io
+---
+# The WorkflowTemplate: train -> eval -> register -> promote.
 apiVersion: argoproj.io/v1alpha1
 kind: WorkflowTemplate
 metadata:
@@ -119,19 +193,25 @@ metadata:
     app.kubernetes.io/component: ml-pipeline
     ml.bookstore/path: argo-workflows
 spec:
-  # Argo Workflows runs every step's Pod under this SA in bookstore-ml.
-  serviceAccountName: argo-workflow
   entrypoint: main
-  # ttlStrategy GCs the Workflow object + Pods after success/failure — same
-  # discipline as ml/train/recommender-train-job.yaml's ttlSecondsAfterFinished.
+  # The default identity for every step. Steps that call the API set their
+  # own serviceAccountName below.
+  serviceAccountName: argo-workflow
+  # Step containers get no API token by default. The wait sidecar gets the
+  # executor ServiceAccount's token instead, through `executor` below. A
+  # step that calls the API turns its token back on in its own template.
+  automountServiceAccountToken: false
+  executor:
+    serviceAccountName: argo-workflow
+  # ttlStrategy GCs the Workflow object and its Pods after the run.
   ttlStrategy:
     secondsAfterCompletion: 600
     secondsAfterFailure: 1800
-  # Active wall-clock cap so a runaway pipeline doesn't pin the queue.
+  # Wall-clock cap so a runaway pipeline does not hold the queue.
   activeDeadlineSeconds: 1800
-  # Spec-level retry: retry transient failures (1 extra attempt, OnError =
-  # don't retry on user-script Failed exits, only on infra/transient errors).
-  # train/eval/register are retry-safe; promote opts out at the task level.
+  # One retry for transient infrastructure errors. `OnError` does not retry a
+  # step whose script exits non-zero (a failed eval gate is not retried).
+  # promote opts out at the task level.
   retryStrategy:
     limit: 1
     retryPolicy: OnError
@@ -139,7 +219,6 @@ spec:
       duration: "30s"
       factor: 2
       maxDuration: "5m"
-  # Pipeline-level inputs — sensible defaults; overridable via `argo submit -p`.
   arguments:
     parameters:
       - name: train-image
@@ -152,25 +231,17 @@ spec:
         value: "10"
       - name: min-score
         value: "0.05"           # eval gate: avg top-1 cosine must exceed this
-      - name: serve-deployment
-        value: "recommender"     # the recommender Deployment to rollout-restart
-      # Lineage parameters — threaded through to the register step's
-      # ConfigMap stamp. Placeholders are honest defaults; pin to a real
-      # `s3://…/dataset.parquet` URI and an `@sha256:<digest>` image ref
-      # in prod (Part 12 ch.07/ch.08).
+      # Lineage parameters, copied into the register step's ConfigMap.
+      # The placeholders are honest defaults. In prod, pin the dataset URI to
+      # a versioned object (s3://…/dataset.parquet) and the image to a digest
+      # (`@sha256:<digest>`).
       - name: dataset-uri
         value: "pvc://recommender-model/dataset/"
       - name: image-sha
         value: "bookstore/recommender-train:dev"
-  # Restricted PodSpec patch applied to EVERY workflow Pod (train + eval +
-  # register + promote). Argo Workflows wraps each step's container in a
-  # `main` + `wait` sidecar pair; the patch covers both via pod-level SC, and
-  # each container also pins its container-level SC below.
+  # Pod-level settings for every workflow Pod. The wait sidecar's own settings
+  # come from the chart's `executor` values.
   podSpecPatch: |
-    # Argo's wait sidecar requires the SA token; the SA-level
-    # automountServiceAccountToken: false is the secure default, overridden
-    # per-Pod by the workflow's podSpecPatch.
-    automountServiceAccountToken: true
     securityContext:
       runAsNonRoot: true
       runAsUser: 65532
@@ -178,9 +249,6 @@ spec:
       fsGroup: 65532
       seccompProfile:
         type: RuntimeDefault
-  # The shared PVC mount the train + eval steps both use. Argo Workflows
-  # supports `volumes` at the workflow level; the per-step container
-  # `volumeMounts` opt into it.
   volumes:
     - name: model
       persistentVolumeClaim:
@@ -190,8 +258,7 @@ spec:
         sizeLimit: 64Mi
   templates:
     # ───────────────────────────────────────────────────────────────────────
-    # main — the DAG: train -> eval -> register -> promote.
-    # Each step is a template defined below; `depends:` wires the order.
+    # main, the DAG: train -> eval -> register -> promote.
     # ───────────────────────────────────────────────────────────────────────
     - name: main
       dag:
@@ -210,17 +277,18 @@ spec:
             arguments:
               parameters:
                 - { name: score, value: "{{tasks.eval.outputs.parameters.score}}" }
+                - { name: model-sha256, value: "{{tasks.eval.outputs.parameters.model-sha256}}" }
           - name: promote
             template: promote-step
             depends: "register.Succeeded"
-            # promote is NOT idempotent: `kubectl annotate` may commit before
+            # promote is not idempotent: `kubectl annotate` may commit before
             # `rollout restart` fails, leaving a half-promoted state. Opt out
-            # of the spec-level retry — task-level limit:0 overrides the spec.
+            # of the spec-level retry for this task only.
             retryStrategy:
               limit: 0
     # ───────────────────────────────────────────────────────────────────────
-    # train — runs the SAME image as ml/train/recommender-train-job.yaml.
-    # Writes /workspace/model/model.joblib on the shared PVC.
+    # train, the same image as ml/train/recommender-train-job.yaml. It writes
+    # /workspace/model/model.joblib on the shared PVC. It holds no API token.
     # ───────────────────────────────────────────────────────────────────────
     - name: train-step
       container:
@@ -250,12 +318,10 @@ spec:
           - { name: model,   mountPath: /workspace/model }
           - { name: scratch, mountPath: /tmp }
     # ───────────────────────────────────────────────────────────────────────
-    # eval — loads model.joblib from the SAME PVC the train step wrote,
-    # computes the average top-1 cosine similarity over all books, writes
-    # /workspace/model/metrics.json, and emits `score` as an output parameter
-    # the `register` step reads. Uses the SAME train image (sklearn + joblib
-    # baked in — no second image to build). Falls below `min-score` ->
-    # exits non-zero -> the DAG fails (the eval gate).
+    # eval, reads model.joblib from the PVC read-only, computes the average
+    # top-1 cosine similarity, and gates on min-score. Metrics go to /tmp
+    # because the model directory is read-only here. The digest of the
+    # evaluated bytes is emitted for the register step.
     # ───────────────────────────────────────────────────────────────────────
     - name: eval-step
       inputs:
@@ -266,18 +332,21 @@ spec:
         imagePullPolicy: IfNotPresent
         command: ["python"]
         source: |
-          # Tiny evaluator — same image, same joblib schema.
-          import json, os, statistics, sys
+          import hashlib, json, os, statistics, sys
           import joblib
 
           model_dir = os.environ.get("MODEL_DIR", "/workspace/model")
           min_score = float(os.environ["MIN_SCORE"])
-          artifact = joblib.load(os.path.join(model_dir, "model.joblib"))
+          model_path = os.path.join(model_dir, "model.joblib")
+          # joblib is pickle: loading runs code. This load is safe only while
+          # the file is written by this pipeline's own train step. Any other
+          # writer to the PVC makes it unsafe. Part 12 ch.06 covers verifying
+          # the digest before a serving Pod loads a model.
+          artifact = joblib.load(model_path)
           neigh = artifact["neighbours"]
           # Average top-1 cosine similarity across all books with at least
           # one neighbour. This proves the model learnt SOMETHING above
-          # random — for the planted-affinity synthetic dataset the value
-          # is well above 0.0 (typically ~0.4 on the defaults).
+          # random for the planted-affinity synthetic dataset.
           top1 = [float(v[0][1]) for v in neigh.values() if v]
           score = statistics.fmean(top1) if top1 else 0.0
           metrics = {
@@ -290,11 +359,15 @@ spec:
               "min_score_gate": min_score,
               "passed": score >= min_score,
           }
-          with open(os.path.join(model_dir, "metrics.json"), "w") as f:
+          with open("/tmp/metrics.json", "w") as f:
               json.dump(metrics, f, indent=2)
-          # Emit the score for the next step via Argo's output-parameter file.
           with open("/tmp/score", "w") as f:
               f.write(f"{score:.6f}")
+          # Lineage: the digest of the exact bytes this run evaluated.
+          with open(model_path, "rb") as f:
+              digest = hashlib.sha256(f.read()).hexdigest()
+          with open("/tmp/model-sha256", "w") as f:
+              f.write(digest)
           print(json.dumps(metrics, indent=2), flush=True)
           if not metrics["passed"]:
               print(f"[eval] FAIL: {score} < gate {min_score}", file=sys.stderr,
@@ -319,20 +392,23 @@ spec:
         parameters:
           - name: score
             valueFrom: { path: /tmp/score }
+          - name: model-sha256
+            valueFrom: { path: /tmp/model-sha256 }
     # ───────────────────────────────────────────────────────────────────────
-    # register — KIND-RUNNABLE PROXY for a real model registry. Writes a
-    # ConfigMap into bookstore-ml stamping (model URI, score, timestamp,
-    # workflow name). In PROD this is an MLflow `log_artifact` call or a
-    # KFP Model Registry record — see Part 12 ch.07 + ch.08 for the swap.
-    # Uses Chainguard's minimal kubectl image with a shell (latest-dev),
-    # pinned by digest because the free tier publishes only latest tags;
-    # this digest carries kubectl v1.37.2. The SA created above has create
-    # rights on configmaps in this namespace ONLY.
+    # register, KIND-RUNNABLE PROXY for a real model registry. Writes a
+    # ConfigMap that stamps the model URI, score, model digest, timestamp,
+    # workflow name and dataset lineage. Runs as recommender-register, the
+    # only identity here that may write ConfigMaps.
+    # Chainguard's kubectl image, pinned by index digest. The -dev variant has
+    # the /bin/sh the script runs under. Its user is 65532.
     # ───────────────────────────────────────────────────────────────────────
     - name: register-step
+      serviceAccountName: recommender-register
+      automountServiceAccountToken: true
       inputs:
         parameters:
           - name: score
+          - name: model-sha256
       script:
         image: cgr.dev/chainguard/kubectl:latest-dev@sha256:ee760c803cc3856d99f13dfd989bce461d2b324ae49e70b72c717f3bfaba9cbb
         imagePullPolicy: IfNotPresent
@@ -342,11 +418,11 @@ spec:
           CM="recommender-model-registry-{{workflow.name}}"
           MODEL_URI="pvc://{{workflow.parameters.model-pvc}}/model.joblib"
           SCORE="{{inputs.parameters.score}}"
+          SHA="{{inputs.parameters.model-sha256}}"
           NOW="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          # Write the registry stamp as a ConfigMap. Honest proxy — see
-          # README + Part 12 ch.07/ch.08 for the real-registry swap.
           kubectl -n bookstore-ml create configmap "$CM" \
             --from-literal=model_uri="$MODEL_URI" \
+            --from-literal=model_sha256="$SHA" \
             --from-literal=score="$SCORE" \
             --from-literal=registered_at="$NOW" \
             --from-literal=workflow="{{workflow.name}}" \
@@ -358,7 +434,12 @@ spec:
             app.kubernetes.io/part-of=bookstore-ml \
             app.kubernetes.io/component=recommender-model-registry \
             ml.bookstore/score="$SCORE" --overwrite
-          echo "[register] stamped $CM uri=$MODEL_URI score=$SCORE at=$NOW"
+          echo "[register] stamped $CM uri=$MODEL_URI sha256=$SHA score=$SCORE at=$NOW"
+        env:
+          # kubectl writes its discovery cache under $HOME; the root
+          # filesystem is read-only, so point HOME at the writable /tmp.
+          - name: HOME
+            value: /tmp
         resources:
           requests: { cpu: "50m",  memory: "64Mi" }
           limits:   { cpu: "200m", memory: "128Mi" }
@@ -369,41 +450,33 @@ spec:
         volumeMounts:
           - { name: scratch, mountPath: /tmp }
     # ───────────────────────────────────────────────────────────────────────
-    # promote — KIND-RUNNABLE PROXY for the real "promote" step. Annotates
-    # the recommender Deployment so a rollout-restart picks up the new
-    # model.joblib on the SAME PVC (the serving Pod re-loads it on start).
-    # In PROD this step is a GitOps commit that bumps the InferenceService
-    # `storageUri` to a NEW versioned URI; Argo CD reconciles; KServe
-    # shifts traffic via canaryTrafficPercent (Part 12 ch.06). Honestly
-    # marked — see README + Part 12 ch.07 + Part 07 ch.04.
+    # promote, KIND-RUNNABLE PROXY for the real promote step. Annotates the
+    # recommender Deployment and restarts it, so the serving Pod re-reads
+    # model.joblib from the PVC. Runs as recommender-promote. If the Deployment
+    # is missing, the step FAILS: a promotion that did not happen must not
+    # report success.
     # ───────────────────────────────────────────────────────────────────────
     - name: promote-step
+      serviceAccountName: recommender-promote
+      automountServiceAccountToken: true
       script:
         image: cgr.dev/chainguard/kubectl:latest-dev@sha256:ee760c803cc3856d99f13dfd989bce461d2b324ae49e70b72c717f3bfaba9cbb
         imagePullPolicy: IfNotPresent
         command: ["/bin/sh"]
         source: |
           set -eu
-          DEPLOY="{{workflow.parameters.serve-deployment}}"
+          DEPLOY="recommender"
           NOW="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          # If the serving Deployment exists in this namespace, annotate it
-          # with the workflow name + timestamp and trigger a rolling restart
-          # so the serving Pod re-reads model.joblib from the PVC. If it
-          # doesn't exist (the user hasn't applied ml/serve/ yet) print a
-          # message and exit 0 — `promote` is documentation-friendly.
-          if kubectl -n bookstore-ml get deploy "$DEPLOY" >/dev/null 2>&1; then
-            kubectl -n bookstore-ml annotate deploy "$DEPLOY" \
-              ml.bookstore/promoted-from="{{workflow.name}}" \
-              ml.bookstore/promoted-at="$NOW" --overwrite
-            kubectl -n bookstore-ml rollout restart deploy "$DEPLOY"
-            kubectl -n bookstore-ml rollout status  deploy "$DEPLOY" --timeout=120s
-            echo "[promote] $DEPLOY restarted with new model (workflow {{workflow.name}})"
-          else
-            echo "[promote] deploy/$DEPLOY not found — skipping. In prod this"
-            echo "[promote] step is a GitOps commit that bumps the"
-            echo "[promote] InferenceService storageUri (Part 07 ch.04 +"
-            echo "[promote] Part 12 ch.06)."
-          fi
+          kubectl -n bookstore-ml get deploy "$DEPLOY" >/dev/null
+          kubectl -n bookstore-ml annotate deploy "$DEPLOY" \
+            ml.bookstore/promoted-from="{{workflow.name}}" \
+            ml.bookstore/promoted-at="$NOW" --overwrite
+          kubectl -n bookstore-ml rollout restart deploy "$DEPLOY"
+          kubectl -n bookstore-ml rollout status deploy "$DEPLOY" --timeout=120s
+          echo "[promote] $DEPLOY restarted with the new model (workflow {{workflow.name}})"
+        env:
+          - name: HOME
+            value: /tmp
         resources:
           requests: { cpu: "50m",  memory: "64Mi" }
           limits:   { cpu: "200m", memory: "128Mi" }

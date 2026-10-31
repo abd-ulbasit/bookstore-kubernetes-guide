@@ -1,68 +1,68 @@
-# Bookstore — Part 12 ch.07 "ML pipelines and workflows": Argo Events
-# `Sensor` — translates an event from `recommender-eventsource.yaml` into
-# a `Workflow` instance of the `recommender-pipeline` WorkflowTemplate
-# (in ../pipeline/recommender-workflow.yaml). Event-driven retraining.
+# Bookstore, Part 12 ch.07 "ML pipelines and workflows": Argo Events
+# `Sensor`. It turns an event from recommender-eventsource.yaml into a Workflow
+# that runs the recommender-pipeline WorkflowTemplate in bookstore-ml.
 #
-# !!! CRD-INTRINSIC DRY-RUN (identical precedent to recommender-workflow.yaml
-#     in this dir, raw-manifests/51-/70-/83-, argocd/, operators/, chaos/,
-#     ml/batch/, ml/serve/recommender-inferenceservice.yaml) !!!
-#   `Sensor` is an Argo Events CRD (argoproj.io/v1alpha1). WITHOUT Argo Events
-#   installed a client dry-run prints:
+# !!! CRD-INTRINSIC DRY-RUN (same precedent as recommender-workflow.yaml) !!!
+#   `Sensor` is an Argo Events CRD (argoproj.io/v1alpha1). Without Argo Events
+#   installed, a client dry-run prints:
 #     no matches for kind "Sensor" in version "argoproj.io/v1alpha1"
-#   EXPECTED and SCHEMA-CORRECT — install Argo Events first (Part 12 ch.07
-#   Hands-on: pinned Helm `argo/argo-events --version 2.4.7` -> ns `argo-events`,
-#   plus the default `EventBus`). Schema verified against argoproj.io/v1alpha1
-#   (dependencies + triggers.k8s + argoWorkflow create operation).
+#   That is expected. Install the chart first (argo-events-values.yaml).
 #
-# RBAC NOTE
-#   The Sensor uses a ServiceAccount with namespace-scoped rights to create
-#   Workflows in `bookstore-ml`. This file CREATES that SA + RoleBinding in
-#   bookstore-ml; you also need a binding so the Sensor (running in
-#   `argo-events`) can reach across namespaces — handled below via a
-#   bookstore-ml-scoped Role bound to a bookstore-ml SA the Sensor's
-#   service-account is impersonated as. For kind: simplest path is the SA
-#   created here.
+# WHO CALLS THE API
+#   The Sensor's Pod creates the Workflow with its own ServiceAccount token.
+#   That ServiceAccount lives in argo-events, so the Role that allows the
+#   create sits in bookstore-ml and its RoleBinding names the argo-events
+#   ServiceAccount. A Pod cannot use a ServiceAccount from another namespace,
+#   which is why the Sensor's ServiceAccount is in argo-events.
+#
+# WHAT THE ROLE ALLOWS
+#   create on workflows in bookstore-ml, and nothing else. A create cannot be
+#   narrowed to one name (RBAC resourceNames does not apply to create), so a
+#   compromised Sensor could submit any Workflow in bookstore-ml, and any
+#   ServiceAccount in it. The Workflow this trigger builds is fixed by this
+#   file. Keep who may submit Workflows to this Sensor and the release
+#   pipeline (ch.07 "Threats and controls").
 ---
-# SA + Role + RoleBinding so the Sensor can submit Workflows in bookstore-ml.
 apiVersion: v1
 kind: ServiceAccount
 metadata:
-  name: argo-events-sensor
-  namespace: bookstore-ml
+  name: recommender-sensor
+  namespace: argo-events
   labels:
     app.kubernetes.io/part-of: bookstore-ml
     app.kubernetes.io/component: ml-pipeline-events
-automountServiceAccountToken: false
+# The Sensor calls the Kubernetes API, so its token stays mounted. This is the
+# one dedicated ServiceAccount that needs one.
+automountServiceAccountToken: true
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
-  name: argo-events-sensor
+  name: recommender-sensor
   namespace: bookstore-ml
   labels:
     app.kubernetes.io/part-of: bookstore-ml
+    app.kubernetes.io/component: ml-pipeline-events
 rules:
   - apiGroups: ["argoproj.io"]
     resources: ["workflows"]
-    verbs: ["create", "get", "list", "watch"]
-  - apiGroups: ["argoproj.io"]
-    resources: ["workflowtemplates"]
-    verbs: ["get", "list"]
+    verbs: ["create"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
-  name: argo-events-sensor
+  name: recommender-sensor
   namespace: bookstore-ml
   labels:
     app.kubernetes.io/part-of: bookstore-ml
+    app.kubernetes.io/component: ml-pipeline-events
 subjects:
   - kind: ServiceAccount
-    name: argo-events-sensor
-    namespace: bookstore-ml
+    name: recommender-sensor
+    namespace: argo-events
 roleRef:
   kind: Role
-  name: argo-events-sensor
+  name: recommender-sensor
   apiGroup: rbac.authorization.k8s.io
 ---
 apiVersion: argoproj.io/v1alpha1
@@ -74,30 +74,38 @@ metadata:
     app.kubernetes.io/part-of: bookstore-ml
     app.kubernetes.io/component: ml-pipeline-events
 spec:
-  # Argo Events runs the Sensor as a Pod under an SA with permission to
-  # apply the configured triggers. Spec.template.serviceAccountName names
-  # the Sensor-runner SA inside argo-events; the trigger then has its OWN
-  # SA (bookstore-ml/argo-events-sensor) used to create the Workflow.
+  eventBusName: default
   template:
-    serviceAccountName: argo-events-sensor   # provided by the argo-events chart
+    serviceAccountName: recommender-sensor
     securityContext:
       runAsNonRoot: true
       runAsUser: 65532
-      seccompProfile: { type: RuntimeDefault }
+      runAsGroup: 65532
+      seccompProfile:
+        type: RuntimeDefault
     container:
       securityContext:
         allowPrivilegeEscalation: false
         readOnlyRootFilesystem: true
-        capabilities: { drop: ["ALL"] }
+        capabilities:
+          drop: ["ALL"]
+      resources:
+        requests: { cpu: "50m",  memory: "64Mi" }
+        limits:   { cpu: "200m", memory: "128Mi" }
+      volumeMounts:
+        - { name: tmp, mountPath: /tmp }
+    volumes:
+      - name: tmp
+        emptyDir: {}
   dependencies:
     - name: dataset-ready
-      eventSourceName: recommender-dataset    # <-- EventSource name
-      eventName: dataset-ready                # <-- route name
+      eventSourceName: recommender-dataset    # the EventSource above
+      eventName: dataset-ready                # the webhook route name above
   triggers:
     - template:
         name: trigger-recommender-pipeline
-        # Use the k8s trigger to CREATE a Workflow that references the
-        # WorkflowTemplate `recommender-pipeline` in bookstore-ml.
+        # The k8s trigger creates a Workflow that references the
+        # WorkflowTemplate by name, so the pipeline's shape lives in one place.
         k8s:
           operation: create
           source:
@@ -115,7 +123,6 @@ spec:
                 serviceAccountName: argo-workflow
                 workflowTemplateRef:
                   name: recommender-pipeline
-                # Parameters can be templated from the event payload via
-                # `parameters[].src.dataKey` — e.g. pass `dataset_uri` from
-                # the webhook JSON into the pipeline. Left as a comment to
-                # keep this file small; ch.07 walks the example.
+                # To pass the dataset URI from the event body, add a
+                # spec.arguments.parameters entry with a dataKey source. It is
+                # left out here to keep the example small.

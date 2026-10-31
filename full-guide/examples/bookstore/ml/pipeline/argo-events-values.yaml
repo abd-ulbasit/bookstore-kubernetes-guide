@@ -1,0 +1,35 @@
+# Bookstore, Part 12 ch.07: values for the argo/argo-events chart, version
+# 2.4.27 (Argo Events v1.9.11). Read against that chart's own values.yaml.
+#
+#   helm install argo-events argo/argo-events --version 2.4.27 \
+#     -n argo-events -f argo-events-values.yaml --wait
+#
+# The chart leaves every securityContext empty by default, so none of its
+# pods meets the restricted level. These overrides set it. The images declare
+# no USER, so each pod sets a numeric UID explicitly (65532, the UID the
+# guide's own images use).
+
+global:
+  # Pod-level settings for the controller and the webhook pods.
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 65532
+    runAsGroup: 65532
+    seccompProfile:
+      type: RuntimeDefault
+
+controller:
+  containerSecurityContext:
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: true
+    capabilities:
+      drop:
+        - ALL
+
+webhook:
+  containerSecurityContext:
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: true
+    capabilities:
+      drop:
+        - ALL

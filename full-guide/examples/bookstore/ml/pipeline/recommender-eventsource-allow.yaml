@@ -1,0 +1,41 @@
+# Bookstore, Part 12 ch.07 "ML pipelines and workflows": the NetworkPolicy
+# that limits who can reach the dataset webhook. The bearer token stops an
+# unauthenticated request; this policy stops a pod that has no business
+# calling the endpoint from even reaching it. The allow shape is the one
+# Part 02 ch.06 teaches.
+#
+# It selects only the EventSource's pods. Other pods in argo-events are not
+# affected. The cluster's CNI must enforce NetworkPolicy; a CNI that does not
+# enforce it accepts this object and ignores it.
+#
+# Pods that may publish a dataset carry the label
+#   ml.bookstore/role: dataset-publisher
+# and may run in argo-events or in a namespace that the namespaceSelector
+# names. Add a namespace to the list when a publisher lives elsewhere.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: recommender-dataset-ingress
+  namespace: argo-events
+  labels:
+    app.kubernetes.io/part-of: bookstore-ml
+    app.kubernetes.io/component: ml-pipeline-events
+spec:
+  # Argo Events labels each EventSource pod with eventsource-name. Confirm the
+  # label on a running pod with: kubectl get pods -n argo-events --show-labels
+  podSelector:
+    matchLabels:
+      eventsource-name: recommender-dataset
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: argo-events
+          podSelector:
+            matchLabels:
+              ml.bookstore/role: dataset-publisher
+      ports:
+        - protocol: TCP
+          port: 12000

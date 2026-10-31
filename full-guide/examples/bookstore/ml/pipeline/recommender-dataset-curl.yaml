@@ -1,0 +1,77 @@
+# Bookstore, Part 12 ch.07 "ML pipelines and workflows": a one-shot test
+# Pod that publishes a dataset-ready event to the EventSource, first without
+# the bearer token (refused, on purpose) and then with it (accepted).
+#
+# It replaces a bare `kubectl run --image=curl` line, which would not meet the
+# restricted level. Its image is pinned by digest. The curlimages/curl image
+# declares its user by name (curl_user), and runAsNonRoot can only verify a
+# numeric UID, so the Pod sets UID 100 and GID 101, the values that image's
+# /etc/passwd gives curl_user.
+#
+# The token comes from the Secret recommender-dataset-token, which the chapter
+# creates. This file contains no token.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: recommender-dataset-curl
+  namespace: argo-events
+  labels:
+    app.kubernetes.io/part-of: bookstore-ml
+    app.kubernetes.io/component: ml-pipeline-events
+automountServiceAccountToken: false
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: recommender-dataset-curl
+  namespace: argo-events
+  labels:
+    app.kubernetes.io/part-of: bookstore-ml
+    app.kubernetes.io/component: ml-pipeline-events
+    # The label the EventSource's NetworkPolicy admits.
+    ml.bookstore/role: dataset-publisher
+spec:
+  serviceAccountName: recommender-dataset-curl
+  automountServiceAccountToken: false
+  restartPolicy: Never
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 100
+    runAsGroup: 101
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: curl
+      # curlimages/curl 8.10.1, index digest.
+      image: curlimages/curl:8.10.1@sha256:d9b4541e214bcd85196d6e92e2753ac6d0ea699f0af5741f8c6cccbfcf00ef4b
+      command: ["/bin/sh", "-c"]
+      args:
+        - |
+          URL=http://recommender-dataset-eventsource-svc:12000/recommender-dataset-ready
+          BODY='{"dataset_uri":"pvc://recommender-model/"}'
+          # Deliberate refusal: no Authorization header.
+          curl -sS -o /dev/null -w 'without token: HTTP %{http_code}\n' \
+            -X POST -H 'content-type: application/json' -d "$BODY" "$URL" || true
+          curl -sS -o /dev/null -w 'with token: HTTP %{http_code}\n' \
+            -X POST -H 'content-type: application/json' \
+            -H "authorization: Bearer $TOKEN" -d "$BODY" "$URL"
+      env:
+        - name: TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: recommender-dataset-token
+              key: token
+      resources:
+        requests: { cpu: "10m",  memory: "16Mi" }
+        limits:   { cpu: "100m", memory: "64Mi" }
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop: ["ALL"]
+      volumeMounts:
+        - name: tmp
+          mountPath: /tmp
+  volumes:
+    - name: tmp
+      emptyDir: {}

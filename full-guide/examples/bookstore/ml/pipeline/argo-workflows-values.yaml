@@ -1,0 +1,57 @@
+# Bookstore, Part 12 ch.07: values for the argo/argo-workflows chart,
+# version 2.0.15 (Argo Workflows v4.1.6). Read against that chart's own
+# values.yaml; the keys below exist there with these names.
+#
+#   helm install argo-workflows argo/argo-workflows --version 2.0.15 \
+#     -n argo -f argo-workflows-values.yaml --wait
+#
+# The chart defaults do not pass Pod Security "restricted" (no pod-level
+# seccomp on the controller, and a root executor image by default). The
+# overrides below fix that. Each override names the default it replaces.
+
+# Keep the controller cluster-wide (a ClusterRole). Set this to true only
+# when the controller should manage workflows in its own namespace alone;
+# see ch.07 "Threats and controls".
+singleNamespace: false
+
+controller:
+  # Only bookstore-ml gets the per-namespace RBAC the chart generates. The
+  # default is the `default` namespace, where no pipeline runs.
+  workflowNamespaces:
+    - bookstore-ml
+  # Default: {}. The controller pod had no seccomp profile, which the
+  # restricted level requires at pod or container level.
+  podSecurityContext:
+    seccompProfile:
+      type: RuntimeDefault
+
+# The wait sidecar (argoexec) runs in every workflow Pod. Its default image
+# tag runs as root (USER 0). The -nonroot variant runs as UID 8737, which is
+# what lets workflow Pods keep runAsNonRoot: true.
+executor:
+  image:
+    nonroot: true
+  # Default: {}. Applied to the wait container.
+  securityContext:
+    runAsNonRoot: true
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: true
+    capabilities:
+      drop:
+        - ALL
+    seccompProfile:
+      type: RuntimeDefault
+
+# By default the chart adds a Role for workflowtaskresults and a RoleBinding
+# in each workflowNamespaces entry. This pipeline writes its own Role and
+# bindings (recommender-workflow.yaml), so the chart's copy is switched off.
+workflow:
+  serviceAccount:
+    create: false
+  rbac:
+    create: false
+
+# The UI server is not part of this pipeline. The argo CLI and kubectl both
+# reach the Kubernetes API directly, so the server can stay off.
+server:
+  enabled: false
