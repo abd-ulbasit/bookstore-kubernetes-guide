@@ -1,0 +1,272 @@
+# Transcript for 11-advanced-production-patterns/08-ha-control-plane-and-etcd.md.
+# Tier A: a kind cluster with one control-plane node. Kubernetes v1.37.0 node,
+# kubectl v1.37.2, kind v0.33.0, etcd 3.7.0 (registry.k8s.io/etcd:3.7.0-0).
+# Run on 2026-10-31 against the lab kind cluster sf-pilot.
+# Substitution: the chapter prints the reader's names. This run used these
+# names for them, in every command below:
+#   etcd-probe (namespace, ServiceAccount, Pod) -> p11-08-etcd-probe
+#   etcd-canary (Secret)                        -> p11-08-etcd-probe
+#   The node name in the chapter's sample output is sf-pilot-control-plane;
+#   the lab's node has that name, so the output below keeps it verbatim.
+# The probe manifest is the chapter's etcd-probe.yaml with the namespace name
+# substituted (sed 's/etcd-probe/p11-08-etcd-probe/g'). Nothing else changed.
+# Not run, and why:
+#   - The three-control-plane cluster (chapter sections 7 and 8). The heavy
+#     install lock was held when this run started (see step 0), so no
+#     three-member cluster was created and no quorum or node-loss test ran.
+#   - Section 9 (full-cluster restore). It needs a kubeadm node.
+#   - Manual compaction. The apiserver compacts every five minutes already.
+#   - No cloud resource was created.
+# What did not work the first time, and what the transcript keeps:
+#   - The first snapshot save timed out in the API server's exec stream
+#     ("keepalive ping failed"). The save was repeated through the node's
+#     container runtime (step 4b), and that run is the one the chapter shows.
+#   - The first defragmentation (step 5) hit etcdctl's default 5 s command
+#     timeout while the API server was overloaded. The second attempt (step 5b)
+#     found the etcd container restarted, so no defragmentation completed. The
+#     chapter shows the command and says the result was not captured.
+#   - Several reads failed with "Unable to connect to the server" while the API
+#     server was overloaded. They are kept; the reads that succeeded are shown.
+# Cleanup: the probe namespace stalled in Terminating on the lab cluster. Its
+# leftover ServiceAccounts were deleted and its finalizer was removed through
+# the finalize subresource. Those commands are not in this transcript.
+# Local paths in command lines and local error messages are replaced with
+# $LAB_SCRATCH, $LAB_REPO, and the lab host's ssh alias with lab-host. No cluster
+# output was changed.
+=== step 0: versions, flags, and what the static pod is ===
+$ kubectl version 2>&1 | grep -E 'Client Version|Server Version'
+Client Version: v1.37.2
+Server Version: v1.37.0
+[exit=0]
+$ ssh -o ConnectTimeout=8 lab-host '~/.local/bin/kind-v0.33.0 version'
+kind v0.33.0 go1.26.7 linux/amd64
+[exit=0]
+$ kubectl get nodes -o wide
+NAME                     STATUS   ROLES           AGE   VERSION   INTERNAL-IP   EXTERNAL-IP   OS-IMAGE                       KERNEL-VERSION             CONTAINER-RUNTIME
+sf-pilot-control-plane   Ready    control-plane   14h   v1.37.0   172.18.0.2    <none>        Debian GNU/Linux 13 (trixie)   7.0.0-38-generic (amd64)   containerd://2.3.4
+[exit=0]
+$ ETCDPOD=etcd-sf-pilot-control-plane
+$ kubectl -n kube-system get pod etcd-sf-pilot-control-plane -o jsonpath='{.spec.containers[0].image}{"\n"}'
+registry.k8s.io/etcd:3.7.0-0
+[exit=0]
+$ kubectl -n kube-system get pod etcd-sf-pilot-control-plane -o jsonpath='{.spec.containers[0].command}' | tr ',' '\n'
+["etcd"
+"--unsafe-no-fsync=true"
+"--advertise-client-urls=https://172.18.0.2:2379"
+"--cert-file=/etc/kubernetes/pki/etcd/server.crt"
+"--client-cert-auth=true"
+"--data-dir=/var/lib/etcd"
+"--feature-gates=InitialCorruptCheck=true"
+"--initial-advertise-peer-urls=https://172.18.0.2:2380"
+"--initial-cluster=sf-pilot-control-plane=https://172.18.0.2:2380"
+"--key-file=/etc/kubernetes/pki/etcd/server.key"
+"--listen-client-urls=https://127.0.0.1:2379
+https://172.18.0.2:2379"
+"--listen-metrics-urls=http://127.0.0.1:2381"
+"--listen-peer-urls=https://172.18.0.2:2380"
+"--name=sf-pilot-control-plane"
+"--peer-cert-file=/etc/kubernetes/pki/etcd/peer.crt"
+"--peer-client-cert-auth=true"
+"--peer-key-file=/etc/kubernetes/pki/etcd/peer.key"
+"--peer-trusted-ca-file=/etc/kubernetes/pki/etcd/ca.crt"
+"--snapshot-count=10000"
+"--trusted-ca-file=/etc/kubernetes/pki/etcd/ca.crt"
+"--watch-progress-notify-interval=5s"][exit=0]
+$ kubectl -n kube-system get pod etcd-sf-pilot-control-plane -o jsonpath='{.spec.hostNetwork}{"\n"}'
+true
+[exit=0]
+$ kubectl -n kube-system get pod kube-apiserver-sf-pilot-control-plane -o jsonpath='{.spec.containers[0].command}' | tr ',' '\n' | grep -E 'etcd|encryption|service-account-key|tls-cert'
+"--etcd-cafile=/etc/kubernetes/pki/etcd/ca.crt"
+"--etcd-certfile=/etc/kubernetes/pki/apiserver-etcd-client.crt"
+"--etcd-keyfile=/etc/kubernetes/pki/apiserver-etcd-client.key"
+"--etcd-servers=https://127.0.0.1:2379"
+"--service-account-key-file=/etc/kubernetes/pki/sa.pub"
+"--tls-cert-file=/etc/kubernetes/pki/apiserver.crt"
+[exit=0]
+$ kubectl -n kube-system exec etcd-sf-pilot-control-plane -- sh -c 'echo shell-present' 2>&1 | tail -1
+error: Internal error occurred: Internal error occurred: error executing command in container: failed to exec in container: failed to start exec "abe8119660a3435d74be24d2869481c844afd990b82675b0061d76b21857612a": OCI runtime exec failed: exec failed: unable to start container process: exec: "sh": executable file not found in $PATH
+[exit=0]
+$ kubectl -n kube-system exec etcd-sf-pilot-control-plane -- etcdutl version 2>&1 | head -2
+etcdutl version: 3.7.0
+API version: 3.7
+[exit=0]
+$ kubectl -n kube-system exec etcd-sf-pilot-control-plane -- etcdctl snapshot --help 2>&1 | sed -n '/Available Commands/,/^Flags/p' | head -12
+Available Commands:
+  save        Stores an etcd node backend snapshot to a given file
+
+Flags:
+[exit=0]
+$ kubectl -n kube-system exec kube-apiserver-sf-pilot-control-plane -- kube-apiserver --help 2>&1 | grep -A1 'etcd-compaction-interval'
+      --etcd-compaction-interval duration             The interval of compaction requests. If 0, the compaction request from apiserver is disabled. (default 5m0s)
+      --etcd-count-metric-poll-period duration        Frequency of polling etcd for number of resources per type. 0 disables the metric collection. (default 1m0s)
+[exit=0]
+$ kubectl -n kube-system exec etcd-sf-pilot-control-plane -- etcd --help 2>&1 | grep -A1 -E 'quota-backend-bytes|unsafe-no-fsync' | head -6
+  --quota-backend-bytes '0'
+    Sets the maximum size (in bytes) that the etcd backend database may consume. Exceeding this triggers an alarm and puts etcd in read-only mode. Set to 0 to use the default 2GiB limit.
+--
+  --unsafe-no-fsync 'false'
+    Disables fsync, unsafe, will cause data loss.
+[exit=0]
+$ cd $LAB_REPO && $LAB_SCRATCH/venv/bin/python -c "import yaml; list(yaml.safe_load_all(open('full-guide/examples/bookstore/platform/ha-kind-3cp.yaml'))); print('ha-kind-3cp.yaml: valid YAML (kind Cluster config)')"
+ha-kind-3cp.yaml: valid YAML (kind Cluster config)
+[exit=0]
+$ heavy_lock
+heavy_lock exit=1
+=== step 1: talk to etcd with its client certificates ===
+$ kubectl -n kube-system exec etcd-sf-pilot-control-plane -- etcdctl --endpoints=https://127.0.0.1:2379 --cacert=/etc/kubernetes/pki/etcd/ca.crt --cert=/etc/kubernetes/pki/etcd/server.crt --key=/etc/kubernetes/pki/etcd/server.key member list -w table
+┌─────────────────┬─────────┬────────────────────────┬─────────────────────────┬─────────────────────────┬────────────┐
+│       ID        │ STATUS  │          NAME          │       PEER ADDRS        │      CLIENT ADDRS       │ IS LEARNER │
+├─────────────────┼─────────┼────────────────────────┼─────────────────────────┼─────────────────────────┼────────────┤
+│ e58c878e0e01014 │ started │ sf-pilot-control-plane │ https://172.18.0.2:2380 │ https://172.18.0.2:2379 │      false │
+└─────────────────┴─────────┴────────────────────────┴─────────────────────────┴─────────────────────────┴────────────┘
+[exit=0]
+$ kubectl -n kube-system exec etcd-sf-pilot-control-plane -- etcdctl --endpoints=https://127.0.0.1:2379 --cacert=/etc/kubernetes/pki/etcd/ca.crt --cert=/etc/kubernetes/pki/etcd/server.crt --key=/etc/kubernetes/pki/etcd/server.key endpoint status -w table
+┌────────────────────────┬─────────────────┬─────────┬─────────────────┬─────────┬────────┬───────────────────────┬────────┬───────────┬────────────┬───────────┬────────────┬────────────────────┬────────┬──────────────────────────┬───────────────────┐
+│        ENDPOINT        │       ID        │ VERSION │ STORAGE VERSION │ DB SIZE │ IN USE │ PERCENTAGE NOT IN USE │ QUOTA  │ IS LEADER │ IS LEARNER │ RAFT TERM │ RAFT INDEX │ RAFT APPLIED INDEX │ ERRORS │ DOWNGRADE TARGET VERSION │ DOWNGRADE ENABLED │
+├────────────────────────┼─────────────────┼─────────┼─────────────────┼─────────┼────────┼───────────────────────┼────────┼───────────┼────────────┼───────────┼────────────┼────────────────────┼────────┼──────────────────────────┼───────────────────┤
+│ https://127.0.0.1:2379 │ e58c878e0e01014 │   3.7.0 │           3.7.0 │   49 MB │  12 MB │                   76% │ 2.1 GB │      true │      false │         3 │     151715 │             151715 │        │                          │             false │
+└────────────────────────┴─────────────────┴─────────┴─────────────────┴─────────┴────────┴───────────────────────┴────────┴───────────┴────────────┴───────────┴────────────┴────────────────────┴────────┴──────────────────────────┴───────────────────┘
+[exit=0]
+$ kubectl -n kube-system exec etcd-sf-pilot-control-plane -- etcdctl --endpoints=https://127.0.0.1:2379 --cacert=/etc/kubernetes/pki/etcd/ca.crt --cert=/etc/kubernetes/pki/etcd/server.crt --key=/etc/kubernetes/pki/etcd/server.key endpoint health -w table
+┌────────────────────────┬────────┬─────────────┬───────┐
+│        ENDPOINT        │ HEALTH │    TOOK     │ ERROR │
+├────────────────────────┼────────┼─────────────┼───────┤
+│ https://127.0.0.1:2379 │   true │ 13.931169ms │       │
+└────────────────────────┴────────┴─────────────┴───────┘
+[exit=0]
+$ kubectl -n kube-system exec etcd-sf-pilot-control-plane -- etcdctl --endpoints=https://127.0.0.1:2379 --cacert=/etc/kubernetes/pki/etcd/ca.crt --cert=/etc/kubernetes/pki/etcd/server.crt --key=/etc/kubernetes/pki/etcd/server.key alarm list; echo alarm-list-done
+alarm-list-done
+[exit=0]
+=== step 2: backend size ===
+$ kubectl -n kube-system exec etcd-sf-pilot-control-plane -- etcdctl --endpoints=https://127.0.0.1:2379 --cacert=/etc/kubernetes/pki/etcd/ca.crt --cert=/etc/kubernetes/pki/etcd/server.crt --key=/etc/kubernetes/pki/etcd/server.key endpoint status -w json | $LAB_SCRATCH/venv/bin/python -m json.tool | grep -E '"dbSize|"dbSizeInUse'
+            "dbSize": 48664576,
+            "dbSizeInUse": 12152832,
+            "dbSizeQuota": 2147483648,
+[exit=0]
+=== step 3: can a workload reach 2379, and does TLS refuse it ===
+$ sed 's/etcd-probe/p11-08-etcd-probe/g' $LAB_SCRATCH/tmp/etcd-probe.yaml > $LAB_SCRATCH/tmp/etcd-probe-lab.yaml && kubectl apply -f $LAB_SCRATCH/tmp/etcd-probe-lab.yaml
+namespace/p11-08-etcd-probe created
+serviceaccount/p11-08-etcd-probe created
+pod/p11-08-etcd-probe created
+[exit=0]
+$ kubectl -n p11-08-etcd-probe wait --for=jsonpath='{.status.phase}'=Failed pod/p11-08-etcd-probe --timeout=240s 2>&1 | tail -2
+pod/p11-08-etcd-probe condition met
+[exit=0]
+$ kubectl -n p11-08-etcd-probe get pod p11-08-etcd-probe -o wide 2>&1 | tail -2
+NAME                READY   STATUS   RESTARTS   AGE    IP            NODE                     NOMINATED NODE   READINESS GATES
+p11-08-etcd-probe   0/1     Error    0          119s   10.244.0.11   sf-pilot-control-plane   <none>           <none>
+[exit=0]
+$ kubectl -n p11-08-etcd-probe logs pod/p11-08-etcd-probe 2>&1 | tail -5
+curl: (55) OpenSSL SSL_read: OpenSSL/3.5.9: error:0A00045C:SSL routines::tlsv13 alert certificate required, errno 0
+[exit=0]
+$ kubectl -n p11-08-etcd-probe get pod p11-08-etcd-probe -o jsonpath='{.status.containerStatuses[0].state.terminated.exitCode}{"\n"}'
+55
+[exit=0]
+=== the same endpoint with the control-plane certificates works ===
+$ kubectl -n kube-system exec etcd-sf-pilot-control-plane -- etcdctl --endpoints=https://127.0.0.1:2379 --cacert=/etc/kubernetes/pki/etcd/ca.crt --cert=/etc/kubernetes/pki/etcd/server.crt --key=/etc/kubernetes/pki/etcd/server.key endpoint health -w table 2>&1
+┌────────────────────────┬────────┬─────────────┬───────┐
+│        ENDPOINT        │ HEALTH │    TOOK     │ ERROR │
+├────────────────────────┼────────┼─────────────┼───────┤
+│ https://127.0.0.1:2379 │   true │ 23.941232ms │       │
+└────────────────────────┴────────┴─────────────┴───────┘
+[exit=0]
+=== step 4: a snapshot holds Secret values ===
+$ kubectl -n p11-08-etcd-probe create secret generic etcd-canary --from-literal=token=canary-7f3a9c2e
+secret/etcd-canary created
+[exit=0]
+$ kubectl -n kube-system exec etcd-sf-pilot-control-plane -- etcdctl --endpoints=https://127.0.0.1:2379 --cacert=/etc/kubernetes/pki/etcd/ca.crt --cert=/etc/kubernetes/pki/etcd/server.crt --key=/etc/kubernetes/pki/etcd/server.key snapshot save /var/lib/etcd/etcd-canary.db 2>&1
+{"level":"info","ts":"2026-10-31T05:02:20.127739Z","caller":"snapshot/v3_snapshot.go:83","msg":"created temporary db file","path":"/var/lib/etcd/etcd-canary.db.part"}
+{"level":"info","ts":"2026-10-31T05:02:20.228258Z","logger":"client","caller":"v3/maintenance.go:236","msg":"opened snapshot stream; downloading"}
+{"level":"info","ts":"2026-10-31T05:02:22.238352Z","caller":"snapshot/v3_snapshot.go:96","msg":"fetching snapshot","endpoint":"https://127.0.0.1:2379"}
+{"level":"warn","ts":"2026-10-31T05:02:43.552582Z","logger":"client","caller":"v3/maintenance.go:304","msg":"failed to receive from snapshot stream; closing","error":"rpc error: code = Unavailable desc = keepalive ping failed to receive ACK within timeout"}
+Error: could not write snapshot: rpc error: code = Unavailable desc = keepalive ping failed to receive ACK within timeout
+command terminated with exit code 5
+[exit=5]
+$ docker cp sf-pilot-control-plane:/var/lib/etcd/etcd-canary.db $LAB_SCRATCH/tmp/etcd-canary.db 2>&1 && ls -l $LAB_SCRATCH/tmp/etcd-canary.db | awk '{print "snapshot bytes:", $5}'
+Error response from daemon: Could not find the file /var/lib/etcd/etcd-canary.db in container sf-pilot-control-plane
+[exit=1]
+$ grep -a -c 'canary-7f3a9c2e' $LAB_SCRATCH/tmp/etcd-canary.db
+grep: $LAB_SCRATCH/tmp/etcd-canary.db: No such file or directory
+[exit=2]
+$ rm -f $LAB_SCRATCH/tmp/etcd-canary.db; docker exec sf-pilot-control-plane rm -f /var/lib/etcd/etcd-canary.db; echo removed-local-and-node-copies
+removed-local-and-node-copies
+[exit=0]
+=== step 4b: the same snapshot, saved through the node runtime (the API server stream timed out in step 4) ===
+$ docker exec sf-pilot-control-plane sh -c 'rm -f /var/lib/etcd/etcd-canary.db /var/lib/etcd/etcd-canary.db.part; crictl exec $(crictl ps -q --name etcd | head -1) etcdctl --endpoints=https://127.0.0.1:2379 --cacert=/etc/kubernetes/pki/etcd/ca.crt --cert=/etc/kubernetes/pki/etcd/server.crt --key=/etc/kubernetes/pki/etcd/server.key snapshot save /var/lib/etcd/etcd-canary.db 2>&1 | tail -3'
+{"level":"info","ts":"2026-10-31T05:03:42.810201Z","caller":"snapshot/v3_snapshot.go:121","msg":"saved","path":"/var/lib/etcd/etcd-canary.db"}
+Snapshot saved at /var/lib/etcd/etcd-canary.db
+Server version 3.7.0
+[exit=0]
+$ docker cp sf-pilot-control-plane:/var/lib/etcd/etcd-canary.db $LAB_SCRATCH/tmp/etcd-canary.db 2>&1 && ls -l $LAB_SCRATCH/tmp/etcd-canary.db | awk '{print "snapshot bytes:", $5}'
+snapshot bytes: 48664608
+[exit=0]
+$ grep -a -c 'canary-7f3a9c2e' $LAB_SCRATCH/tmp/etcd-canary.db
+1
+[exit=0]
+$ rm -f $LAB_SCRATCH/tmp/etcd-canary.db; docker exec sf-pilot-control-plane rm -f /var/lib/etcd/etcd-canary.db /var/lib/etcd/etcd-canary.db.part; echo removed-local-and-node-copies
+removed-local-and-node-copies
+[exit=0]
+=== step 5: defragment the one member, then read the size ===
+$ kubectl -n kube-system exec etcd-sf-pilot-control-plane -- etcdctl --endpoints=https://127.0.0.1:2379 --cacert=/etc/kubernetes/pki/etcd/ca.crt --cert=/etc/kubernetes/pki/etcd/server.crt --key=/etc/kubernetes/pki/etcd/server.key endpoint status -w json | $LAB_SCRATCH/venv/bin/python -m json.tool | grep -E '"dbSize|"dbSizeInUse'
+            "dbSize": 48664576,
+            "dbSizeInUse": 8335360,
+            "dbSizeQuota": 2147483648,
+[exit=0]
+$ kubectl -n kube-system exec etcd-sf-pilot-control-plane -- etcdctl --endpoints=https://127.0.0.1:2379 --cacert=/etc/kubernetes/pki/etcd/ca.crt --cert=/etc/kubernetes/pki/etcd/server.crt --key=/etc/kubernetes/pki/etcd/server.key defrag 2>&1
+{"level":"warn","ts":"2026-10-31T05:04:52.971176Z","logger":"etcd-client","caller":"v3/retry_interceptor.go:68","msg":"retrying of unary invoker failed","target":"etcd-endpoints://0x164cfa253a00/127.0.0.1:2379","peer":"Peer{Addr: '127.0.0.1:2379', LocalAddr: '127.0.0.1:38120', AuthInfo: 'tls'}","method":"/etcdserverpb.Maintenance/Defragment","attempt":0,"error":"rpc error: code = DeadlineExceeded desc = context deadline exceeded"}
+Failed to defragment etcd member[https://127.0.0.1:2379]. took 5.006531169s. (context deadline exceeded)
+command terminated with exit code 1
+[exit=1]
+$ kubectl -n kube-system exec etcd-sf-pilot-control-plane -- etcdctl --endpoints=https://127.0.0.1:2379 --cacert=/etc/kubernetes/pki/etcd/ca.crt --cert=/etc/kubernetes/pki/etcd/server.crt --key=/etc/kubernetes/pki/etcd/server.key endpoint status -w json | $LAB_SCRATCH/venv/bin/python -m json.tool | grep -E '"dbSize|"dbSizeInUse'
+Error from server (Timeout): the server was unable to return a response in the time allotted, but may still be processing the request (get pods etcd-sf-pilot-control-plane)
+Expecting value: line 1 column 1 (char 0)
+[exit=1]
+$ kubectl -n kube-system exec etcd-sf-pilot-control-plane -- etcdctl --endpoints=https://127.0.0.1:2379 --cacert=/etc/kubernetes/pki/etcd/ca.crt --cert=/etc/kubernetes/pki/etcd/server.crt --key=/etc/kubernetes/pki/etcd/server.key alarm list; echo alarm-list-done
+Unable to connect to the server: EOF
+alarm-list-done
+[exit=0]
+=== step 6: the Lease that holds the scheduler and controller manager ===
+$ kubectl -n kube-system get lease kube-scheduler kube-controller-manager
+Unable to connect to the server: EOF
+Unable to connect to the server: EOF
+[exit=1]
+$ kubectl -n kube-system get lease kube-scheduler -o jsonpath='{.spec.holderIdentity}{"\n"}'
+Unable to connect to the server: EOF
+[exit=1]
+$ kubectl -n kube-system get lease kube-scheduler -o jsonpath='{.spec.leaseDurationSeconds}{"\n"}'
+Unable to connect to the server: EOF
+[exit=1]
+=== step 5b: defragment again through the node runtime, with a longer command timeout (step 5 hit etcdctl's default 5s) ===
+$ docker exec sf-pilot-control-plane sh -c 'crictl exec $(crictl ps -q --name etcd | head -1) etcdctl --help 2>&1 | grep -A1 -- --command-timeout'
+[exit=1]
+$ docker exec sf-pilot-control-plane sh -c 'crictl exec $(crictl ps -q --name etcd | head -1) etcdctl --endpoints=https://127.0.0.1:2379 --cacert=/etc/kubernetes/pki/etcd/ca.crt --cert=/etc/kubernetes/pki/etcd/server.crt --key=/etc/kubernetes/pki/etcd/server.key --command-timeout=120s endpoint status -w json 2>&1 | grep -E "dbSize"'
+[exit=1]
+$ docker exec sf-pilot-control-plane sh -c 'crictl exec $(crictl ps -q --name etcd | head -1) etcdctl --endpoints=https://127.0.0.1:2379 --cacert=/etc/kubernetes/pki/etcd/ca.crt --cert=/etc/kubernetes/pki/etcd/server.crt --key=/etc/kubernetes/pki/etcd/server.key --command-timeout=120s defrag 2>&1'
+E1031 05:08:35.871533  754737 remote_runtime.go:672] "Exec cmd from runtime service failed" err="rpc error: code = NotFound desc = failed to find container \"etcdctl\" in store: not found" containerID="etcdctl" cmd=["--endpoints=https://127.0.0.1:2379","--cacert=/etc/kubernetes/pki/etcd/ca.crt","--cert=/etc/kubernetes/pki/etcd/server.crt","--key=/etc/kubernetes/pki/etcd/server.key","--command-timeout=120s","defrag"]
+time="2026-10-31T05:08:35Z" level=fatal msg="execing command in container etcdctl: rpc error: code = NotFound desc = failed to find container \"etcdctl\" in store: not found"
+[exit=1]
+$ docker exec sf-pilot-control-plane sh -c 'crictl exec $(crictl ps -q --name etcd | head -1) etcdctl --endpoints=https://127.0.0.1:2379 --cacert=/etc/kubernetes/pki/etcd/ca.crt --cert=/etc/kubernetes/pki/etcd/server.crt --key=/etc/kubernetes/pki/etcd/server.key --command-timeout=120s endpoint status -w json 2>&1 | grep -E "dbSize"'
+[exit=1]
+$ docker exec sf-pilot-control-plane sh -c 'crictl exec $(crictl ps -q --name etcd | head -1) etcdctl --endpoints=https://127.0.0.1:2379 --cacert=/etc/kubernetes/pki/etcd/ca.crt --cert=/etc/kubernetes/pki/etcd/server.crt --key=/etc/kubernetes/pki/etcd/server.key --command-timeout=120s alarm list 2>&1; echo alarm-list-done'
+alarm-list-done
+[exit=0]
+=== step 6: the Lease that holds the scheduler and controller manager ===
+$ kubectl -n kube-system get lease kube-scheduler kube-controller-manager
+NAME                      HOLDER                                                        AGE
+kube-scheduler            sf-pilot-control-plane_c31bbbd1-ae69-4a7f-9fd6-47d8c1e2256f   14h
+kube-controller-manager   sf-pilot-control-plane_6a0f2bb1-06cd-4c17-8509-2d7857d9cee4   14h
+[exit=0]
+$ kubectl -n kube-system get lease kube-scheduler -o jsonpath='{.spec.holderIdentity}{"\n"}'
+sf-pilot-control-plane_c31bbbd1-ae69-4a7f-9fd6-47d8c1e2256f
+[exit=0]
+$ kubectl -n kube-system get lease kube-scheduler -o jsonpath='{.spec.leaseDurationSeconds}{"\n"}'
+15
+[exit=0]
+=== cleanup ===
+$ kubectl delete namespace p11-08-etcd-probe --wait=true --timeout=180s 2>&1
+namespace "p11-08-etcd-probe" deleted
+error: timed out waiting for the condition on namespaces/p11-08-etcd-probe
+[exit=1]
+$ kubectl get ns p11-08-etcd-probe 2>&1 | tail -1
+p11-08-etcd-probe   Terminating   12m
+[exit=0]

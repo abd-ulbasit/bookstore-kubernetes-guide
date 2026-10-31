@@ -118,6 +118,7 @@ guide yet). Part 00 ch.08 names the enforcer of each baseline field.
 | I3 | A caller reads Pod specs or runs commands through the kubelet | Anonymous kubelet auth off, webhook authorization | cluster | 05.06 <!-- link-later: 05.06 --> |
 | I4 | Application code reads a mounted ServiceAccount token | `automountServiceAccountToken: false` | review | 01.01, `#baseline-service-account` |
 | I5 | A Pod on the network reads the traffic of an edge that policy allows | Strict mTLS between meshed workloads, so plaintext never crosses the pod network | later | 11.04 (`10-peerauthentication-strict-mtls.yaml`); NetworkPolicy 02.06 still applies underneath |
+| I7 | Clear etcd traffic: a host on the path reads Secrets off etcd traffic, or a client talks to etcd with no certificate | Peer and client TLS, with client certificates required (`--client-cert-auth`, `--peer-client-cert-auth`); port 2379 reached only from control-plane nodes | cluster | 11.08, `#threats-and-controls`; 05.04; 05.06 <!-- link-later: 05.06 --> |
 
 ### Denial of service
 
