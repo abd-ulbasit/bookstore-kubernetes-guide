@@ -14,13 +14,19 @@ GET  /v1/models/recommender              -> model metadata (KServe-shaped)
 POST /v1/models/recommender:predict      -> top-K recommendations for book_id
 GET  /recommend?book_id=<id>&k=<k>       -> friendly equivalent (catalog uses)
 
+Every endpoint except /healthz and /ready requires
+`Authorization: Bearer <token>`. The token is read from the file named by
+AUTH_TOKEN_FILE at startup. If that variable is unset or the token is shorter
+than 32 characters, the process refuses to start (fail closed). The probes stay
+open so the kubelet can check the Pod without holding the token.
+
 The :predict body follows the v1 prediction protocol used by KServe-style
 runtimes (sklearn, pytorch, tensorflow, huggingface) — a small JSON envelope
 with `instances` — so the same surface works whether this image is run as a
 plain Deployment OR as a KServe `InferenceService` `predictor` (Part 12 ch.06).
 
 Request:
-  {"instances": [{"book_id": 1, "k": 5}, ...]}
+  {"instances": [{"book_id": 1, "k": 5}, ...]}   (1 to 50 instances)
 
 Response:
   {"predictions": [{"book_id": 1, "k": 5,
@@ -30,13 +36,14 @@ Response:
 """
 from __future__ import annotations
 
+import hmac
 import logging
 import os
 from contextlib import asynccontextmanager
 from typing import Any
 
 import joblib
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import Depends, FastAPI, Header, HTTPException, Query
 from pydantic import BaseModel, Field
 
 log = logging.getLogger("recommender")
@@ -48,6 +55,34 @@ logging.basicConfig(
 MODEL_DIR = os.environ.get("MODEL_DIR", "/workspace/model")
 MODEL_NAME = os.environ.get("MODEL_NAME", "recommender")
 DEFAULT_K = int(os.environ.get("DEFAULT_K", "5"))
+AUTH_TOKEN_FILE = os.environ.get("AUTH_TOKEN_FILE", "")
+MAX_INSTANCES = 50
+
+_TOKEN: str | None = None
+
+
+def load_token(path: str) -> str:
+    """Read the shared caller token. A missing or short token stops startup."""
+    if not path:
+        raise RuntimeError("AUTH_TOKEN_FILE is not set; refusing to serve")
+    with open(path, encoding="utf-8") as fh:
+        token = fh.read().strip()
+    if len(token) < 32:
+        raise RuntimeError("the token in AUTH_TOKEN_FILE is shorter than 32 characters")
+    return token
+
+
+def require_caller(authorization: str | None = Header(default=None)) -> None:
+    """Admit a request only when it carries the shared bearer token."""
+    scheme, _, presented = (authorization or "").partition(" ")
+    if _TOKEN is None or scheme != "Bearer" or not hmac.compare_digest(
+        presented.encode("utf-8"), _TOKEN.encode("utf-8")
+    ):
+        raise HTTPException(
+            status_code=401,
+            detail="missing or invalid bearer token",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
 
 
 # ----- Model wrapper -------------------------------------------------------
@@ -107,6 +142,8 @@ def get_model() -> Model:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    global _TOKEN
+    _TOKEN = load_token(AUTH_TOKEN_FILE)  # fail closed before any traffic
     get_model()  # surface load errors immediately
     yield
 
@@ -120,7 +157,8 @@ class PredictInstance(BaseModel):
 
 
 class PredictRequest(BaseModel):
-    instances: list[PredictInstance]
+    # The cap bounds the work one request can ask for (OWASP API4:2023).
+    instances: list[PredictInstance] = Field(..., min_length=1, max_length=MAX_INSTANCES)
 
 
 @app.get("/healthz")
@@ -135,12 +173,12 @@ def ready() -> dict[str, str]:
     return {"status": "ready"}
 
 
-@app.get("/v1/models/recommender")
+@app.get("/v1/models/recommender", dependencies=[Depends(require_caller)])
 def model_meta() -> dict[str, Any]:
     return get_model().metadata()
 
 
-@app.post("/v1/models/recommender:predict")
+@app.post("/v1/models/recommender:predict", dependencies=[Depends(require_caller)])
 def predict(body: PredictRequest) -> dict[str, Any]:
     m = get_model()
     preds = []
@@ -153,7 +191,7 @@ def predict(body: PredictRequest) -> dict[str, Any]:
     return {"predictions": preds}
 
 
-@app.get("/recommend")
+@app.get("/recommend", dependencies=[Depends(require_caller)])
 def recommend(
     book_id: int = Query(..., ge=1),
     k: int = Query(DEFAULT_K, ge=1, le=100),

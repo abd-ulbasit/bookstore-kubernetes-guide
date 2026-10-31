@@ -72,6 +72,7 @@ spec:
     maxReplicas: 5
     timeout: 30
     # Restricted-compliant PodSpec carried into the Knative Revision.
+    serviceAccountName: recommender-sa     # from recommender-security.yaml
     automountServiceAccountToken: false
     securityContext:                       # pod-level — restricted
       runAsNonRoot: true
@@ -95,6 +96,8 @@ spec:
             value: /workspace/model
           - name: MODEL_NAME
             value: recommender
+          - name: AUTH_TOKEN_FILE
+            value: /workspace/auth/token
         resources:
           requests:
             cpu: "100m"
@@ -119,6 +122,9 @@ spec:
           - name: model
             mountPath: /workspace/model
             readOnly: true
+          - name: caller-token
+            mountPath: /workspace/auth
+            readOnly: true
           - name: scratch
             mountPath: /tmp
     volumes:
@@ -126,6 +132,10 @@ spec:
         persistentVolumeClaim:
           claimName: recommender-model
           readOnly: true
+      - name: caller-token                 # created at apply time, never in Git
+        secret:
+          secretName: recommender-caller-token
+          defaultMode: 0440
       - name: scratch
         emptyDir:
           sizeLimit: 64Mi

@@ -1,0 +1,78 @@
+# Bookstore, Part 12 ch.06 "Model serving and inference": the three objects
+# that shape who can reach the recommender and what it may cost, applied
+# before the Deployment:
+#
+#   1. ServiceAccount recommender-sa      the serving Pod's own identity; it
+#                                         calls no API, so it mounts no token.
+#   2. NetworkPolicy recommender-allow-callers
+#                                         the ingress allow-list. It adds to
+#                                         the default-deny that ch.01 applied
+#                                         to bookstore-ml; it does not replace it.
+#   3. ResourceQuota recommender-quota    a ceiling on what the namespace can
+#                                         request, so a scale-up cannot run
+#                                         up the bill without limit.
+#
+# The allow-list selects the catalog and storefront Pods in the bookstore
+# namespace by their `app` label. A NetworkPolicy takes effect only where the
+# cluster's network plugin enforces it. Check that on your cluster: the lab run
+# (chapter section 2) shows a labelled caller admitted and an unlabelled Pod
+# refused.
+#
+# The NetworkPolicy is not authentication. Any Pod that carries the labels can
+# still connect. The bearer token in the Deployment is the endpoint's check.
+#
+# Apply in bookstore-ml after the namespace from ch.01 exists:
+#   kubectl apply -f examples/bookstore/ml/serve/recommender-security.yaml
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: recommender-sa
+  namespace: bookstore-ml
+  labels:
+    app.kubernetes.io/part-of: bookstore-ml
+    app.kubernetes.io/component: recommender-serve
+automountServiceAccountToken: false
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: recommender-allow-callers
+  namespace: bookstore-ml
+  labels:
+    app.kubernetes.io/part-of: bookstore-ml
+    app.kubernetes.io/component: recommender-serve
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/component: recommender-serve
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        # One `from` entry holding both selectors: the source must match the
+        # namespace AND the Pod label.
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: bookstore
+          podSelector:
+            matchExpressions:
+              - key: app
+                operator: In
+                values: ["catalog", "storefront"]
+      ports:
+        - protocol: TCP
+          port: 8080
+---
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: recommender-quota
+  namespace: bookstore-ml
+  labels:
+    app.kubernetes.io/part-of: bookstore-ml
+spec:
+  hard:
+    # Five replicas of the Deployment at 100m CPU request and 512Mi memory
+    # limit. Scaling past five is refused by the ReplicaSet controller, not
+    # silently allowed. The 01.03 chapter explains quota mechanics.
+    requests.cpu: "500m"
+    limits.memory: 2560Mi
