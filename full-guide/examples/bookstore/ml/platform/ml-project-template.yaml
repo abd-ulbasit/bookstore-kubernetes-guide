@@ -1,0 +1,48 @@
+apiVersion: scaffolder.backstage.io/v1beta3
+kind: Template
+metadata:
+  name: ml-project
+  title: New ML project (paved road)
+spec:
+  owner: platform-team
+  type: ml-project
+  parameters:
+    - title: Team
+      required: [team, size, gpuCeiling]
+      properties:
+        team:
+          title: Team name
+          type: string
+          maxLength: 30
+          pattern: '^[a-z][a-z0-9-]{1,28}[a-z0-9]$'
+        size:
+          title: Namespace size
+          type: string
+          enum: ["xs", "s", "m", "l"]
+          default: "s"
+        gpuCeiling:
+          title: GPUs the team may hold at once
+          type: integer
+          minimum: 0
+          maximum: 8        # example cap; set it from the cluster's GPU count
+          default: 2
+  steps:
+    - id: fetch
+      name: Render the skeleton
+      action: fetch:template
+      input:
+        url: ./skeleton     # namespace, LocalQueue, ResourceQuota, WorkflowTemplate, InferenceService
+        values:
+          team: ${{ parameters.team }}
+          size: ${{ parameters.size }}
+          gpuCeiling: ${{ parameters.gpuCeiling }}
+    - id: publish
+      name: Create the team repository
+      action: publish:github
+      input:
+        repoUrl: github.com?owner=example-org&repo=${{ parameters.team }}-ml
+    - id: register
+      name: Register in the catalog
+      action: catalog:register
+      input:
+        repoContentsUrl: ${{ steps.publish.output.repoContentsUrl }}

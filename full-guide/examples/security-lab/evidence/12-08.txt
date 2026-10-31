@@ -1,0 +1,77 @@
+# Transcript for 12-kubernetes-for-machine-learning/08-ml-platform-cost-and-mlops.md,
+# lab steps 0 to 5 (the dry-run path: no chart installed, no Pod started).
+# Tier A: a kind cluster that the lab owns. kubectl v1.37.2, Helm v4.1.4,
+# chart opencost/opencost 2.5.33 (app 1.121.3).
+# Recorded by running examples/security-lab/labs/12-08.sh from full-guide/.
+# The lab used its own namespaces, p12-08-opencost, p12-08-ml and p12-08-mlflow.
+# The chapter names opencost, bookstore-ml and mlflow and applies the same
+# manifests. Captured output lines name no namespace, so no name is substituted
+# in them. The Namespace objects are created in step 1 and are not in the
+# captured blocks.
+# The lab cluster has a different name from the guide's, and so does its node.
+# The heavy-install lock was held by another worker at the start, so no chart
+# was installed. OpenCost and MLflow were rendered or written out and sent to
+# the server as dry runs. No image was pulled. Step 0 reads the image digests
+# from the registries with docker buildx imagetools.
+# The bitnami/mlflow tag named by the Bitnami chart does not resolve on the
+# registry (step 0), so the Bitnami chart is not used in this chapter.
+# What did not work the first time: the first run printed a local temporary
+# directory in the quota denial line. The script now runs from its own work
+# directory, and this transcript is the second run.
+$ /private/tmp/claude-501/-Users-basit-projects-abd-ulbasit/f7ab4f3e-ba11-49c8-a9ec-0eeba9d1be7f/scratchpad/bin/kubectl version --client
+Client Version: v1.37.2
+$ helm version --short
+v4.1.4+g05fa379
+$ helm show chart opencost/opencost --version 2.5.33
+appVersion: 1.121.3
+version: 2.5.33
+$ docker buildx imagetools inspect ghcr.io/opencost/opencost:1.121.3 (digest)
+sha256:4cdd173253e5abba048dfe2cfa968707a5b59d774157d5356940d0d923a6c281$ docker buildx imagetools inspect ghcr.io/opencost/opencost-ui:1.121.3 (digest)
+sha256:65dca449aef1fd8fdacca5988ffdbdea015663d3f710a4c3f3af30abb3630fe1$ docker buildx imagetools inspect ghcr.io/mlflow/mlflow:v3.3.2 (digest)
+sha256:b166428a3ab479e396f14d671987a70b27741a8d9b22f9d69a559c1fbf09d551$ docker buildx imagetools inspect docker.io/bitnami/mlflow:3.3.2-debian-12-r0
+ERROR: docker.io/bitnami/mlflow:3.3.2-debian-12-r0: not found
+$ /private/tmp/claude-501/-Users-basit-projects-abd-ulbasit/f7ab4f3e-ba11-49c8-a9ec-0eeba9d1be7f/scratchpad/bin/kubectl apply -f opencost-namespace.yaml  (one namespace per chapter block; all three here)
+namespace/p12-08-opencost created
+namespace/p12-08-ml created
+namespace/p12-08-mlflow created
+$ APISERVER_IP=$(kubectl get endpoints kubernetes -n default -o jsonpath=...)
+API server endpoint address read from the cluster: 172.18.0.2
+$ sed "s#192.0.2.10/32#${APISERVER_IP}/32#" opencost-netpol.yaml | kubectl apply -f -
+networkpolicy.networking.k8s.io/default-deny created
+networkpolicy.networking.k8s.io/opencost-api-and-prometheus created
+$ helm template opencost opencost/opencost --version 2.5.33 -n p12-08-opencost -f opencost-values.yaml | kubectl apply --dry-run=server -f -
+helm template exit: 0
+serviceaccount/opencost created (server dry run)
+clusterrole.rbac.authorization.k8s.io/opencost created (server dry run)
+clusterrolebinding.rbac.authorization.k8s.io/opencost created (server dry run)
+service/opencost created (server dry run)
+deployment.apps/opencost created (server dry run)
+$ grep -c 'runAsUser: 1001' rendered objects
+1
+$ grep image: rendered objects
+image: ghcr.io/opencost/opencost:1.121.3@sha256:4cdd173253e5abba048dfe2cfa968707a5b59d774157d5356940d0d923a6c281
+$ kubectl apply -f ml-job-cap.yaml
+resourcequota/ml-job-cap created
+$ kubectl apply -f cap-probe.yaml
+job.batch/cap-probe created
+$ sed 's/name: cap-probe$/name: cap-probe-2/' cap-probe.yaml | kubectl apply -f -
+job.batch/cap-probe-2 created
+$ # Deliberate denial: a third Job over the cap, sent as a server dry run.
+$ sed 's/name: cap-probe$/name: cap-probe-3/' cap-probe.yaml > cap-probe-3.yaml
+$ kubectl apply --dry-run=server -f cap-probe-3.yaml
+Error from server (Forbidden): error when creating "cap-probe-3.yaml": jobs.batch "cap-probe-3" is forbidden: exceeded quota: ml-job-cap, requested: count/jobs.batch=1, used: count/jobs.batch=2, limited: count/jobs.batch=2
+$ kubectl get resourcequota ml-job-cap -n p12-08-ml
+NAME         REQUEST                 LIMIT   AGE
+ml-job-cap   count/jobs.batch: 2/2           1s
+$ kubectl apply --dry-run=server -f mlflow.yaml
+serviceaccount/mlflow created (server dry run)
+networkpolicy.networking.k8s.io/default-deny created (server dry run)
+networkpolicy.networking.k8s.io/allow-bookstore-ml created (server dry run)
+service/mlflow created (server dry run)
+deployment.apps/mlflow created (server dry run)
+$ kubectl get networkpolicy -n p12-08-mlflow
+No resources found in p12-08-mlflow namespace.
+$ kubectl delete namespace p12-08-opencost p12-08-ml p12-08-mlflow --wait=false
+namespace "p12-08-opencost" deleted
+namespace "p12-08-ml" deleted
+namespace "p12-08-mlflow" deleted
