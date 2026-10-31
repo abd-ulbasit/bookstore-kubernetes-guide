@@ -26,6 +26,7 @@
 09-end-to-end-bookstore/
 10-cloud-and-managed-kubernetes/
 11-advanced-production-patterns/
+12-kubernetes-for-machine-learning/
 13-grand-capstone-bookstore-platform/
 14-eks-in-production-a-to-z/
 15-day-to-day-production-ops/

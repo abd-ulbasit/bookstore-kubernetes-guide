@@ -161,6 +161,10 @@ versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Bookstore runs behind Traefik under `restricted` on a kind cluster, with the
   edge answer, a NetworkPolicy refusal and a restricted refusal captured, and
   `09-end-to-end-bookstore/` joins the enforced list.
+- Part 12 Kubernetes for machine learning (12.01 to 12.08) is rewritten
+  security-first, with the default-deny, Kueue and JobSet runs recorded on a
+  kind cluster, GPU behaviour cited and not run, and
+  `12-kubernetes-for-machine-learning/` joins the enforced list.
 
 ### Fixed
 - Standalone EKS add-ons (kube-proxy, CoreDNS, EBS CSI) now follow
