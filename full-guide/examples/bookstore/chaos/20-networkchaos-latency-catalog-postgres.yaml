@@ -25,22 +25,10 @@
 # chaos-mesh namespace — NOT bookstore); the catalog Pods themselves are NOT
 # mutated and stay PSA-restricted-compliant. `kubectl delete -f` aborts early.
 #
-# !!! CRD-INTRINSIC DRY-RUN (identical precedent to 18-/51-/70-/83-/argocd) !!!
-#   `NetworkChaos` is a Chaos Mesh CRD (chaos-mesh.org/v1alpha1). WITHOUT
-#   Chaos Mesh installed a client dry-run prints:
+# Dry run before Chaos Mesh is installed: a client dry run prints
 #     no matches for kind "NetworkChaos" in version "chaos-mesh.org/v1alpha1"
-#   EXPECTED, schema-correct — Chaos Mesh CRDs/controller must be installed
-#   first. Whole-dir dry-run prints this for CRD-backed files only and
-#   continues. Schema verified against Chaos Mesh chaos-mesh.org/v1alpha1
-#   NetworkChaos (action: delay).
-#
-# Requires: Chaos Mesh installed (own ns); the Bookstore running (catalog +
-#   postgres + 80-/81- so the SLO series exist to observe).
-# Apply:
-#   kubectl apply -f examples/bookstore/chaos/20-networkchaos-latency-catalog-postgres.yaml
-#   # observe: catalog p95 rises in the metrics; CatalogHighErrorRate should
-#   #          NOT fire if timeouts/pooling are correct (the hypothesis).
-#   kubectl delete -f examples/bookstore/chaos/20-networkchaos-latency-catalog-postgres.yaml
+# That is expected until the chart is installed (chapter Hands-on). The
+# field names were checked against the chaos-mesh 2.8.7 CRDs.
 apiVersion: chaos-mesh.org/v1alpha1
 kind: NetworkChaos
 metadata:

@@ -9,8 +9,10 @@
 > chaos as a **CI/CD gate** ([Part 07](../07-delivery/03-cicd-pipeline.md));
 > and validating against the Bookstore's **SLOs/PDBs** ([Part 06 ch.05](../06-production-readiness/05-reliability-and-disruptions.md))
 > — applied by running pod-kill, network-latency, and CPU-stress experiments
-> against the running Bookstore and proving the storefront stays up, the
-> catalog PDB holds, and the SLO is preserved.
+> against the running Bookstore and checking that the storefront stays up,
+> the catalog PDB holds, and the SLO is preserved. The chaos tooling is the
+> one part of this chapter that needs a privileged namespace, so it gets a
+> scoped install.
 
 **Estimated time:** ~45 min read · ~120 min hands-on
 **Prerequisites:** [Part 06 ch.05](../06-production-readiness/05-reliability-and-disruptions.md) — PDBs + SLOs this chapter exercises · [Part 06 ch.01](../06-production-readiness/01-observability-metrics.md) — metrics that prove steady-state · [Part 07 ch.03](../07-delivery/03-cicd-pipeline.md) — CI/CD gate this chapter plugs chaos into
@@ -98,6 +100,18 @@ The value is entirely in the discipline — the experiment is the cheap part;
 the steady-state claim, the small scope, and the observed verdict are the
 chapter.
 
+## Threats and controls
+
+Chaos tooling works by breaking things on purpose, and that reach is the
+risk. The daemon runs with node privilege, and the controller can delete
+Pods. The table names the one threat specific to this chapter and the
+controls it teaches. The workloads under test keep the baseline they already
+carry, so they add no row.
+
+| ID | Threat | Control this chapter teaches | Deeper |
+|----|--------|------------------------------|--------|
+| E9 | The chaos daemon runs privileged on every node, so a compromised daemon reaches the node. The controller can also delete Pods outside the workload under test. | The daemon runs in its own `chaos-mesh` namespace, enforced at `privileged` because no lower level admits it, with `audit` and `warn` at `restricted`. The controller is namespace-scoped with `clusterScoped: false`. Optional features stay off. The namespace is registered. | [05.02](../05-security/02-pod-security.md), Pod Security levels; the registry entry in `security/namespace-exceptions.yaml` |
+
 ## Diagrams
 
 ### Diagram A — the chaos loop: hypothesis → inject → observe (SLO) → learn → automate (Mermaid)
@@ -130,7 +144,7 @@ flowchart TB
   IOChaos       fault | delay  (filesystem)               ► tests storage paths
   StressChaos   cpu | memory                              ► tests limits + HPA
   TimeChaos     clock skew                                ► tests time logic
-  DNSChaos      resolution error                          ► tests resolver/retry
+  DNSChaos      resolution error (DNS server on)         ► tests resolver/retry
 
  BLAST-RADIUS LADDER — climb only as confidence grows ──────────────────────
    1. mode: one          one Pod, 60s, staging        ◄═ START HERE
@@ -156,6 +170,16 @@ their existing labels (`app: catalog` / `app: postgres`, verified against
 `raw-manifests/10-`/`20-`) and inject nothing into them (the same additive
 discipline as the mesh/ESO/operator precedents).
 
+> **What the lab run covered.** The output in this chapter comes from a lab
+> cluster, and its namespaces carry a `p11-07` prefix, so the names in the
+> output differ from the commands. The run installed Chaos Mesh 2.8.7 and
+> checked its RBAC, its daemon privilege and the chart's admission behaviour.
+> It did not run the three experiments. The lab's control plane was unstable,
+> postgres stayed Pending, and the run never got the catalog to Ready. Treat
+> the experiment steps as checked against the CRD schema and by reading, not
+> as observed here. kube-prometheus-stack and metrics-server were not
+> installed in this run.
+
 We will: (0) self-bootstrap the Bookstore *with* its PDB/HPA/SLO; (1) install
 **Chaos Mesh** (pinned Helm, own namespace) and justify it over Litmus;
 (2) **Experiment 1** — pod-kill a catalog Pod, PDB holds; (3) **Experiment 2**
@@ -170,7 +194,8 @@ CPU stress, HPA reacts; (5) chain them as a **game day Workflow / CI gate**.
 > Chaos Mesh's fault-injection DaemonSet is privileged and runs in **its own
 > `chaos-mesh` namespace**, never `bookstore`; the Bookstore Pods are *not*
 > mutated and stay PSA-`restricted`-compliant throughout. Every manifest
-> dry-run runs with **no cluster**.
+> dry run checks it against the installed CRDs
+> (`kubectl apply --dry-run=server`).
 
 ### 0. Prerequisites — the Bookstore with PDB + HPA + the SLO-oracle stack (self-bootstrapping)
 
@@ -225,7 +250,7 @@ helm repo add metrics-server https://kubernetes-sigs.github.io/metrics-server/
 helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
 helm repo update
 helm install metrics-server metrics-server/metrics-server \
-  -n kube-system --version 3.12.2 --set 'args={--kubelet-insecure-tls}' --wait   # kind: insecure kubelet TLS
+  -n kube-system --version 3.12.2 --set 'args={--kubelet-insecure-tls}' --wait   # kind only: kubelet certificates do not verify
 helm install kube-prom prometheus-community/kube-prometheus-stack \
   -n monitoring --create-namespace --version 65.1.1 --wait                       # Prometheus Operator
 kubectl -n monitoring rollout status deploy/kube-prom-kube-prometheus-operator
@@ -238,47 +263,173 @@ kubectl get servicemonitor,prometheusrule -n bookstore     # the SLO oracle is n
 #  NOT bookstore; the catalog/postgres Pods stay PSA-restricted-compliant.)
 ```
 
-### 1. Install Chaos Mesh (pinned Helm, own namespace) — and why Chaos Mesh
+### 1. Install Chaos Mesh in its own namespace
 
 **Why Chaos Mesh over Litmus for this guide:** Chaos Mesh models each fault as
-a **typed CRD** (`PodChaos`/`NetworkChaos`/`StressChaos`/…) with a precise
-label `selector` and `duration` — which maps cleanly onto this guide's
-established CRD-intrinsic-note discipline and the Bookstore's label model, has
-a focused dashboard, and a `Workflow` kind for game days. (LitmusChaos is an
-equally valid CNCF project, more hub/experiment-catalog and `ChaosEngine`/
-`ChaosExperiment`-workflow oriented; the *principles* are identical — the
-choice here is about the cleanest CRD-per-fault fit.) Install via the **pinned
-Helm chart** — per this guide's rule, **never** a
-`releases/latest/download/<PINNED-FILE>.yaml` URL (same precedent as
-Kyverno/KEDA/Argo CD/Istio/Vault):
+a **typed CRD** (`PodChaos`, `NetworkChaos`, `StressChaos`, and so on) with a
+label `selector` and a `duration`. That fits the Bookstore's label model, and it
+has a focused dashboard and a `Workflow` kind for game days. LitmusChaos is an
+equally valid CNCF project with a different model of experiments. The
+principles are the same. The choice here is the cleanest fit of one CRD per
+fault.
+
+Create the namespace and label it before anything else lands in it. The daemon
+needs privilege, so the namespace enforces `privileged`. Audit and warn stay at
+`restricted`, so any Pod that falls short of that profile is recorded in the
+audit log and returned as a warning. Only the daemon is meant to be excused:
 
 ```sh
-CHAOS_MESH_CHART_VERSION=2.7.0     # chaos-mesh/chaos-mesh Helm chart (pin)
-helm repo add chaos-mesh https://charts.chaos-mesh.org
-helm repo update
-helm install chaos-mesh chaos-mesh/chaos-mesh \
-  -n chaos-mesh --create-namespace \
-  --version "$CHAOS_MESH_CHART_VERSION" \
-  --set chaosDaemon.runtime=containerd \
-  --set chaosDaemon.socketPath=/run/containerd/containerd.sock --wait
-kubectl -n chaos-mesh rollout status deploy/chaos-controller-manager
-kubectl -n chaos-mesh get pods    # controller-manager, chaos-daemon (DaemonSet), dashboard
-#   (chaos-daemon is privileged and runs in chaos-mesh — NOT bookstore. It
-#    injects faults into target Pods' namespaces via the node; the Bookstore
-#    Pods themselves are never mutated and stay PSA-restricted-compliant.)
+kubectl create namespace chaos-mesh
+kubectl label namespace chaos-mesh \
+  pod-security.kubernetes.io/enforce=privileged \
+  pod-security.kubernetes.io/audit=restricted \
+  pod-security.kubernetes.io/warn=restricted
 ```
 
-Installing Chaos Mesh created the `chaos-mesh.org` CRDs. **This is what makes
-the experiment manifests dry-runnable** — before this, a client dry-run prints
-`no matches for kind "PodChaos"` (the documented CRD-intrinsic behaviour; each
-file header — the exact precedent of `raw-manifests/70-`/`83-`/`51-`/`argocd/`).
+Check the labels. The lab run printed this table:
 
-### 2. Experiment 1 — pod-kill a catalog Pod; the PDB holds
+```sh
+kubectl get namespaces chaos-mesh bookstore \
+  -L pod-security.kubernetes.io/enforce -L pod-security.kubernetes.io/audit \
+  -L pod-security.kubernetes.io/warn
+```
 
-**Hypothesis:** killing one of catalog's 3 replicas keeps catalog at ≥2 Ready
-(PDB `minAvailable: 2`), the storefront stays up, and the catalog SLO does not
-fire. Apply [`chaos/10-podchaos-kill-catalog.yaml`](../examples/bookstore/chaos/10-podchaos-kill-catalog.yaml)
-(`mode: one` — the smallest blast radius; selector = the real `app: catalog`
+<!-- gate: output -->
+```text
+NAME               STATUS   AGE   ENFORCE      AUDIT        WARN
+p11-07-bookstore   Active   1s    restricted   restricted   restricted
+p11-07-chaos       Active   0s    privileged   restricted   restricted
+```
+
+Why `privileged` and not a lower level. The chaos daemon sets `hostPID: true`,
+mounts three `hostPath` volumes (the container runtime socket, `/sys` and
+`/lib/modules`), and runs a privileged container. Baseline forbids all three.
+The chart can drop the privileged flag with `chaosDaemon.privileged: false`,
+but `hostPID` and the `hostPath` mounts stay, and the capability list that
+replaces the flag includes `SYS_ADMIN` and `NET_ADMIN`, which baseline also
+forbids. No lower level admits the daemon, so the namespace is `privileged`.
+The rules are in the
+[Pod Security Standards](https://kubernetes.io/docs/concepts/security/pod-security-standards/#baseline).
+A server dry run shows the rules the daemon breaks at `restricted`, the level
+the audit and warn labels use. Render the chart and dry-run the result:
+
+```sh
+helm template chaos-mesh chaos-mesh/chaos-mesh --version 2.8.7 -n chaos-mesh \
+  -f examples/bookstore/chaos/helm/chaos-mesh-values.yaml > chaos-mesh-rendered.yaml
+kubectl apply --dry-run=server -f chaos-mesh-rendered.yaml
+```
+
+The first warning belongs to the daemon. It lists the host PID, the privileged
+flag, the `hostPath` volumes and the capability rules that `restricted`
+breaks. Baseline forbids the first three as well:
+
+<!-- gate: output -->
+```text
+Warning: would violate PodSecurity "restricted:latest": host namespaces (hostPID=true), privileged (container "chaos-daemon" must not set securityContext.privileged=true), allowPrivilegeEscalation != false (container "chaos-daemon" must set securityContext.allowPrivilegeEscalation=false), unrestricted capabilities (container "chaos-daemon" must set securityContext.capabilities.drop=["ALL"]; container "chaos-daemon" must not include "SYS_PTRACE" in securityContext.capabilities.add), restricted volume types (volumes "socket-path", "sys-path", "lib-modules" use restricted volume type "hostPath"), runAsNonRoot != true (pod or container "chaos-daemon" must set securityContext.runAsNonRoot=true), seccompProfile (pod or container "chaos-daemon" must set securityContext.seccompProfile.type to "RuntimeDefault" or "Localhost")
+daemonset.apps/chaos-daemon created (server dry run)
+```
+
+The controller and the dashboard also warn, on privilege escalation, dropped
+capabilities and `runAsNonRoot`, which the values file does not set (see the
+gaps below).
+
+The values file keeps the daemon's privilege and narrows everything else:
+[`examples/bookstore/chaos/helm/chaos-mesh-values.yaml`](../examples/bookstore/chaos/helm/chaos-mesh-values.yaml).
+
+- **Namespace-scoped controller.** `clusterScoped: false` with
+  `controllerManager.targetNamespace: bookstore`. The chart then binds the
+  controller's pod-delete and pod-patch rights as a RoleBinding in `bookstore`
+  only, not cluster-wide. The daemon is still one DaemonSet on every node, and
+  the controller reaches it over mTLS. The scope limits which Pods the
+  controller asks the daemon to touch.
+- **Optional features off.** `dnsServer.create: false`, because DNSChaos is not
+  used here, and `enableProfiling: false`, which removes the pprof endpoints
+  from the controller and the daemon. The BPF kernel component is off by default
+  and stays off.
+- **Digest pins.** Each of the three images is pinned by digest, with the
+  version tag in front of it. The chart's own default names a tag only.
+- **Dashboard login.** `dashboard.securityMode: true` keeps the dashboard behind
+  a token. This is the chart default too.
+- **Runtime.** `chaosDaemon.runtime: containerd` and the containerd socket path,
+  because a kind node runs containerd and the chart's default is Docker.
+
+Two gaps stay open. The chart exposes only a pod-level `securityContext` for the
+controller and the dashboard, so the values file sets the seccomp profile there
+and nothing else. It cannot set `allowPrivilegeEscalation: false` or drop
+capabilities for those two. The upstream Dockerfiles set no non-root user, so
+`runAsNonRoot` is not set either. The threat model records both as open items.
+
+Install the chart at its pinned version, with the values file:
+
+```sh
+helm repo add chaos-mesh https://charts.chaos-mesh.org
+helm repo update
+helm install chaos-mesh chaos-mesh/chaos-mesh -n chaos-mesh \
+  --version 2.8.7 -f examples/bookstore/chaos/helm/chaos-mesh-values.yaml --wait
+kubectl -n chaos-mesh get pods
+```
+
+Confirm what the daemon asks for. Both fields read `true`, as the lab run shows:
+
+```sh
+kubectl -n chaos-mesh get daemonset chaos-daemon \
+  -o jsonpath="hostPID={.spec.template.spec.hostPID} privileged={.spec.template.spec.containers[0].securityContext.privileged}"; echo
+```
+
+<!-- gate: output -->
+```text
+hostPID=true privileged=true
+```
+
+Check the scope from the RBAC the chart created. Each command answers `yes`
+or `no`:
+
+```sh
+kubectl auth can-i delete pods -n bookstore \
+  --as system:serviceaccount:chaos-mesh:chaos-controller-manager
+kubectl auth can-i delete pods -n default \
+  --as system:serviceaccount:chaos-mesh:chaos-controller-manager
+kubectl auth can-i get secrets -n bookstore \
+  --as system:serviceaccount:chaos-mesh:chaos-controller-manager
+```
+
+The lab run answered `yes`, `no` and `yes`:
+
+<!-- gate: output -->
+```text
+yes
+# ...
+no
+# ...
+yes
+```
+
+The third answer is the price of the scope. The RoleBinding in `bookstore` also
+lets the controller read and patch Secrets there, so keep only the workloads
+under test in that namespace.
+
+Installing Chaos Mesh creates the `chaos-mesh.org` CRDs. Until then, a dry run
+of an experiment file is refused with `no matches for kind "PodChaos"`, as the
+lab run shows when it dry-runs the first experiment before the install:
+
+```sh
+kubectl apply --dry-run=server -f examples/bookstore/chaos/10-podchaos-kill-catalog.yaml
+```
+
+<!-- gate: output -->
+```text
+error: resource mapping not found for name: "kill-one-catalog" namespace: "p11-07-bookstore" from "experiment-10.lab.yaml": no matches for kind "PodChaos" in version "chaos-mesh.org/v1alpha1"
+ensure CRDs are installed first
+```
+
+The CRD is missing, not the file.
+
+### 2. Experiment 1: pod-kill a catalog Pod
+
+**Hypothesis:** killing one of catalog's 3 replicas leaves 2 Ready Pods, the
+Deployment replaces the lost one, and the catalog SLO does not fire. Apply
+[`chaos/10-podchaos-kill-catalog.yaml`](../examples/bookstore/chaos/10-podchaos-kill-catalog.yaml)
+(`mode: one`, the smallest blast radius; selector = the real `app: catalog`
 label) and observe:
 
 ```sh
@@ -288,18 +439,21 @@ label) and observe:
 
 kubectl apply -f examples/bookstore/chaos/10-podchaos-kill-catalog.yaml
 kubectl get podchaos -n bookstore
-# Observe: ONE catalog Pod is deleted; the Deployment (Part 01 ch.04)
-# immediately schedules a replacement; catalog never drops below 2 Ready
-# (the PDB guarantee, Part 06 ch.05). storefront keeps serving. HYPOTHESIS
-# HELD → the PDB + Deployment are verified resilient, not just configured.
+# Observe: ONE catalog Pod is deleted. The ReplicaSet (Part 01 ch.04)
+# schedules a replacement at once, and two Ready Pods remain throughout,
+# because only one was removed.
 kubectl delete -f examples/bookstore/chaos/10-podchaos-kill-catalog.yaml   # stop
 ```
 
-This is exactly [Part 06 ch.05](../06-production-readiness/05-reliability-and-disruptions.md)'s
-"an untested PDB is a latent incident" — *tested*. (Note: pod-kill is the
-eviction-adjacent failure; recall a PDB gates the *eviction API*, not a direct
-delete — Chaos Mesh deletes the Pod, the Deployment heals it, and the PDB's
-job is keeping enough Ready *through* the recovery, which is what you observe.)
+The PDB does not protect this experiment, and the chapter should say so. A
+PodDisruptionBudget gates the eviction API, which `kubectl drain` uses. Chaos
+Mesh's pod-kill is a direct delete, so the budget is not consulted. Two Ready
+Pods remain because the replica count is 3 and only one Pod is removed. The
+experiment tests the healing and the sizing: the Deployment replaces the Pod,
+and the replica count keeps the PDB's floor of two. [Part 06 ch.05](../06-production-readiness/05-reliability-and-disruptions.md)
+calls an untested PDB a latent incident. This experiment is the replica side of
+that test. To exercise the eviction gate, drain a node. Both matter, and they
+test different controls.
 
 ### 3. Experiment 2 — network latency catalog→postgres; observe the SLO
 
@@ -379,23 +533,35 @@ Clean up:
 ```sh
 kubectl delete -f examples/bookstore/chaos/ --ignore-not-found     # all experiments
 helm uninstall chaos-mesh -n chaos-mesh
+for crd in $(kubectl get crd -o name | grep 'chaos-mesh.org'); do kubectl delete "$crd"; done   # Helm keeps the CRDs
+kubectl delete namespace chaos-mesh
 kind delete cluster --name bookstore
 ```
 
 ## How it works under the hood
 
-- **An experiment is a controller-reconciled CRD; a daemon injects the
-  fault.** You apply a `PodChaos`/`NetworkChaos`/… object; the Chaos Mesh
-  **controller-manager** resolves its `selector` to concrete Pods and instructs
-  the per-node **chaos-daemon** (a privileged DaemonSet in the `chaos-mesh`
-  namespace) to apply the fault *to those Pods from the node side* — delete
-  the Pod (pod-kill, via the API), program `tc`/`netem` on the Pod's network
-  namespace (NetworkChaos), run a cgroup-scoped stressor (StressChaos),
-  intercept syscalls (IOChaos), etc. The **target Pods are never mutated** —
-  no injected container, no PSA concern in `bookstore`; the privilege lives in
-  the daemon's own namespace. On `duration` expiry or object deletion the
-  daemon **reverts** the fault — which is why every experiment here is bounded
-  and abortable.
+- **An experiment is a controller-reconciled CRD, and the daemon does the
+  node-side work.** You apply a `PodChaos`, `NetworkChaos` or similar object.
+  The **controller-manager** resolves its `selector` to concrete Pods. Pod kill
+  needs no node access, because the controller holds the verb to delete Pods in
+  the target namespace. Faults that act inside a Pod's network or cgroup go to
+  the per-node **chaos-daemon**, over mTLS. The daemon programs `tc`/`netem` on
+  the Pod's network namespace (NetworkChaos) or runs a stressor in its cgroup
+  (StressChaos). For these faults the **target Pods are not mutated**: no
+  injected container, no change to the Pod spec. The daemon reverts a fault when
+  its `duration` expires or the object is deleted, which is why every experiment
+  here is bounded and abortable. Pod failure is the exception. It swaps each
+  container's image for a pause image, so it does change the Pod. The chart's
+  default pause image is `gcr.io/google-containers/pause:latest`, which is not
+  pinned. Pin it through `controllerManager.podChaos.podFailure.pauseImage`
+  before you use pod-failure.
+- **The daemon's privilege is the part to guard.** `hostPID: true` and the
+  `hostPath` mounts are unconditional in the chart. Only the container's
+  `privileged` flag depends on `chaosDaemon.privileged`. The BPF container is
+  privileged too, and it is off by default. A compromised daemon can reach the
+  node. That is E9 in the threats table, and it is why this namespace is
+  registered and the rest of the cluster is not.
+
 - **The `selector` is the blast radius, and label correctness is safety.** An
   experiment acts on exactly the Pods its `namespaces` + `labelSelectors`
   match, narrowed by `mode` (`one` = a single random match; `fixed: N`;
@@ -406,6 +572,10 @@ kind delete cluster --name bookstore
   is why these files pin to the *verified* Bookstore labels (`app: catalog`,
   `app: postgres`) and start at `mode: one`. Scope is the primary safety
   control; `duration` and an external abort are the others.
+- **The namespace is a second boundary.** The controller's pod-delete rights
+  exist only as a RoleBinding in `bookstore`. A selector that matches a Pod in
+  another namespace still cannot delete it, whatever the selector says. Scope
+  is enforced by RBAC here, and not by the selector alone.
 - **The hypothesis's oracle is the SLO, evaluated independently.** The
   experiment does not decide pass/fail — the Bookstore's existing
   observability does. `CatalogHighErrorRate` / `CatalogHighLatencyP95`
@@ -415,14 +585,12 @@ kind delete cluster --name bookstore
   is confirmed, if they break you found a weakness. This is *why* [Part 06](../06-production-readiness/01-observability-metrics.md)
   (metrics + SLOs) is a prerequisite for chaos: without an oracle, an
   experiment is just an outage.
-- **Pod-kill vs the eviction API (a precise distinction).** [Part 06 ch.05](../06-production-readiness/05-reliability-and-disruptions.md)
+- **Pod-kill vs the eviction API (a precise distinction).** Part 06 ch.05
   established that a PDB gates the **eviction API** (`kubectl drain`), **not** a
-  direct `DELETE`. Chaos Mesh's pod-kill is a direct delete — so it is *not*
-  PDB-blocked; what you are testing is that the **Deployment heals fast enough
-  and the PDB keeps ≥2 Ready *through* the churn**, i.e. the *recovery*
-  behaviour, not the eviction gate. (To specifically exercise the eviction
-  path, drain a node — Part 06 ch.05; to exercise *unplanned* loss, pod-kill —
-  here. Both matter; they test different controls.)
+  direct `DELETE`. Chaos Mesh's pod-kill is a direct delete, so the PDB is not
+  consulted. What you test is the recovery: the Deployment replaces the Pod, and
+  the replica count keeps enough Ready Pods for the PDB floor. Drain a node to
+  exercise the eviction path. Both matter, and they test different controls.
 - **Game days, CI gates, and run-in-prod.** A **Workflow** sequences
   experiments with per-step deadlines and an overall deadline — a *repeatable*
   game day instead of a one-off. Wired into delivery ([Part 07 ch.03](../07-delivery/03-cicd-pipeline.md)/[ch.04](../07-delivery/04-gitops-argocd.md))
@@ -457,9 +625,8 @@ kind delete cluster --name bookstore
 > hit the wrong workload — the same class of mistake as a mis-scoped
 > PDB/NetworkPolicy. Verify labels against the live workload, start narrow
 > (one Pod, one edge), widen (fixed → all; staging → prod; longer) **only as
-> each rung passes**, and keep the chaos controller's privileged daemon in
-> **its own namespace** (never the app's), with RBAC limiting who can create
-> chaos objects.
+> each rung passes**. Where the daemon runs, and who may create chaos objects,
+> is set in the hands-on section above.
 
 > **In production: make resilience a release criterion — chaos as a CI/CD
 > gate, then continuous in prod.** A Workflow run against a prod-like
@@ -492,11 +659,13 @@ kind delete cluster --name bookstore
 ## Quick Reference
 
 ```sh
-# Install Chaos Mesh (PINNED Helm — never releases/latest/download URL; own ns)
+# Install Chaos Mesh: own namespace labelled first, pinned chart and values
+kubectl create namespace chaos-mesh
+kubectl label namespace chaos-mesh pod-security.kubernetes.io/enforce=privileged \
+  pod-security.kubernetes.io/audit=restricted pod-security.kubernetes.io/warn=restricted
 helm repo add chaos-mesh https://charts.chaos-mesh.org && helm repo update
-helm install chaos-mesh chaos-mesh/chaos-mesh -n chaos-mesh --create-namespace \
-  --version 2.7.0 --set chaosDaemon.runtime=containerd \
-  --set chaosDaemon.socketPath=/run/containerd/containerd.sock --wait
+helm install chaos-mesh chaos-mesh/chaos-mesh -n chaos-mesh --version 2.8.7 \
+  -f examples/bookstore/chaos/helm/chaos-mesh-values.yaml --wait
 
 # Run an experiment (CRD-backed → dry-run "no matches" until Chaos Mesh installed)
 kubectl apply -f examples/bookstore/chaos/10-podchaos-kill-catalog.yaml      # pod-kill
@@ -508,20 +677,19 @@ kubectl delete -f examples/bookstore/chaos/10-podchaos-kill-catalog.yaml     # A
 # (every experiment is bounded by `duration` and abortable by delete)
 ```
 
-Minimal experiment skeleton (full files in `examples/bookstore/chaos/`):
+Experiment spec fragment (full files in `examples/bookstore/chaos/`). It has
+no `apiVersion` or `kind`, so it is not applied as is. Wrap it in a
+`PodChaos` object of `apiVersion: chaos-mesh.org/v1alpha1`:
 
 ```yaml
-apiVersion: chaos-mesh.org/v1alpha1
-kind: PodChaos                                   # CRD — needs Chaos Mesh installed
-metadata: { name: kill-one, namespace: <NS> }
 spec:
   action: pod-kill
-  mode: one                                      # SMALLEST blast radius — start here
+  mode: one                                # smallest blast radius
   selector:
-    namespaces: [ <NS> ]
-    labelSelectors: { app: <VERIFIED-REAL-LABEL> }   # MUST match the live workload
-# NetworkChaos/StressChaos/etc. add `duration:` (auto-revert) + action params.
-# Always: a written hypothesis + an SLO oracle + an abort condition.
+    namespaces: [ bookstore ]
+    labelSelectors: { app: catalog }       # must match the live workload
+# NetworkChaos and StressChaos add `duration:` (auto-revert) and action params.
+# Always: a written hypothesis, an SLO oracle and an abort condition.
 ```
 
 Checklist:
@@ -534,8 +702,12 @@ Checklist:
       `duration` set; `kubectl delete` rehearsed as the kill switch
 - [ ] Selectors pinned to **verified real labels**; experiment can't hit the
       wrong workload (the mis-scoped-selector trap)
-- [ ] Chaos controller's **privileged daemon in its own namespace** (never
-      `bookstore`); RBAC limits who creates chaos objects; app Pods unmutated
+- [ ] The chaos daemon runs **privileged in its own namespace**, enforced at
+      `privileged` with audit and warn at `restricted`, and registered in the
+      exceptions file; the controller is **namespace-scoped**; app Pods stay
+      unmutated
+- [ ] RBAC decides who may **create chaos objects** in `bookstore`; grant it
+      to the people who run game days, not to every workload's ServiceAccount
 - [ ] Resilience is a **CI/CD gate** (Workflow + "no SLO alert" assertion,
       [Part 07](../07-delivery/03-cicd-pipeline.md)); eventually **continuous,
       in prod**
@@ -564,7 +736,7 @@ Checklist:
 3. **You scope a Chaos Mesh `PodChaos` with selector `app=catalog`. A teammate adds `app=catalog` as a label on a different team's Pod. What goes wrong, and what's the discipline that prevents it?**
    <details><summary>Show answer</summary>
 
-   The chaos experiment will kill the teammate's Pod too — labels are not namespaces, and selectors don't isolate. The discipline: (a) always scope `namespaceSelectors` (e.g. `namespaceSelectors: bookstore`) so the blast is bounded by namespace; (b) use a chaos-specific label like `chaos.target=catalog` rather than reusing app labels; (c) use a `chaos` namespace prefix for experiments; (d) ChaosDashboard's dry-run shows you exactly which Pods are selected — read it before applying. The mis-scoped-selector trap is the #1 chaos production incident.
+   The experiment acts on every Pod that matches its selector in the namespaces the selector names. A label is not a namespace, and a label selector does not isolate anything, so the other team's Pod is a target when it sits in a covered namespace. The discipline: (a) name the namespace in `selector.namespaces` and keep the target namespace to the workloads under test; (b) use a chaos-specific label, such as `chaos.target=catalog`, rather than reusing an application label; (c) list the matches with `kubectl get pods -n <NS> -l <selector>` before the experiment runs. In this chapter the controller's RBAC also stops it from deleting a Pod outside `bookstore`, so a mistake in one namespace does not reach another.
 
    </details>
 
@@ -582,6 +754,13 @@ Checklist:
 
    </details>
 
+6. **The controller is namespace-scoped to `bookstore`, yet its Role can read and patch Secrets there. Why does the chapter accept that, and what changes about where you put the target?**
+   <details><summary>Show answer</summary>
+
+   The controller must read and patch Pods in its target namespace, so the chart's ClusterRole for that namespace grants those verbs together with `secrets` and `configmaps`, bound there by a RoleBinding. Namespace scoping limits where the rights apply, not which kinds of object they cover. A compromised controller can therefore read or change the Bookstore's Secrets, including the database credentials. The chapter accepts this because the chart needs it and the scope confines it. The fix is operational: keep only the workloads under test in the target namespace, and keep other systems' secrets elsewhere. A wider target widens that exposure, so the target namespace belongs in each experiment's blast radius.
+
+   </details>
+
 ## Further reading
 
 - **Rosso et al., _Production Kubernetes_, ch.14 — "Application
@@ -593,6 +772,10 @@ Checklist:
   *Singleton Service* (ch.10)** for the resilience properties chaos
   experiments validate, and the principles of chaos engineering
   (<https://principlesofchaos.org/>).
+- Chaos Mesh 2.8.7: [installing with Helm](https://chaos-mesh.org/docs/production-installation-using-helm/),
+  [simulating pod faults](https://chaos-mesh.org/docs/simulate-pod-chaos-on-kubernetes/), and the chart's
+  [values.yaml](https://github.com/chaos-mesh/chaos-mesh/blob/v2.8.7/helm/chaos-mesh/values.yaml), which
+  carries the `privileged`, `clusterScoped` and `enableProfiling` comments this chapter relies on.
 - Official: Chaos Mesh
   <https://chaos-mesh.org/docs/>, LitmusChaos
   <https://docs.litmuschaos.io/>, and the CNCF chaos-engineering landscape;

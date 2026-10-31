@@ -23,21 +23,10 @@
 # the cpu limit is the natural ceiling on the damage. `kubectl delete -f`
 # aborts early.
 #
-# !!! CRD-INTRINSIC DRY-RUN (identical precedent to 18-/51-/70-/83-/argocd) !!!
-#   `StressChaos` is a Chaos Mesh CRD (chaos-mesh.org/v1alpha1). WITHOUT Chaos
-#   Mesh installed a client dry-run prints:
+# Dry run before Chaos Mesh is installed: a client dry run prints
 #     no matches for kind "StressChaos" in version "chaos-mesh.org/v1alpha1"
-#   EXPECTED, schema-correct — Chaos Mesh CRDs/controller must be installed
-#   first. Whole-dir dry-run prints this for CRD-backed files only and
-#   continues. Schema verified against Chaos Mesh chaos-mesh.org/v1alpha1
-#   StressChaos.
-#
-# Requires: Chaos Mesh installed (own ns); the Bookstore running with the
-#   catalog HPA (82-) + metrics (80-/81-) so the reaction is observable.
-# Apply:
-#   kubectl apply -f examples/bookstore/chaos/30-stresschaos-catalog-cpu.yaml
-#   # observe: kubectl get hpa catalog -n bookstore -w   (replicas should rise)
-#   kubectl delete -f examples/bookstore/chaos/30-stresschaos-catalog-cpu.yaml
+# That is expected until the chart is installed (chapter Hands-on). The
+# field names were checked against the chaos-mesh 2.8.7 CRDs.
 apiVersion: chaos-mesh.org/v1alpha1
 kind: StressChaos
 metadata:

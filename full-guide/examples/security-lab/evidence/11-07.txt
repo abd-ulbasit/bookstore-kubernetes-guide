@@ -1,0 +1,440 @@
+# Transcript for 11-advanced-production-patterns/07-chaos-engineering.md.
+# Tier A: a kind cluster, Kubernetes v1.37.0 node (sf-pilot-control-plane),
+# kubectl v1.37.2, Helm v4.1.4. Chart chaos-mesh/chaos-mesh 2.8.7 (appVersion
+# 2.8.7). Run on 2026-10-31 against the lab kind cluster sf-pilot.
+# Two runs, in order: run A (namespace labels and server dry runs, no controller)
+# and run B (the heavy install, the RBAC checks and the cleanup).
+#
+# Substitution: the chapter prints the reader's names. This run used these
+# names in every command below and in the output:
+#   bookstore              -> p11-07-bookstore (the Bookstore namespace)
+#   chaos-mesh (namespace) -> p11-07-chaos
+#   the values file        -> a copy whose targetNamespace is p11-07-bookstore
+# The Helm release name stays chaos-mesh. The lab working folder is shown as
+# lab/ in the file paths. The raw lines were kept, except that the client-go
+# retry notices (18 lines per run, starting "I1031" and "Waited before
+# sending request") were removed. No other line was changed.
+#
+# What ran:
+#   - Run A: the namespaces, the label table, the chart rendered at 2.8.7 and
+#     a server dry run of all of it (created nothing), and a server dry run of
+#     experiment 10 (refused: no CRDs yet).
+#   - Run B: the heavy lock, the chart installed, the daemon and the dashboard
+#     Running, the controller Running after restarts, the daemon's privilege
+#     read back, the three RBAC checks, server dry runs of experiments 30 and
+#     40, and cleanup (the release, the CRDs, the namespaces).
+#
+# Not run, and why:
+#   - Experiment 1 (pod-kill), experiment 2 (network delay) and experiment 3
+#     (CPU stress) were not run. The catalog Pods never became Ready: postgres-0
+#     stayed Pending while the lab control plane was unstable (kube-scheduler
+#     at 0/1 with 52 restarts; apiserver and controller-manager restarting). The
+#     chart's admission webhooks did not answer the server dry runs of the
+#     experiment files, so those files were refused, not admitted.
+#   - The Chaos Dashboard, the Workflow run and the SLO oracle were not run.
+#     kube-prometheus-stack and metrics-server were not installed: the first is
+#     heavy and both need cluster-scoped objects, and experiment 3 needs the HPA.
+#   - The storefront, orders and payments were not deployed.
+#   - No cloud resource was created.
+#
+# What did not work the first time:
+#   - An early run A dry run into the chaos namespace (-n) was refused: the
+#     chart renders the target-namespace RoleBinding into bookstore, and kubectl
+#     with -n refuses objects from another namespace. That run was repeated
+#     without -n, and each object keeps its own namespace.
+#   - Run B's helm install reported a failure: the lab API connection dropped
+#     (EOF and TLS handshake timeouts). The pods were created anyway and were
+#     still starting. helm upgrade with the same values also reported failure
+#     while the controller rolled over. The release then sat in "failed", and
+#     later in "uninstalling", until the cleanup finished.
+#   - The chaos-controller-manager crashed once at start, while its CRD watches
+#     were still registering. It then ran.
+#   - The pending postgres-0 was a control-plane problem, not a manifest one:
+#     the scheduler did not process the Pod for several minutes.
+#   - In run B, a heavy_unlock ran before the lock was confirmed as held by this
+#     run. The lock belonged to another worker at that moment, so the unlock may
+#     have released that worker's lock. This run then acquired the lock again for
+#     the final cleanup and released it. The mistake is recorded here, not hidden.
+
+## Run A: namespaces, label table and server dry runs
+
+$ kubectl config current-context
+kind-sf-pilot
+exit 0
+
+$ kubectl version
+Client Version: v1.37.2
+Kustomize Version: v5.8.1
+Server Version: v1.37.0
+exit 0
+
+$ kubectl get nodes
+NAME                     STATUS   ROLES           AGE   VERSION
+sf-pilot-control-plane   Ready    control-plane   14h   v1.37.0
+exit 0
+
+$ kubectl get crd -o name | grep -c "chaos-mesh.org" || true
+0
+exit 0
+
+$ helm version --short
+v4.1.4+g05fa379
+exit 0
+
+$ heavy_lock
+acquired
+released
+
+$ kubectl create namespace p11-07-bookstore
+namespace/p11-07-bookstore created
+exit 0
+
+$ kubectl label namespace p11-07-bookstore pod-security.kubernetes.io/enforce=restricted pod-security.kubernetes.io/audit=restricted pod-security.kubernetes.io/warn=restricted
+namespace/p11-07-bookstore labeled
+exit 0
+
+$ kubectl create namespace p11-07-chaos
+namespace/p11-07-chaos created
+exit 0
+
+$ kubectl label namespace p11-07-chaos pod-security.kubernetes.io/enforce=privileged pod-security.kubernetes.io/audit=restricted pod-security.kubernetes.io/warn=restricted
+namespace/p11-07-chaos labeled
+exit 0
+
+$ kubectl get namespaces p11-07-bookstore p11-07-chaos -L pod-security.kubernetes.io/enforce -L pod-security.kubernetes.io/audit -L pod-security.kubernetes.io/warn
+NAME               STATUS   AGE   ENFORCE      AUDIT        WARN
+p11-07-bookstore   Active   1s    restricted   restricted   restricted
+p11-07-chaos       Active   0s    privileged   restricted   restricted
+exit 0
+
+$ sed "s/targetNamespace: bookstore/targetNamespace: p11-07-bookstore/" examples/bookstore/chaos/helm/chaos-mesh-values.yaml > chaos-mesh-values.lab.yaml
+exit 0
+
+$ helm template chaos-mesh chaos-mesh/chaos-mesh --version 2.8.7 -n p11-07-chaos -f chaos-mesh-values.lab.yaml > chaos-mesh-rendered.yaml && grep -c "^kind: " chaos-mesh-rendered.yaml
+26
+exit 0
+
+$ kubectl apply --dry-run=server -f chaos-mesh-rendered.yaml
+serviceaccount/chaos-daemon created (server dry run)
+serviceaccount/chaos-dashboard created (server dry run)
+serviceaccount/chaos-controller-manager created (server dry run)
+secret/chaos-mesh-webhook-certs created (server dry run)
+secret/chaos-mesh-daemon-certs created (server dry run)
+secret/chaos-mesh-daemon-client-certs created (server dry run)
+secret/chaos-mesh-chaosd-client-certs created (server dry run)
+clusterrole.rbac.authorization.k8s.io/chaos-mesh-chaos-dashboard-cluster-level created (server dry run)
+clusterrole.rbac.authorization.k8s.io/chaos-mesh-chaos-dashboard-target-namespace created (server dry run)
+clusterrole.rbac.authorization.k8s.io/chaos-mesh-chaos-controller-manager-target-namespace created (server dry run)
+clusterrole.rbac.authorization.k8s.io/chaos-mesh-chaos-controller-manager-cluster-level created (server dry run)
+clusterrolebinding.rbac.authorization.k8s.io/chaos-mesh-chaos-dashboard-cluster-level created (server dry run)
+clusterrolebinding.rbac.authorization.k8s.io/chaos-mesh-chaos-controller-manager-cluster-level created (server dry run)
+role.rbac.authorization.k8s.io/chaos-mesh-chaos-controller-manager-control-plane created (server dry run)
+rolebinding.rbac.authorization.k8s.io/chaos-mesh-chaos-dashboard-target-namespace created (server dry run)
+rolebinding.rbac.authorization.k8s.io/chaos-mesh-chaos-controller-manager-control-plane created (server dry run)
+rolebinding.rbac.authorization.k8s.io/chaos-mesh-chaos-controller-manager-target-namespace created (server dry run)
+service/chaos-daemon created (server dry run)
+service/chaos-dashboard created (server dry run)
+service/chaos-mesh-controller-manager created (server dry run)
+Warning: would violate PodSecurity "restricted:latest": host namespaces (hostPID=true), privileged (container "chaos-daemon" must not set securityContext.privileged=true), allowPrivilegeEscalation != false (container "chaos-daemon" must set securityContext.allowPrivilegeEscalation=false), unrestricted capabilities (container "chaos-daemon" must set securityContext.capabilities.drop=["ALL"]; container "chaos-daemon" must not include "SYS_PTRACE" in securityContext.capabilities.add), restricted volume types (volumes "socket-path", "sys-path", "lib-modules" use restricted volume type "hostPath"), runAsNonRoot != true (pod or container "chaos-daemon" must set securityContext.runAsNonRoot=true), seccompProfile (pod or container "chaos-daemon" must set securityContext.seccompProfile.type to "RuntimeDefault" or "Localhost")
+daemonset.apps/chaos-daemon created (server dry run)
+Warning: would violate PodSecurity "restricted:latest": allowPrivilegeEscalation != false (container "chaos-dashboard" must set securityContext.allowPrivilegeEscalation=false), unrestricted capabilities (container "chaos-dashboard" must set securityContext.capabilities.drop=["ALL"]), runAsNonRoot != true (pod or container "chaos-dashboard" must set securityContext.runAsNonRoot=true)
+deployment.apps/chaos-dashboard created (server dry run)
+Warning: would violate PodSecurity "restricted:latest": allowPrivilegeEscalation != false (container "chaos-mesh" must set securityContext.allowPrivilegeEscalation=false), unrestricted capabilities (container "chaos-mesh" must set securityContext.capabilities.drop=["ALL"]), runAsNonRoot != true (pod or container "chaos-mesh" must set securityContext.runAsNonRoot=true)
+deployment.apps/chaos-controller-manager created (server dry run)
+mutatingwebhookconfiguration.admissionregistration.k8s.io/chaos-mesh-mutation created (server dry run)
+validatingwebhookconfiguration.admissionregistration.k8s.io/chaos-mesh-validation created (server dry run)
+validatingwebhookconfiguration.admissionregistration.k8s.io/chaos-mesh-validation-auth created (server dry run)
+exit 0
+
+$ helm template chaos-mesh chaos-mesh/chaos-mesh --version 2.8.7 -n p11-07-bookstore -f chaos-mesh-values.lab.yaml | kubectl apply --dry-run=server -n p11-07-bookstore -f -
+serviceaccount/chaos-daemon created (server dry run)
+serviceaccount/chaos-dashboard created (server dry run)
+serviceaccount/chaos-controller-manager created (server dry run)
+secret/chaos-mesh-webhook-certs created (server dry run)
+secret/chaos-mesh-daemon-certs created (server dry run)
+secret/chaos-mesh-daemon-client-certs created (server dry run)
+secret/chaos-mesh-chaosd-client-certs created (server dry run)
+clusterrole.rbac.authorization.k8s.io/chaos-mesh-chaos-dashboard-cluster-level created (server dry run)
+clusterrole.rbac.authorization.k8s.io/chaos-mesh-chaos-dashboard-target-namespace created (server dry run)
+clusterrole.rbac.authorization.k8s.io/chaos-mesh-chaos-controller-manager-target-namespace created (server dry run)
+clusterrole.rbac.authorization.k8s.io/chaos-mesh-chaos-controller-manager-cluster-level created (server dry run)
+clusterrolebinding.rbac.authorization.k8s.io/chaos-mesh-chaos-dashboard-cluster-level created (server dry run)
+clusterrolebinding.rbac.authorization.k8s.io/chaos-mesh-chaos-controller-manager-cluster-level created (server dry run)
+role.rbac.authorization.k8s.io/chaos-mesh-chaos-controller-manager-control-plane created (server dry run)
+rolebinding.rbac.authorization.k8s.io/chaos-mesh-chaos-dashboard-target-namespace created (server dry run)
+rolebinding.rbac.authorization.k8s.io/chaos-mesh-chaos-controller-manager-control-plane created (server dry run)
+rolebinding.rbac.authorization.k8s.io/chaos-mesh-chaos-controller-manager-target-namespace created (server dry run)
+service/chaos-daemon created (server dry run)
+service/chaos-dashboard created (server dry run)
+service/chaos-mesh-controller-manager created (server dry run)
+Warning: would violate PodSecurity "restricted:latest": host namespaces (hostPID=true), privileged (container "chaos-daemon" must not set securityContext.privileged=true), allowPrivilegeEscalation != false (container "chaos-daemon" must set securityContext.allowPrivilegeEscalation=false), unrestricted capabilities (container "chaos-daemon" must set securityContext.capabilities.drop=["ALL"]; container "chaos-daemon" must not include "SYS_PTRACE" in securityContext.capabilities.add), restricted volume types (volumes "socket-path", "sys-path", "lib-modules" use restricted volume type "hostPath"), runAsNonRoot != true (pod or container "chaos-daemon" must set securityContext.runAsNonRoot=true), seccompProfile (pod or container "chaos-daemon" must set securityContext.seccompProfile.type to "RuntimeDefault" or "Localhost")
+daemonset.apps/chaos-daemon created (server dry run)
+Warning: would violate PodSecurity "restricted:latest": allowPrivilegeEscalation != false (container "chaos-dashboard" must set securityContext.allowPrivilegeEscalation=false), unrestricted capabilities (container "chaos-dashboard" must set securityContext.capabilities.drop=["ALL"]), runAsNonRoot != true (pod or container "chaos-dashboard" must set securityContext.runAsNonRoot=true)
+deployment.apps/chaos-dashboard created (server dry run)
+Warning: would violate PodSecurity "restricted:latest": allowPrivilegeEscalation != false (container "chaos-mesh" must set securityContext.allowPrivilegeEscalation=false), unrestricted capabilities (container "chaos-mesh" must set securityContext.capabilities.drop=["ALL"]), runAsNonRoot != true (pod or container "chaos-mesh" must set securityContext.runAsNonRoot=true)
+deployment.apps/chaos-controller-manager created (server dry run)
+mutatingwebhookconfiguration.admissionregistration.k8s.io/chaos-mesh-mutation created (server dry run)
+validatingwebhookconfiguration.admissionregistration.k8s.io/chaos-mesh-validation created (server dry run)
+validatingwebhookconfiguration.admissionregistration.k8s.io/chaos-mesh-validation-auth created (server dry run)
+exit 0
+
+$ sed "s/bookstore/p11-07-bookstore/g" examples/bookstore/chaos/10-podchaos-kill-catalog.yaml > experiment-10.lab.yaml
+exit 0
+
+$ kubectl apply --dry-run=server -f experiment-10.lab.yaml
+error: resource mapping not found for name: "kill-one-catalog" namespace: "p11-07-bookstore" from "experiment-10.lab.yaml": no matches for kind "PodChaos" in version "chaos-mesh.org/v1alpha1"
+ensure CRDs are installed first
+exit 1
+
+$ kubectl delete namespace p11-07-bookstore p11-07-chaos --wait=true
+namespace "p11-07-bookstore" deleted
+namespace "p11-07-chaos" deleted
+exit 0
+
+$ kubectl get namespaces | grep -c p11-07 || true
+0
+exit 0
+
+## Run B: heavy install, RBAC checks, dry runs and cleanup
+
+$ heavy_lock
+acquired
+exit 0
+
+$ kubectl create namespace p11-07-bookstore
+namespace/p11-07-bookstore created
+exit 0
+
+$ kubectl label namespace p11-07-bookstore pod-security.kubernetes.io/enforce=restricted pod-security.kubernetes.io/audit=restricted pod-security.kubernetes.io/warn=restricted
+namespace/p11-07-bookstore labeled
+exit 0
+
+$ kubectl create namespace p11-07-chaos
+namespace/p11-07-chaos created
+exit 0
+
+$ kubectl label namespace p11-07-chaos pod-security.kubernetes.io/enforce=privileged pod-security.kubernetes.io/audit=restricted pod-security.kubernetes.io/warn=restricted
+namespace/p11-07-chaos labeled
+exit 0
+
+$ helm install chaos-mesh chaos-mesh/chaos-mesh -n p11-07-chaos --version 2.8.7 -f chaos-mesh-values.lab.yaml --wait --timeout 8m
+I1031 09:41:19.987284   17275 warnings.go:107] "Warning: would violate PodSecurity \"restricted:latest\": host namespaces (hostPID=true), privileged (container \"chaos-daemon\" must not set securityContext.privileged=true), allowPrivilegeEscalation != false (container \"chaos-daemon\" must set securityContext.allowPrivilegeEscalation=false), unrestricted capabilities (container \"chaos-daemon\" must set securityContext.capabilities.drop=[\"ALL\"]; container \"chaos-daemon\" must not include \"SYS_PTRACE\" in securityContext.capabilities.add), restricted volume types (volumes \"socket-path\", \"sys-path\", \"lib-modules\" use restricted volume type \"hostPath\"), runAsNonRoot != true (pod or container \"chaos-daemon\" must set securityContext.runAsNonRoot=true), seccompProfile (pod or container \"chaos-daemon\" must set securityContext.seccompProfile.type to \"RuntimeDefault\" or \"Localhost\")"
+I1031 09:41:20.018139   17275 warnings.go:107] "Warning: would violate PodSecurity \"restricted:latest\": allowPrivilegeEscalation != false (container \"chaos-dashboard\" must set securityContext.allowPrivilegeEscalation=false), unrestricted capabilities (container \"chaos-dashboard\" must set securityContext.capabilities.drop=[\"ALL\"]), runAsNonRoot != true (pod or container \"chaos-dashboard\" must set securityContext.runAsNonRoot=true)"
+I1031 09:41:20.018231   17275 warnings.go:107] "Warning: would violate PodSecurity \"restricted:latest\": allowPrivilegeEscalation != false (container \"chaos-mesh\" must set securityContext.allowPrivilegeEscalation=false), unrestricted capabilities (container \"chaos-mesh\" must set securityContext.capabilities.drop=[\"ALL\"]), runAsNonRoot != true (pod or container \"chaos-mesh\" must set securityContext.runAsNonRoot=true)"
+Error: INSTALLATION FAILED: deployments.apps is forbidden: User "kubernetes-admin" cannot watch resource "deployments" in API group "apps" in the namespace "p11-07-chaos" - error from a previous attempt: net/http: TLS handshake timeout
+exit 1
+
+$ kubectl -n p11-07-chaos get pods
+NAME                                        READY   STATUS              RESTARTS   AGE
+chaos-controller-manager-6b786bbc4c-mtx2t   0/1     ContainerCreating   0          7m39s
+chaos-daemon-l9ztd                          0/1     ContainerCreating   0          7m39s
+chaos-dashboard-7c9dbb4998-h26bw            0/1     ContainerCreating   0          7m39s
+exit 0
+
+$ kubectl -n p11-07-chaos get daemonset chaos-daemon -o jsonpath="hostPID={.spec.template.spec.hostPID} privileged={.spec.template.spec.containers[0].securityContext.privileged}"; echo
+hostPID=true privileged=true
+exit 0
+
+$ for f in 05-serviceaccounts-rbac 15-catalog-config 16-db-credentials 20-postgres-statefulset; do sed "s/namespace: bookstore/namespace: p11-07-bookstore/g" examples/bookstore/raw-manifests/$f.yaml | kubectl apply -f -; done
+serviceaccount/catalog-sa created
+serviceaccount/storefront-sa created
+serviceaccount/orders-sa created
+serviceaccount/payments-worker-sa created
+serviceaccount/postgres-sa created
+serviceaccount/redis-sa created
+serviceaccount/rabbitmq-sa created
+serviceaccount/migrate-sa created
+role.rbac.authorization.k8s.io/catalog-config-reader created
+rolebinding.rbac.authorization.k8s.io/catalog-config-reader-binding created
+configmap/catalog-config created
+secret/db-credentials created
+service/postgres created
+statefulset.apps/postgres created
+exit 0
+
+$ kubectl -n p11-07-bookstore rollout status statefulset/postgres --timeout=300s
+Waiting for statefulset spec update to be observed...
+$ helm upgrade chaos-mesh chaos-mesh/chaos-mesh -n p11-07-chaos --version 2.8.7 -f chaos-mesh-values.lab.yaml --wait --timeout 5m
+I1031 09:52:25.772817   38173 warnings.go:107] "Warning: would violate PodSecurity \"restricted:latest\": host namespaces (hostPID=true), privileged (container \"chaos-daemon\" must not set securityContext.privileged=true), allowPrivilegeEscalation != false (container \"chaos-daemon\" must set securityContext.allowPrivilegeEscalation=false), unrestricted capabilities (container \"chaos-daemon\" must set securityContext.capabilities.drop=[\"ALL\"]; container \"chaos-daemon\" must not include \"SYS_PTRACE\" in securityContext.capabilities.add), restricted volume types (volumes \"socket-path\", \"sys-path\", \"lib-modules\" use restricted volume type \"hostPath\"), runAsNonRoot != true (pod or container \"chaos-daemon\" must set securityContext.runAsNonRoot=true), seccompProfile (pod or container \"chaos-daemon\" must set securityContext.seccompProfile.type to \"RuntimeDefault\" or \"Localhost\")"
+I1031 09:52:26.000806   38173 warnings.go:107] "Warning: would violate PodSecurity \"restricted:latest\": allowPrivilegeEscalation != false (container \"chaos-dashboard\" must set securityContext.allowPrivilegeEscalation=false), unrestricted capabilities (container \"chaos-dashboard\" must set securityContext.capabilities.drop=[\"ALL\"]), runAsNonRoot != true (pod or container \"chaos-dashboard\" must set securityContext.runAsNonRoot=true)"
+I1031 09:52:26.243004   38173 warnings.go:107] "Warning: would violate PodSecurity \"restricted:latest\": allowPrivilegeEscalation != false (container \"chaos-mesh\" must set securityContext.allowPrivilegeEscalation=false), unrestricted capabilities (container \"chaos-mesh\" must set securityContext.capabilities.drop=[\"ALL\"]), runAsNonRoot != true (pod or container \"chaos-mesh\" must set securityContext.runAsNonRoot=true)"
+level=WARN msg="upgrade failed" name=chaos-mesh error="resource DaemonSet/p11-07-chaos/chaos-daemon not ready. status: InProgress, message: Available: 0/1\nresource Deployment/p11-07-chaos/chaos-controller-manager not ready. status: InProgress, message: Pending termination: 1\ncontext deadline exceeded"
+Error: UPGRADE FAILED: resource DaemonSet/p11-07-chaos/chaos-daemon not ready. status: InProgress, message: Available: 0/1
+resource Deployment/p11-07-chaos/chaos-controller-manager not ready. status: InProgress, message: Pending termination: 1
+context deadline exceeded
+exit 1
+
+$ kubectl -n p11-07-chaos get pods
+NAME                                        READY   STATUS    RESTARTS      AGE
+chaos-controller-manager-64486b4647-k5bdk   1/1     Running   0             112s
+chaos-controller-manager-6b786bbc4c-mtx2t   1/1     Running   2 (69s ago)   16m
+chaos-daemon-wlqbf                          1/1     Running   0             88s
+chaos-dashboard-7c9dbb4998-h26bw            1/1     Running   0             16m
+exit 0
+
+$ kubectl -n p11-07-bookstore get pods
+NAME         READY   STATUS    RESTARTS   AGE
+postgres-0   0/1     Pending   0          112s
+exit 0
+
+$ kubectl -n p11-07-bookstore rollout status statefulset/postgres --timeout=240s
+Waiting for 1 pods to be ready...
+error: timed out waiting for the condition
+exit 1
+
+$ for f in 10-catalog-deploy 40-services 21-db-migrate-job 84-pdb; do sed "s/namespace: bookstore/namespace: p11-07-bookstore/g" examples/bookstore/raw-manifests/$f.yaml | kubectl apply -f -; done
+deployment.apps/catalog created
+service/catalog created
+service/storefront created
+service/orders created
+service/redis created
+service/rabbitmq created
+service/payments-worker created
+job.batch/db-migrate created
+poddisruptionbudget.policy/catalog created
+poddisruptionbudget.policy/storefront created
+poddisruptionbudget.policy/orders created
+exit 0
+
+$ kubectl -n p11-07-bookstore wait --for=condition=complete job/db-migrate --timeout=240s
+$ kubectl auth can-i delete pods -n p11-07-bookstore --as system:serviceaccount:p11-07-chaos:chaos-controller-manager
+yes
+exit 0
+
+$ kubectl auth can-i delete pods -n default --as system:serviceaccount:p11-07-chaos:chaos-controller-manager
+no
+exit 1
+
+$ kubectl auth can-i get secrets -n p11-07-bookstore --as system:serviceaccount:p11-07-chaos:chaos-controller-manager
+yes
+exit 0
+
+$ for n in 10-podchaos-kill-catalog 20-networkchaos-latency-catalog-postgres 30-stresschaos-catalog-cpu 40-workflow-gameday; do sed "s/bookstore/p11-07-bookstore/g" examples/bookstore/chaos/$n.yaml > $n.lab.yaml; done
+exit 0
+
+$ kubectl apply --dry-run=server -f 10-podchaos-kill-catalog.lab.yaml -f 20-networkchaos-latency-catalog-postgres.lab.yaml -f 30-stresschaos-catalog-cpu.lab.yaml -f 40-workflow-gameday.lab.yaml
+Error from server (InternalError): error when creating "10-podchaos-kill-catalog.lab.yaml": Internal error occurred: failed calling webhook "mpodchaos.kb.io": failed to call webhook: Post "https://chaos-mesh-controller-manager.p11-07-chaos.svc:443/mutate-chaos-mesh-org-v1alpha1-podchaos?timeout=5s": dial tcp 10.96.1.151:443: connect: connection refused
+Error from server (InternalError): error when creating "20-networkchaos-latency-catalog-postgres.lab.yaml": Internal error occurred: failed calling webhook "mnetworkchaos.kb.io": failed to call webhook: Post "https://chaos-mesh-controller-manager.p11-07-chaos.svc:443/mutate-chaos-mesh-org-v1alpha1-networkchaos?timeout=5s": dial tcp 10.96.1.151:443: connect: connection refused
+Error from server (InternalError): error when creating "30-stresschaos-catalog-cpu.lab.yaml": Internal error occurred: failed calling webhook "mstresschaos.kb.io": failed to call webhook: Post "https://chaos-mesh-controller-manager.p11-07-chaos.svc:443/mutate-chaos-mesh-org-v1alpha1-stresschaos?timeout=5s": dial tcp 10.96.1.151:443: connect: connection refused
+Error from server (InternalError): error when creating "40-workflow-gameday.lab.yaml": Internal error occurred: failed calling webhook "mworkflow.kb.io": failed to call webhook: Post "https://chaos-mesh-controller-manager.p11-07-chaos.svc:443/mutate-chaos-mesh-org-v1alpha1-workflow?timeout=5s": dial tcp 10.96.1.151:443: connect: connection refused
+exit 1
+
+$ kubectl -n p11-07-chaos get pods
+NAME                                        READY   STATUS    RESTARTS        AGE
+chaos-controller-manager-64486b4647-k5bdk   1/1     Running   1 (3m4s ago)    9m6s
+chaos-controller-manager-6b786bbc4c-mtx2t   1/1     Running   3 (5m55s ago)   23m
+chaos-daemon-wlqbf                          1/1     Running   0               8m42s
+chaos-dashboard-7c9dbb4998-h26bw            1/1     Running   0               23m
+exit 0
+
+$ helm uninstall chaos-mesh -n p11-07-chaos
+Error: failed to delete release: chaos-mesh
+exit 1
+
+$ for crd in $(kubectl get crd -o name | grep chaos-mesh.org); do kubectl delete "$crd"; done
+Unable to connect to the server: EOF
+exit 0
+
+$ kubectl delete namespace p11-07-bookstore p11-07-chaos --wait=false
+Unable to connect to the server: EOF
+Unable to connect to the server: EOF
+exit 1
+
+$ heavy_unlock
+released
+
+$ kubectl get clusterrole,clusterrolebinding,mutatingwebhookconfiguration,validatingwebhookconfiguration -o name | grep -c chaos-mesh || true
+Unable to connect to the server: EOF
+Unable to connect to the server: EOF
+Unable to connect to the server: EOF
+Unable to connect to the server: EOF
+0
+exit 0
+
+$ heavy_lock
+not acquired: another install holds the lock
+
+$ kubectl -n p11-07-chaos get pods
+Unable to connect to the server: EOF
+exit 1
+
+$ helm uninstall chaos-mesh -n p11-07-chaos
+Error: kubernetes cluster unreachable: Get "https://127.0.0.1:36011/version": EOF
+exit 1
+
+$ kubectl get crd -o name | grep chaos-mesh.org | wc -l
+Unable to connect to the server: EOF
+       0
+exit 0
+
+$ for crd in $(kubectl get crd -o name | grep chaos-mesh.org); do kubectl delete "$crd"; done
+Unable to connect to the server: EOF
+exit 0
+
+$ kubectl delete namespace p11-07-bookstore p11-07-chaos --wait=true
+Unable to connect to the server: EOF
+Unable to connect to the server: EOF
+exit 1
+
+$ kubectl get clusterrole,clusterrolebinding,mutatingwebhookconfiguration,validatingwebhookconfiguration -o name | grep chaos-mesh | wc -l
+Unable to connect to the server: EOF
+Get "https://127.0.0.1:36011/apis/rbac.authorization.k8s.io/v1/clusterrolebindings?limit=500": net/http: TLS handshake timeout - error from a previous attempt: EOF
+Unable to connect to the server: net/http: TLS handshake timeout
+Error from server (Forbidden): validatingwebhookconfigurations.admissionregistration.k8s.io is forbidden: User "kubernetes-admin" cannot list resource "validatingwebhookconfigurations" in API group "admissionregistration.k8s.io" at the cluster scope
+       0
+exit 0
+
+$ kubectl get namespaces | grep -c p11-07 || true
+2
+exit 0
+
+$ heavy_unlock
+released
+
+$ heavy_lock
+acquired
+exit 0
+
+$ helm uninstall chaos-mesh -n p11-07-chaos
+release "chaos-mesh" uninstalled
+exit 0
+
+$ for crd in $(kubectl get crd -o name | grep chaos-mesh.org); do kubectl delete "$crd"; done
+customresourcedefinition.apiextensions.k8s.io "awschaos.chaos-mesh.org" deleted
+customresourcedefinition.apiextensions.k8s.io "azurechaos.chaos-mesh.org" deleted
+customresourcedefinition.apiextensions.k8s.io "blockchaos.chaos-mesh.org" deleted
+customresourcedefinition.apiextensions.k8s.io "dnschaos.chaos-mesh.org" deleted
+customresourcedefinition.apiextensions.k8s.io "gcpchaos.chaos-mesh.org" deleted
+customresourcedefinition.apiextensions.k8s.io "httpchaos.chaos-mesh.org" deleted
+customresourcedefinition.apiextensions.k8s.io "iochaos.chaos-mesh.org" deleted
+customresourcedefinition.apiextensions.k8s.io "jvmchaos.chaos-mesh.org" deleted
+customresourcedefinition.apiextensions.k8s.io "kernelchaos.chaos-mesh.org" deleted
+customresourcedefinition.apiextensions.k8s.io "networkchaos.chaos-mesh.org" deleted
+customresourcedefinition.apiextensions.k8s.io "physicalmachinechaos.chaos-mesh.org" deleted
+customresourcedefinition.apiextensions.k8s.io "physicalmachines.chaos-mesh.org" deleted
+customresourcedefinition.apiextensions.k8s.io "podchaos.chaos-mesh.org" deleted
+customresourcedefinition.apiextensions.k8s.io "podhttpchaos.chaos-mesh.org" deleted
+customresourcedefinition.apiextensions.k8s.io "podiochaos.chaos-mesh.org" deleted
+customresourcedefinition.apiextensions.k8s.io "podnetworkchaos.chaos-mesh.org" deleted
+customresourcedefinition.apiextensions.k8s.io "remoteclusters.chaos-mesh.org" deleted
+customresourcedefinition.apiextensions.k8s.io "schedules.chaos-mesh.org" deleted
+customresourcedefinition.apiextensions.k8s.io "statuschecks.chaos-mesh.org" deleted
+customresourcedefinition.apiextensions.k8s.io "stresschaos.chaos-mesh.org" deleted
+customresourcedefinition.apiextensions.k8s.io "timechaos.chaos-mesh.org" deleted
+customresourcedefinition.apiextensions.k8s.io "workflownodes.chaos-mesh.org" deleted
+customresourcedefinition.apiextensions.k8s.io "workflows.chaos-mesh.org" deleted
+exit 0
+
+$ kubectl get crd -o name | grep -c chaos-mesh.org || true
+0
+exit 0
+
+$ kubectl delete namespace p11-07-bookstore p11-07-chaos --wait=true
+namespace "p11-07-bookstore" deleted
+namespace "p11-07-chaos" deleted
+$ kubectl get namespaces | grep -c p11-07
+0
+exit 0
+
+$ heavy_unlock
+released
