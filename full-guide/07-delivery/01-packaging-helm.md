@@ -96,6 +96,7 @@ toggle make the app *insecure by default*.
 |---|---|---|
 | A value switches off a baseline field, such as `allowPrivilegeEscalation: true` or a writable root filesystem | `values.schema.json` fixes the baseline fields of every `securityProfiles` entry, so the render refuses the value | [05.02](../05-security/02-pod-security.md) for the fields; [07.02](02-packaging-kustomize.md) for overlays |
 | A password in a values file or in the release record | Prod sets `dbCredentials.create: false`; the Secret comes from outside the chart | [03.02](../03-config-and-storage/02-secrets.md) |
+| A default credential in the production path, such as a stock login in a connection Secret | The chart holds no KEDA connection string and renders no Secret for it; `keda.enabled=true` without `keda.connectionSecretName` fails the render | [03.02](../03-config-and-storage/02-secrets.md), [11.05](../11-advanced-production-patterns/05-secrets-at-scale.md) |
 | A chart or image other than the one you reviewed | Pin the chart by digest, check a signature when the publisher makes one, render and scan before install | [05.03](../05-security/03-supply-chain.md); [07.03](03-cicd-pipeline.md) for signing in CI |
 
 ## Diagrams
@@ -455,54 +456,193 @@ Every later `helm upgrade` in this chapter repeats
 `--set namespace.create=false`. A value that is not passed falls back to the chart default, which is `true`,
 and the upgrade would then try to create the Namespace again.
 
-`--wait` gates the command until the normal objects are Ready *and* the
-post-install `db-migrate` hook Job has completed — so the inspections below
-see a finished migration rather than one still running. (Drop `--wait` and the
-command returns immediately; the hook Job may still be `Running` — just
-re-check it in a moment.) Helm then prints `NOTES.txt` (rendered): what was
-created, how to reach it, the CRD-toggle reminders, and the demo-Secret
-warning. Watch it converge. The lab run stopped before this step, so the
-comments below are the results to expect, not captured output:
+`--wait` holds the command until the normal objects are Ready and the
+post-install `db-migrate` hook Job has completed, so the inspections below see
+a finished migration. Without `--wait` the command returns at once and the hook
+Job may still be running. Helm then prints the rendered `NOTES.txt`: what was
+created, how to reach it, the CRD-toggle reminders and the demo-Secret warning.
 
-```sh
-kubectl get pods -n bookstore -w
-# Expected: postgres-0 Running; catalog/orders/storefront/payments-worker/redis/rabbitmq Ready
-kubectl get job db-migrate -n bookstore         # the post-install HOOK Job (Completed)
-kubectl logs job/db-migrate -n bookstore        # "migration complete"
+The captured runs in sections 2 to 6 used the namespace `p07-finish-helm` on a
+shared lab cluster, and a values file that points the three hostnames the chart
+builds from `bookstore` at that namespace. Where your run shows `bookstore`, the
+capture shows `p07-finish-helm`. The top of the install output:
+
+<!-- gate: output -->
+```text
+NAME: bookstore
+# ...
+NAMESPACE: p07-finish-helm
+STATUS: deployed
+REVISION: 1
 ```
 
-Confirm the namespace really enforces `restricted` and the pods were admitted.
-Illustrative output (not captured in the lab run): the comments show the
-expected results.
+Watch it converge:
+
+```sh
+kubectl get pods -n bookstore
+```
+
+<!-- gate: output -->
+```text
+NAME                               READY   STATUS    RESTARTS   AGE
+catalog-65b9c66f6d-2dbhn           1/1     Running   0          4m19s
+catalog-65b9c66f6d-9sg97           1/1     Running   0          4m19s
+catalog-65b9c66f6d-t9v6c           1/1     Running   0          4m19s
+orders-7f4d49848c-n6tzm            1/1     Running   0          4m19s
+orders-7f4d49848c-rdxsm            1/1     Running   0          4m19s
+payments-worker-84bdc645d5-qfrrc   1/1     Running   0          4m19s
+postgres-0                         1/1     Running   0          4m18s
+rabbitmq-5d4d4759f4-zb8w4          1/1     Running   0          4m19s
+redis-7886bf6bbb-tnwnl             1/1     Running   0          4m19s
+storefront-5d4785446f-dz5rr        1/1     Running   0          4m19s
+storefront-5d4785446f-n2wzt        1/1     Running   0          4m19s
+```
+
+All eleven pods are `Running`, so admission accepted every workload under
+`enforce: restricted`. Confirm the labels that did the enforcing:
 
 ```sh
 kubectl get ns bookstore -o jsonpath='{.metadata.labels}' | tr ',' '\n' | grep pod-security
-# Expected: pod-security.kubernetes.io/enforce:restricted ... (audit + warn too)
-kubectl get pods -n bookstore        # Expected: all Running, with no admission refusals
+```
+
+<!-- gate: output -->
+```text
+"pod-security.kubernetes.io/audit":"restricted"
+"pod-security.kubernetes.io/enforce":"restricted"
+"pod-security.kubernetes.io/warn":"restricted"}
+```
+
+The migration Job is the post-install hook. Ask for it:
+
+```sh
+kubectl get job db-migrate -n bookstore
+```
+
+<!-- gate: output -->
+```text
+Error from server (NotFound): jobs.batch "db-migrate" not found
+```
+
+It is gone on purpose. The Job's `helm.sh/hook-delete-policy` includes
+`hook-succeeded`, so Helm deletes a hook Job once it completes and keeps only a
+failed one for debugging. A missing Job after a good install is the expected
+result. Its events show that it ran, and the database holds the tables it
+created (`cut` only narrows the event lines):
+
+```sh
+kubectl get events -n bookstore --field-selector involvedObject.name=db-migrate | cut -c1-90
+```
+
+<!-- gate: output -->
+```text
+LAST SEEN   TYPE     REASON             OBJECT           MESSAGE
+14s         Normal   SuccessfulCreate   job/db-migrate   Created pod: db-migrate-l9rtd
+1s          Normal   Completed          job/db-migrate   Job completed
+```
+
+```sh
+kubectl exec -n bookstore postgres-0 -- psql -U bookstore -d bookstore -c '\dt'
+```
+
+<!-- gate: output -->
+```text
+          List of relations
+ Schema |  Name  | Type  |   Owner   
+--------+--------+-------+-----------
+ public | books  | table | bookstore
+ public | orders | table | bookstore
+(2 rows)
 ```
 
 ### 3. Inspect the release (the thing raw `kubectl` never gave us)
 
 ```sh
-# Illustrative output (not captured in the lab run):
 helm list -n bookstore
-# NAME       NAMESPACE  REVISION  STATUS    CHART            APP VERSION
-# bookstore  bookstore  1         deployed  bookstore-0.1.1  dev
-
-helm status bookstore -n bookstore                 # status + NOTES
-helm get manifest bookstore -n bookstore | head    # the EXACT YAML applied
-helm get values  bookstore -n bookstore            # user-supplied values: namespace.create=false
-helm history bookstore -n bookstore                # one revision so far
 ```
 
-`helm get manifest` reads the release **Secret**, not the cluster — prove the
-release is stored in-cluster (no Tiller, just a Secret). Illustrative output
-(not captured in the lab run):
+<!-- gate: output -->
+```text
+NAME        NAMESPACE       REVISION    UPDATED                                 STATUS      CHART           APP VERSION
+bookstore   p07-finish-helm 1           2026-10-31 10:51:47.804924 +0500 PKT    deployed    bookstore-0.1.1 dev        
+```
+
+```sh
+helm status bookstore -n bookstore | head -n 6
+```
+
+<!-- gate: output -->
+```text
+NAME: bookstore
+LAST DEPLOYED: Sat Oct 31 10:51:47 2026
+NAMESPACE: p07-finish-helm
+STATUS: deployed
+REVISION: 1
+TEST SUITE: None
+```
+
+`helm status` goes on to print the rendered notes. `helm get manifest` returns
+the exact YAML that was applied. Count its objects:
+
+```sh
+helm get manifest bookstore -n bookstore | grep -c "^kind:"
+```
+
+<!-- gate: output -->
+```text
+44
+```
+
+That is 44, not the 49 of `helm template`. This install left out the Namespace
+(`namespace.create=false`) and the three PriorityClasses
+(`priorityClasses.create=false`, because the shared lab cluster already had
+them), and Helm keeps a hook Job out of the release manifest. On a fresh
+cluster, where `priorityClasses.create` stays `true`, the count is 47.
+
+`helm get values` returns only the values you supplied, not the chart defaults.
+Here that is `namespace.create=false` and the lab's substitutions:
+
+```sh
+helm get values bookstore -n bookstore
+```
+
+<!-- gate: output -->
+```text
+USER-SUPPLIED VALUES:
+catalogConfig:
+  data:
+    REDIS_ADDR: redis:6379
+database:
+  host: postgres
+namespace:
+  create: false
+  name: p07-finish-helm
+paymentsWorker:
+  amqpUrl: amqp://guest:guest@rabbitmq:5672/
+priorityClasses:
+  create: false
+```
+
+```sh
+helm history bookstore -n bookstore
+```
+
+<!-- gate: output -->
+```text
+REVISION    UPDATED                     STATUS      CHART           APP VERSION DESCRIPTION     
+1           Sat Oct 31 10:51:47 2026    deployed    bookstore-0.1.1 dev         Install complete
+```
+
+`helm get manifest` reads the release **Secret**, not the cluster. The release
+is stored in-cluster, with no Tiller, as one Secret per revision:
 
 ```sh
 kubectl get secret -n bookstore -l owner=helm
-# NAME                                 TYPE                 ...
-# sh.helm.release.v1.bookstore.v1      helm.sh/release.v1   ...
+```
+
+<!-- gate: output -->
+```text
+NAME                              TYPE                 DATA   AGE
+sh.helm.release.v1.bookstore.v1   helm.sh/release.v1   1      4m22s
 ```
 
 #### Secrets in values and in the release record
@@ -510,24 +650,52 @@ kubectl get secret -n bookstore -l owner=helm
 The release record holds the rendered manifest and the values you supplied.
 Whoever can read Secrets in that namespace can read both. The chart writes the
 demo database Secret with `stringData`, so the password is in clear text in
-the render:
+the render. The value is the demo one that the chart ships in `values.yaml`:
 
 ```sh
-helm template bookstore examples/bookstore/helm/bookstore -n bookstore | grep -n "POSTGRES_PASSWORD:"
+helm template bookstore examples/bookstore/helm/bookstore -n bookstore | grep "POSTGRES_PASSWORD:"
 ```
 
 <!-- gate: output -->
 ```text
-603:  POSTGRES_PASSWORD: "devpassword"
+  POSTGRES_PASSWORD: "devpassword"
 ```
 
-On a live release, `helm get manifest bookstore -n bookstore` returns the same
-value, because the manifest is stored with the release. `helm get values`
-prints only the values you supplied, so with the defaults it shows no password.
-`helm get values bookstore -n bookstore --all` prints every computed value,
-password included. The CLI help reads `-a, --all  dump all (computed) values`.
+Decode the live release record and count that password in it. The count prints,
+the password does not:
 
-Prod turns the demo Secrets off:
+```sh
+kubectl get secret sh.helm.release.v1.bookstore.v1 -n bookstore -o jsonpath="{.data.release}" \
+  | base64 -d | base64 -d | gunzip | grep -o "devpassword" | wc -l
+```
+
+<!-- gate: output -->
+```text
+       2
+```
+
+It is there twice: a dry run of the install, as JSON, puts one copy in the
+stored manifest and one in the chart's default values, which the record carries
+too. `helm get values` prints only the values you supplied, so with the defaults
+it shows no password. `--all` prints every computed value, password included.
+Count the password in each:
+
+```sh
+helm get values bookstore -n bookstore --all | grep -c "POSTGRES_PASSWORD"
+helm get values bookstore -n bookstore | grep -c "POSTGRES_PASSWORD"
+```
+
+<!-- gate: output -->
+```text
+1
+```
+
+<!-- gate: output -->
+```text
+0
+```
+
+Prod turns the demo database Secret off:
 
 ```sh
 helm template bookstore examples/bookstore/helm/bookstore -n bookstore \
@@ -539,54 +707,82 @@ helm template bookstore examples/bookstore/helm/bookstore -n bookstore \
 0
 ```
 
+`db-credentials` is gone in prod (`dbCredentials.create: false`). The KEDA
+scaler's connection Secret is not rendered in any values file: the chart holds
+no AMQP URL for the scaler and no default to fall back to. The one
+`rabbitmq-conn` in the prod render is the TriggerAuthentication naming a Secret
+that the operator creates, and the chart refuses to render KEDA without that
+name (section 6):
+
 ```sh
 helm template bookstore examples/bookstore/helm/bookstore -n bookstore \
-  -f examples/bookstore/helm/bookstore/values-prod.yaml | grep -n "name: rabbitmq-conn"
+  -f examples/bookstore/helm/bookstore/values-prod.yaml | grep -c "name: rabbitmq-conn"
 ```
 
 <!-- gate: output -->
 ```text
-1915:      name: rabbitmq-conn
+1
 ```
 
-`db-credentials` is gone in prod (`dbCredentials.create: false`), and so is the
-KEDA scaler's `rabbitmq-conn` Secret (`keda.connectionSecret.create: false`).
-The ScaledObject's TriggerAuthentication still names `rabbitmq-conn`, so
-production must supply a Secret of that name out of band, the same way as
-`db-credentials`. The prod render still holds one plain `guest:guest` string,
-the payments-worker's `AMQP_URL` value (`grep -c "guest:guest"` counts it).
-Moving that value into a Secret is the same change, and this chapter does not
-make it.
+One plain `guest:guest` string is still in the prod render. It is the
+payments-worker's `AMQP_URL`, the stock login of this guide's in-cluster
+RabbitMQ, which still runs with its default user:
+
+```sh
+helm template bookstore examples/bookstore/helm/bookstore -n bookstore \
+  -f examples/bookstore/helm/bookstore/values-prod.yaml | grep -c "guest:guest"
+```
+
+<!-- gate: output -->
+```text
+1
+```
+
+That is a known gap in the prod path, not a finished control. Moving the URL
+into a Secret also needs a real broker credential, so it is a change to the
+chart and to RabbitMQ's own manifest, and this chapter does not make it.
 
 ### 4. Override values, upgrade, roll back
 
-The chart ships per-environment value files. Preview a `dev` override as a
-diff against the live release using only built-in tooling:
+The chart ships per-environment value files. Preview the `dev` override against
+the live release using only built-in tooling. `helm get manifest` returns
+objects in Helm's apply order and `helm template` writes them in file order, so
+a line diff shows large blocks as moved when nothing changed. Compare the kinds
+instead. The lab's own values file went last so that it won over
+`values-dev.yaml`:
 
 ```sh
-helm get manifest bookstore -n bookstore > /tmp/cur.yaml
+S=$(mktemp -d)
+helm get manifest bookstore -n bookstore > "$S/cur.yaml"
 helm template bookstore examples/bookstore/helm/bookstore -n bookstore \
-  --set namespace.create=false -f examples/bookstore/helm/bookstore/values-dev.yaml > /tmp/new.yaml
-diff /tmp/cur.yaml /tmp/new.yaml | head -40
-#  catalog/storefront/orders replicas -> 1, LOG_LEVEL -> debug, no HPA/PDB
+  --set namespace.create=false -f examples/bookstore/helm/bookstore/values-dev.yaml > "$S/new.yaml"
+diff <(grep '^kind:' "$S/cur.yaml" | sort | uniq -c) <(grep '^kind:' "$S/new.yaml" | sort | uniq -c)
+rm -rf "$S"
 ```
 
-> **Expect order-only noise here.** `helm get manifest` returns objects in
-> Helm's *apply order*; `helm template` emits them in *file-alphabetical*
-> order — so a raw `diff` shows large blocks "moved" even when nothing
-> changed. For a clean semantic diff use the **`helm-diff`** plugin
-> (`helm plugin install https://github.com/databus23/helm-diff --version v3.15.15`),
-> then. The plugin runs with your kubeconfig rights, so pin it like a chart:
+<!-- gate: output -->
+```text
+4d3
+<    1 kind: HorizontalPodAutoscaler
+5a5
+>    1 kind: Job
+8d7
+<    3 kind: PodDisruptionBudget
+```
+
+Dev drops the HPA and the three PodDisruptionBudgets. The `Job` line is only the
+hook: `helm template` prints it and the live release manifest does not.
+
+> For a semantic diff of everything else, use the **`helm-diff`** plugin
+> (`helm plugin install https://github.com/databus23/helm-diff --version v3.15.15`).
+> The plugin runs with your kubeconfig rights, so pin it like a chart:
 >
 > ```sh
 > helm diff upgrade bookstore examples/bookstore/helm/bookstore -n bookstore --set namespace.create=false -f …/values-dev.yaml
 > ```
 >
-> This compares the *live release* to the *proposed* release and reports only real changes.
-
-The comments in the upgrade and rollback blocks of this section give the
-results to expect. The lab run did not reach this section, so none of that
-output is captured.
+> It compares the *live release* to the *proposed* release and reports only
+> real changes. This guide did not run the plugin.
 
 Apply it as **revision 2**, then change one value via `--set` as **revision
 3** (precedence: `--set` beats `-f` beats chart defaults):
@@ -597,31 +793,102 @@ helm upgrade bookstore examples/bookstore/helm/bookstore -n bookstore \
 helm upgrade bookstore examples/bookstore/helm/bookstore -n bookstore \
   --set namespace.create=false -f examples/bookstore/helm/bookstore/values-dev.yaml \
   --set catalog.image.tag=dev --set catalogConfig.data.LOG_LEVEL=warn --wait
-
-helm history bookstore -n bookstore        # 3 revisions
-kubectl get deploy catalog -n bookstore    # READY 1/1 (dev override took)
 ```
 
-The migration Job re-runs on **every** upgrade (it is a
-`post-install,post-upgrade` hook) and is idempotent (`CREATE TABLE IF NOT
-EXISTS`) — confirm it cycled:
+The second upgrade printed:
+
+<!-- gate: output -->
+```text
+Release "bookstore" has been upgraded. Happy Helming!
+NAME: bookstore
+LAST DEPLOYED: Sat Oct 31 10:57:18 2026
+NAMESPACE: p07-finish-helm
+STATUS: deployed
+REVISION: 3
+```
 
 ```sh
-kubectl get job db-migrate -n bookstore    # AGE resets each upgrade; COMPLETIONS 1/1
+helm history bookstore -n bookstore
+kubectl get deploy catalog -n bookstore
 ```
 
-Roll the **whole app** back to revision 1 (the original full-scale install) —
+<!-- gate: output -->
+```text
+REVISION    UPDATED                     STATUS      CHART           APP VERSION DESCRIPTION     
+1           Sat Oct 31 10:51:47 2026    superseded  bookstore-0.1.1 dev         Install complete
+2           Sat Oct 31 10:56:27 2026    superseded  bookstore-0.1.1 dev         Upgrade complete
+3           Sat Oct 31 10:57:18 2026    deployed    bookstore-0.1.1 dev         Upgrade complete
+```
+
+<!-- gate: output -->
+```text
+NAME      READY   UP-TO-DATE   AVAILABLE   AGE
+catalog   1/1     1            1           5m51s
+```
+
+Three revisions, and the dev override took: catalog runs one replica. The
+migration Job re-runs on **every** upgrade, because it is a
+`post-install,post-upgrade` hook, and it is idempotent (`CREATE TABLE IF NOT
+EXISTS`). Each run leaves a pair of events, and the Job itself is deleted again
+when it succeeds. Here are the install and the two upgrades:
+
+```sh
+kubectl get events -n bookstore --field-selector involvedObject.name=db-migrate | cut -c1-90
+```
+
+<!-- gate: output -->
+```text
+LAST SEEN   TYPE     REASON             OBJECT           MESSAGE
+105s        Normal   SuccessfulCreate   job/db-migrate   Created pod: db-migrate-l9rtd
+92s         Normal   Completed          job/db-migrate   Job completed
+36s         Normal   SuccessfulCreate   job/db-migrate   Created pod: db-migrate-pxb5h
+23s         Normal   Completed          job/db-migrate   Job completed
+11s         Normal   SuccessfulCreate   job/db-migrate   Created pod: db-migrate-6cfpg
+1s          Normal   Completed          job/db-migrate   Job completed
+```
+
+An earlier attempt of this same upgrade, on a heavily loaded lab host, failed:
+the hook Job passed its 120 second `activeDeadlineSeconds`, and Helm recorded
+the revision as `failed`. Running the command again succeeded. The transcript
+header records it. That is the case `--atomic` covers: it rolls a failed
+upgrade back for you ([Helm docs](https://helm.sh/docs/helm/helm_upgrade/)).
+
+Roll the **whole app** back to revision 1 (the original full-scale install),
 the atomic unit raw `kubectl` could not give us:
 
 ```sh
 helm rollback bookstore 1 -n bookstore --wait
-helm history bookstore -n bookstore        # revision 4 = "Rollback to 1"
-kubectl get deploy catalog -n bookstore    # READY 3/3 again
+helm history bookstore -n bookstore
+kubectl get deploy catalog -n bookstore
 ```
+
+<!-- gate: output -->
+```text
+Rollback was a success! Happy Helming!
+```
+
+<!-- gate: output -->
+```text
+REVISION    UPDATED                     STATUS      CHART           APP VERSION DESCRIPTION     
+1           Sat Oct 31 10:51:47 2026    superseded  bookstore-0.1.1 dev         Install complete
+2           Sat Oct 31 10:56:27 2026    superseded  bookstore-0.1.1 dev         Upgrade complete
+3           Sat Oct 31 10:57:18 2026    superseded  bookstore-0.1.1 dev         Upgrade complete
+4           Sat Oct 31 10:57:41 2026    deployed    bookstore-0.1.1 dev         Rollback to 1   
+```
+
+<!-- gate: output -->
+```text
+NAME      READY   UP-TO-DATE   AVAILABLE   AGE
+catalog   3/3     3            3           8m52s
+```
+
+Revision 4 is the rollback, and catalog is back to three replicas. The rollback
+does not rewind history: it re-applies revision 1's stored manifest as a new
+revision.
 
 ### 5. Prove restricted admission with a server-side dry-run
 
-A client dry-run does not run admission. A **server** dry-run does — including
+A client dry-run does not run admission. A **server** dry-run does, including
 **Pod Security Admission**. This is the same proof technique Part 05 ch.02 and
 Part 06 used; here it certifies the *rendered chart*:
 
@@ -635,56 +902,154 @@ kubectl label namespace bs-verify \
 
 # Render WITHOUT the chart's own Namespace (we want to test admission into the
 # labelled throwaway ns), then server dry-run into it:
+S=$(mktemp -d)
 helm template bookstore examples/bookstore/helm/bookstore -n bs-verify \
   --set namespace.create=false --set namespace.name=bs-verify \
-  | kubectl apply --dry-run=server -n bs-verify -f -
-# Expected: every workload reports "<OBJ> created (server dry run)" with no PodSecurity warning (not captured in the lab run)
-
-kubectl delete namespace bs-verify         # leave the cluster as you found it
+  | kubectl apply --dry-run=server -n bs-verify -f - > "$S/dry.txt" 2>&1
+echo "$(grep -c 'created (server dry run)' "$S/dry.txt") created, $(grep -ci warning "$S/dry.txt") warnings"
+rm -rf "$S"
 ```
 
-The lab run did not reach the server dry run, so its admission result is not
-captured here. The render is built so that each Deployment, StatefulSet, Job
-and CronJob should be admitted under `enforce: restricted` with no PodSecurity
-warning, because `_helpers.tpl` renders the per-image restricted
+<!-- gate: output -->
+```text
+45 created, 0 warnings
+```
+
+No object was refused and no PodSecurity warning was printed. The lab's values
+file also skipped the three PriorityClasses that its cluster already had, so it
+counted 45. On a cluster without them the same render is 48 objects. Each
+Deployment, StatefulSet, Job and CronJob is admitted under `enforce:
+restricted` because `_helpers.tpl` renders the per-image restricted
 `securityContext` from Part 05 ch.02 (Go services UID 65532 and a read-only
 root FS; storefront UID 101; postgres and rabbitmq UID 999 with `fsGroup`, a
 read-only root FS and emptyDir mounts for the paths they write outside the
-data volume; redis UID 999 with a read-only root FS). Section 1's schema pins
-the fields that these contexts set. Run the dry run below on your cluster to
-check admission.
+data volume; redis UID 999 with a read-only root FS). Section 1a's schema pins
+the fields that these contexts set.
+
+Now a deliberate violation, to see the same namespace refuse a workload. A Pod
+that asks for `privileged` is sent to it as a server dry run, so nothing is
+created:
+
+```sh
+kubectl run bad --image=busybox -n bs-verify --dry-run=server --restart=Never \
+  --overrides='{"spec":{"containers":[{"name":"bad","image":"busybox","securityContext":{"privileged":true}}]}}' 2>&1 | head -1
+```
+
+<!-- gate: output -->
+```text
+Error from server (Forbidden): pods "bad" is forbidden: violates PodSecurity "restricted:latest": privileged (container "bad" must not set securityContext.privileged=true), allowPrivilegeEscalation != false (container "bad" must set securityContext.allowPrivilegeEscalation=false), unrestricted capabilities (container "bad" must set securityContext.capabilities.drop=["ALL"]), runAsNonRoot != true (pod or container "bad" must set securityContext.runAsNonRoot=true), seccompProfile (pod or container "bad" must set securityContext.seccompProfile.type to "RuntimeDefault" or "Localhost")
+```
+
+```sh
+kubectl delete namespace bs-verify         # leave the cluster as you found it
+```
 
 ### 6. Toggle a CRD-backed extra — and be honest about operators
 
 The observability/scaling extras are CRD-backed, so they default **off**.
-Turn the ServiceMonitor + KEDA on and render:
+KEDA also needs a credential. The scaler reads the queue length over AMQP, so it
+needs the broker URL. The chart renders no Secret for it and carries no default.
+You create the Secret in the release namespace, with the key `host`, and name it
+in `keda.connectionSecretName`. Turn KEDA on without a name first. This step is
+a deliberate failure:
+
+```sh
+helm template bookstore examples/bookstore/helm/bookstore -n bookstore \
+  --set keda.enabled=true 2>&1 | head -n 1
+```
+
+<!-- gate: output -->
+```text
+Error: execution error at (bookstore/templates/83-keda-scaledobject.yaml:19:19): keda.enabled=true needs keda.connectionSecretName: the name of an existing Secret, created by the operator, whose key `host` holds the RabbitMQ AMQP URL. The chart renders no connection Secret and carries no default credential.
+```
+
+The render stops at `required` in `templates/83-keda-scaledobject.yaml`, and the
+message names the value and says what to create. `values-prod.yaml` enables KEDA
+and names `rabbitmq-conn`, so a production render that lost that name would stop
+the same way, not fall back to a stock login.
+
+Create the Secret. The value below is a throwaway that `openssl` generates and
+nothing prints. It is enough for a render and a dry run. A scaler that connects
+needs your broker's own URL, which in this guide's lab is the stock `guest`
+login the payments-worker already uses. Pipe the value in, so it never sits on a
+command line:
+
+```sh
+AMQP_URL="amqp://demo:$(openssl rand -hex 12)@rabbitmq:5672/"
+printf "%s" "$AMQP_URL" | kubectl create secret generic rabbitmq-conn \
+  -n bookstore --from-file=host=/dev/stdin
+kubectl get secret rabbitmq-conn -n bookstore
+```
+
+<!-- gate: output -->
+```text
+secret/rabbitmq-conn created
+# ...
+NAME            TYPE     DATA   AGE
+rabbitmq-conn   Opaque   1      0s
+```
+
+Name it, turn the ServiceMonitor on too, and render:
 
 ```sh
 helm template bookstore examples/bookstore/helm/bookstore -n bookstore \
   --set serviceMonitor.enabled=true --set keda.enabled=true \
-  | kubectl apply --dry-run=client -f - 2>&1 | grep -E 'ScaledObject|ServiceMonitor' | tail
+  --set keda.connectionSecretName=rabbitmq-conn \
+  | kubectl apply --dry-run=client -f - 2>&1 | grep -E 'ScaledObject|TriggerAuth|ServiceMonitor' | tail
 ```
 
-If KEDA is **not** installed you will see this (illustrative, not captured in the lab run):
+If KEDA and the Prometheus Operator are **not** installed you see this, and the
+lab cluster has neither:
 
-```
-... no matches for kind "ScaledObject" in version "keda.sh/v1alpha1"
-... no matches for kind "TriggerAuthentication" in version "keda.sh/v1alpha1"
+<!-- gate: output -->
+```text
+resource mapping not found for name: "payments-worker" namespace: "p07-finish-helm" from "STDIN": no matches for kind "ScaledObject" in version "keda.sh/v1alpha1"
+resource mapping not found for name: "catalog" namespace: "p07-finish-helm" from "STDIN": no matches for kind "ServiceMonitor" in version "monitoring.coreos.com/v1"
+resource mapping not found for name: "payments-worker" namespace: "p07-finish-helm" from "STDIN": no matches for kind "ServiceMonitor" in version "monitoring.coreos.com/v1"
+resource mapping not found for name: "rabbitmq-trigger-auth" namespace: "p07-finish-helm" from "STDIN": no matches for kind "TriggerAuthentication" in version "keda.sh/v1alpha1"
 ```
 
-That is **expected and correct** — identical to the intrinsic behaviour the
-raw manifests
+That is **expected and correct**, identical to the intrinsic behaviour the raw
+manifests
 ([`83-keda-scaledobject.yaml`](../examples/bookstore/raw-manifests/83-keda-scaledobject.yaml),
 `80-`, `51-`, `70-`, `18-`) already documented: the *templated object is
-schema-correct*, but the **CRD must exist first**. Install the operator with
-**Helm** (never a `releases/latest/download/<PINNED-FILE>.yaml` URL — it 404s
-when a new release ships), then the same toggle applies cleanly. This guide installs
-the KEDA chart from its HTTP repository, so it pins the tarball by the SHA-256 in
-the repository index. Create and label the namespace first, as section 2
-does for `bookstore`, so the install does not leave it unlabelled. The
-`restricted` label is what the render check in [ch.05](05-progressive-delivery.md)
-uses for the other third-party charts, and the three KEDA Deployments set the
-restricted fields in their render:
+schema-correct*, but the **CRD must exist first**.
+
+The object count stays honest about the Secret. The default render is 49 and
+did not move. KEDA on adds the TriggerAuthentication and the ScaledObject, so
+51. The chart used to add a third object here, the Secret, and no longer does.
+The prod render is 53: the 49, less the database Secret that prod turns off,
+plus the two ServiceMonitors, the PrometheusRule and the two KEDA objects:
+
+```sh
+helm template bookstore examples/bookstore/helm/bookstore -n bookstore | grep -c "^kind:"
+helm template bookstore examples/bookstore/helm/bookstore -n bookstore \
+  --set keda.enabled=true --set keda.connectionSecretName=rabbitmq-conn | grep -c "^kind:"
+helm template bookstore examples/bookstore/helm/bookstore -n bookstore \
+  -f examples/bookstore/helm/bookstore/values-prod.yaml | grep -c "^kind:"
+```
+
+<!-- gate: output -->
+```text
+49
+# ...
+51
+# ...
+53
+```
+
+The three Kustomize overlays are unaffected: none of them lists the `keda`
+component. Install the operator with **Helm** (never a
+`releases/latest/download/<PINNED-FILE>.yaml` URL, which 404s when a new
+release ships), then the same toggle applies cleanly. This guide installs the
+KEDA chart from its HTTP repository, so it pins the tarball by the SHA-256 in
+the repository index. Create and label the namespace first, as section 2 does
+for `bookstore`, so the install does not leave it unlabelled. The `restricted`
+label is what the render check in [ch.05](05-progressive-delivery.md) uses for
+the other third-party charts, and the three KEDA Deployments set the
+restricted fields in their render. The lab did not run these steps, because
+they install an operator and its CRDs on a shared cluster. They are cited from
+the KEDA chart's repository index, not captured:
 
 ```sh
 kubectl create namespace keda
@@ -693,7 +1058,8 @@ curl -fsSLO https://kedacore.github.io/charts/keda-2.21.0.tgz
 echo "a7da56bf41a33dad9d2fc82a6fdecee552fff947d80bf1e1dbcf4db0f9e26dee  keda-2.21.0.tgz" | shasum -a 256 -c -
 helm install keda ./keda-2.21.0.tgz -n keda --wait
 helm upgrade bookstore examples/bookstore/helm/bookstore -n bookstore \
-  --set namespace.create=false --set keda.enabled=true --wait
+  --set namespace.create=false --set keda.enabled=true \
+  --set keda.connectionSecretName=rabbitmq-conn --wait
 kubectl get scaledobject,hpa -n bookstore     # KEDA created the managed HPA
 ```
 
@@ -758,7 +1124,8 @@ string substitution, so structure is enforced by convention:
   every workload changes. This is the mechanism that makes "the chart equals
   the app" true rather than aspirational.
 - **`required` / `default` / `tpl`.** `required "msg" .Values.x` aborts the
-  render if a value is missing (use it for values with no safe default);
+  render if a value is missing (use it for values with no safe default, such
+  as the name of the KEDA connection Secret);
   `default "v" .Values.x` supplies a fallback; `tpl "{{ .Values.y }}" .`
   renders a *string value* as a template (for user-supplied templated
   strings). `toYaml` serialises a value sub-tree (used for `resources`,
@@ -877,10 +1244,11 @@ and `helm-diff` (preview an upgrade's three-way diff before applying).
 > **In production: NEVER put real secrets in `values.yaml`.** The
 > `db-credentials` Secret this chart renders is **demo-only** — a Secret is
 > base64, not encryption (the same warning as Part 03 ch.02 / Part 05 ch.04).
-> Set `dbCredentials.create=false` and `keda.connectionSecret.create=false`
-> (as `values-prod.yaml` does) and have
-> **External Secrets Operator / Sealed Secrets / Vault** provide Secrets of
-> the same names out of band; enable encryption-at-rest on the apiserver. For
+> Set `dbCredentials.create=false` (as `values-prod.yaml` does), name the KEDA
+> connection Secret in `keda.connectionSecretName`, and have
+> **External Secrets Operator / Sealed Secrets / Vault** provide both Secrets
+> out of band. The chart renders neither in prod, and it refuses to render KEDA
+> without the name. Enable encryption-at-rest on the apiserver. For
 > values files that *do* contain sensitive config, use `helm secrets`
 > (SOPS-backed) so the file is encrypted in Git and decrypted only at
 > install. Secrets in `values.yaml` also end up in the release record, and
@@ -957,7 +1325,7 @@ dbCredentials: { create: true, secretName: db-credentials, ... }   # DEMO-ONLY
 ingress:  { enabled: true,  className: nginx, host: bookstore.localdev.me }
 gateway:  { enabled: false }          # XOR ingress (render fails if both on)
 hpa: { enabled: true }                # built-in autoscaling/v2 → default ON
-keda: { enabled: false }              # CRD → default OFF (needs the operator)
+keda: { enabled: false, connectionSecretName: "" }   # CRD → OFF; ON needs your Secret's name
 serviceMonitor: { enabled: false }    # CRD → default OFF
 migrationJob: { enabled: true }       # DB schema as a post-install/upgrade HOOK
 priorityClasses: { create: true }     # cluster-scoped, kept on uninstall
@@ -973,7 +1341,8 @@ Checklist:
 - [ ] Repeated YAML (labels, restricted SC, the DSN) lives in `_helpers.tpl`,
       not copy-pasted; mutually-exclusive toggles `fail` the render
 - [ ] No secrets in `values.yaml`/release Secret in prod (External Secrets /
-      SOPS); `dbCredentials.create=false`
+      SOPS); `dbCredentials.create=false`; the KEDA connection Secret is named
+      in `keda.connectionSecretName`, never rendered by the chart
 - [ ] `Chart.yaml` SemVer bumped on chart changes; chart signed & pushed to
       OCI; consumers pin the version
 - [ ] `helm upgrade --install --atomic --wait`; rollback path tested
@@ -1027,6 +1396,19 @@ Checklist:
    <details><summary>Show answer</summary>
 
    The render stops before anything is applied: the schema says `value must be false` at that path. The schema covers every `securityProfiles` entry and refuses any field it does not list, so `privileged`, `capabilities.add`, a Pod Security level other than `restricted` and `networkPolicy.enabled=false` are refused too. Values outside those fields, such as the Kyverno action, are not pinned, so a values file can still change them. The right fix is in the workload's image or its command, or a reviewed change to the schema that every profile would also have to satisfy. A flag on the install command is not that review.
+
+   </details>
+
+7. **Prod enables KEDA, and the render fails with "keda.enabled=true needs keda.connectionSecretName". A teammate proposes a default of `amqp://guest:guest@...` so the render passes. Why is the failure the better behaviour, and what do you do?**
+   <details><summary>Show answer</summary>
+
+A default is a credential the chart ships to every environment that forgets to
+override it, and a Secret the chart renders puts the value in Git, in the
+render and in the release record, where anyone who can read Secrets in the
+namespace can read it. A failed render stops that at review time. Create the
+Secret out of band (External Secrets Operator, Sealed Secrets, Vault, or
+`kubectl create secret` for a lab), with the AMQP URL under the key `host`,
+and name it in `keda.connectionSecretName`. The chart then only references it.
 
    </details>
 

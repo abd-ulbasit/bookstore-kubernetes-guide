@@ -177,3 +177,17 @@ $ kubectl delete namespace p07-02-verify
 namespace "p07-02-verify" deleted
 E1031 08:24:12.436594   91404 reflector.go:227] "Failed to watch" err="namespaces \"p07-02-verify\" is forbidden: User \"kubernetes-admin\" cannot watch resource \"namespaces\" in API group \"\" at the cluster scope - error from a previous attempt: EOF" reflector="k8s.io/client-go/tools/watch/informerwatcher.go:162" type="*unstructured.Unstructured"
 $ rm -rf "$S"
+# Step 9 rerun. The keda component no longer holds the rabbitmq-conn Secret (the
+# operator creates it, as 07.01 section 6 shows), so the devc overlay renders 50
+# objects, not 51, and the step 9 above is superseded. The rerun builds the same
+# devc overlay with printf instead of the heredoc, against the same lab cluster.
+# The last line counts Secrets in the render: the one left is db-credentials.
+## step 9 (rerun): the same step after the keda component stopped rendering its Secret
+$ S=$(mktemp -d); cp -R examples/bookstore/kustomize "$S/kz"; mkdir -p "$S/kz/overlays/devc"; printf "%s\n" "apiVersion: kustomize.config.k8s.io/v1beta1" "kind: Kustomization" "resources:" "  - ../dev" "components:" "  - ../../components/servicemonitor" "  - ../../components/keda" > "$S/kz/overlays/devc/kustomization.yaml"; kubectl kustomize "$S/kz/overlays/devc" > "$S/devc.yaml" && grep -c "^kind:" "$S/devc.yaml"; kubectl kustomize "$S/kz/overlays/devc" | kubectl apply --dry-run=client -f - 2>&1 | grep -E "ScaledObject|ServiceMonitor|PrometheusRule|TriggerAuth"; grep -c "^kind: Secret" "$S/devc.yaml"; rm -rf "$S"
+50
+resource mapping not found for name: "payments-worker" namespace: "bookstore" from "STDIN": no matches for kind "ScaledObject" in version "keda.sh/v1alpha1"
+resource mapping not found for name: "rabbitmq-trigger-auth" namespace: "bookstore" from "STDIN": no matches for kind "TriggerAuthentication" in version "keda.sh/v1alpha1"
+resource mapping not found for name: "bookstore-catalog-rules" namespace: "bookstore" from "STDIN": no matches for kind "PrometheusRule" in version "monitoring.coreos.com/v1"
+resource mapping not found for name: "catalog" namespace: "bookstore" from "STDIN": no matches for kind "ServiceMonitor" in version "monitoring.coreos.com/v1"
+resource mapping not found for name: "payments-worker" namespace: "bookstore" from "STDIN": no matches for kind "ServiceMonitor" in version "monitoring.coreos.com/v1"
+1
