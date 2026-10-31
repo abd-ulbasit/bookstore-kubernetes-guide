@@ -1,0 +1,41 @@
+# Transcript for 02-networking/02-services.md, read-only checks.
+# Tier A: a kind cluster, one node on Kubernetes v1.37.0, kubectl v1.37.2.
+# The cluster is shared. The chapter's namespace was p02-02-bookstore, a scratch
+# copy of the guide's raw manifests with the namespace renamed from bookstore.
+# The database user and name in 16-db-credentials carry the same rename.
+#
+# What ran: the Part 01 ch.04 prerequisites and step 1 were applied and reached
+# postgres Ready. Steps 2 and 3 did not finish: catalog stayed 0/1 because
+# postgres restarted under load on the shared host (kube-controller-manager and
+# kube-scheduler also restarted). The run was stopped and the chapter's output
+# blocks are limited to the checks below, which completed.
+## step 4: headless is different
+$ kubectl get svc postgres -n p02-02-bookstore
+NAME       TYPE        CLUSTER-IP   EXTERNAL-IP   PORT(S)    AGE
+postgres   ClusterIP   None         <none>        5432/TCP   8m34s
+
+$ kubectl get svc -n p02-02-bookstore
+NAME       TYPE        CLUSTER-IP   EXTERNAL-IP   PORT(S)    AGE
+postgres   ClusterIP   None         <none>        5432/TCP   8m36s
+
+## step 5: what the proxy runs, and the deprecated field
+$ kubectl -n kube-system get configmap kube-proxy -o jsonpath='{.data.config\.conf}' | grep -n 'mode:'
+52:mode: iptables
+grep exit=0
+
+$ kubectl explain service.spec.externalIPs
+KIND:       Service
+VERSION:    v1
+
+FIELD: externalIPs <[]string>
+
+
+DESCRIPTION:
+    externalIPs is a list of IP addresses for which nodes in the cluster will
+    also accept traffic for this service.  These IPs are not managed by
+    Kubernetes.  The user is responsible for ensuring that traffic arrives at a
+    node with this IP.  A common example is external load-balancers that are not
+    part of the Kubernetes system.
+    
+
+
