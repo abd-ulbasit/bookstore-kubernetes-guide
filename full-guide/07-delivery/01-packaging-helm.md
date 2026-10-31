@@ -8,12 +8,12 @@
 > `include`/`tpl`/`required`/`default`/`toYaml`; values precedence &
 > `values.schema.json`; hooks and the migration-Job-as-hook pattern; library
 > vs application charts and dependency management — applied by packaging the
-> **entire** cumulative Bookstore (Parts 00–06) as one real chart that stays
-> byte-faithful to `raw-manifests/`, restricted-PSA and all.
+> **entire** cumulative Bookstore (Parts 00–06) as one real chart that renders
+> the same app as `raw-manifests/`, restricted-PSA and all.
 
 **Estimated time:** ~30 min read · ~90 min hands-on
 **Prerequisites:** [Part 00 ch.06](../00-foundations/06-declarative-api-model.md) — the declarative manifests Helm renders · [Part 03 ch.01](../03-config-and-storage/01-configmaps.md) — values as the input layer over manifests · [Part 05 ch.02](../05-security/02-pod-security.md) — `restricted` PSA invariants Helm must preserve
-**You'll know after this:** • explain Helm 3 (no Tiller; releases stored as in-cluster Secrets) and revision/rollback semantics · • lay out a chart with `Chart.yaml`, `values.yaml`, `templates/`, `_helpers.tpl` and `NOTES.txt` · • write Go templating with Sprig, `include`, `tpl`, `required`, `default` and `toYaml` · • use Helm hooks for the migration-Job pattern and decide library vs application charts · • render the 49-object Bookstore as a byte-faithful Helm chart with values per environment
+**You'll know after this:** • explain Helm 3 (no Tiller; releases stored as in-cluster Secrets) and revision/rollback semantics · • lay out a chart with `Chart.yaml`, `values.yaml`, `templates/`, `_helpers.tpl` and `NOTES.txt` · • write Go templating with Sprig, `include`, `tpl`, `required`, `default` and `toYaml` · • use Helm hooks for the migration-Job pattern and decide library vs application charts · • render the 49-object Bookstore as a Helm chart, and keep its values from weakening the baseline
 
 <!-- tags: helm, platform-engineering, gitops, ci-cd -->
 
@@ -88,6 +88,14 @@ with extra steps". The discipline is: parameterise what genuinely varies,
 keep the invariant security/scheduling model in helpers, and never let a value
 toggle make the app *insecure by default*.
 
+## Threats and controls
+
+| Threat | Control in this chapter | Deeper |
+|---|---|---|
+| A value switches off a baseline field, such as `allowPrivilegeEscalation: true` or a writable root filesystem | `values.schema.json` fixes the baseline fields of every `securityProfiles` entry, so the render refuses the value | [05.02](../05-security/02-pod-security.md) for the fields; [07.02](02-packaging-kustomize.md) for overlays |
+| A password in a values file or in the release record | Prod sets `dbCredentials.create: false`; the Secret comes from outside the chart | [03.02](../03-config-and-storage/02-secrets.md) |
+| A chart or image other than the one you reviewed | Pin the chart by digest, check a signature when the publisher makes one, render and scan before install | [05.03](../05-security/03-supply-chain.md); [07.03](03-cicd-pipeline.md) for signing in CI |
+
 ## Diagrams
 
 ### `helm install` flow: chart + values → render → release Secret → API → revision (Mermaid)
@@ -125,7 +133,7 @@ flowchart TD
  ├── Chart.yaml              apiVersion v2, type application, version/appVersion,
  │                           kubeVersion ">=1.30.0-0" (no dependencies — see below)
  ├── values.yaml             ALL defaults; reproduces raw-manifests exactly
- ├── values.schema.json      JSON Schema: validates toggles + image blocks
+ ├── values.schema.json      JSON Schema: toggles, image blocks, securityProfiles
  ├── values-dev.yaml         per-env overrides (1 replica, debug, no HPA/PDB)
  ├── values-staging.yaml     prod shape, half scale, SM/PR on
  ├── values-prod.yaml        4 replicas, registry images, demo Secret OFF
@@ -160,8 +168,8 @@ parallel [`examples/bookstore/helm/bookstore/`](../examples/bookstore/helm/books
 chart and operates it.
 
 We will: (0) install Helm + a clean kind cluster + the four images; (1) `helm
-lint`/`template` and read the render; (2) `helm install` into a fresh
-namespace the chart creates and PSA-labels; (3) inspect the release
+lint`/`template` and read the render; (2) create a PSA-labelled namespace and
+`helm install` into it; (3) inspect the release
 (`list`/`status`/`get manifest`/`history`); (4) a values override + `helm
 upgrade` + `helm rollback`; (5) prove restricted admission with a server
 dry-run; (6) toggle a CRD-backed extra and see the honest "needs an operator"
@@ -173,18 +181,22 @@ behaviour.
 ([helm.sh/docs/intro/install](https://helm.sh/docs/intro/install/)):
 
 ```sh
-# pick one (this guide pins Helm v3.22.1):
-curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 \
-  | DESIRED_VERSION=v3.22.1 bash
+# Linux, amd64. This guide pins Helm v3.22.1. On macOS use shasum -a 256 -c.
+curl -fsSLO https://get.helm.sh/helm-v3.22.1-linux-amd64.tar.gz
+curl -fsSLO https://get.helm.sh/helm-v3.22.1-linux-amd64.tar.gz.sha256sum
+sha256sum -c helm-v3.22.1-linux-amd64.tar.gz.sha256sum
+tar -xzf helm-v3.22.1-linux-amd64.tar.gz linux-amd64/helm
+sudo install -m 0755 linux-amd64/helm /usr/local/bin/helm
 #  or: go install helm.sh/helm/v3/cmd/helm@v3.22.1
-#  or: brew install helm        # note: Homebrew now installs Helm 4
 helm version
 ```
 
-> **Which Helm?** This guide targets **Helm v3.22.1**, the Helm 3 release
-> whose version-skew range covers Kubernetes 1.34-1.37. Helm 3 gets security
-> fixes only until 2027-02-10, so plan the move to Helm 4 (4.3.x also covers
-> 1.37); the core commands in this chapter are also v4-compatible.
+> **Which Helm?** This chapter pins **Helm v3.22.1**, the patch release of the
+> last Helm 3 minor line (v3.22.x). Helm 3 gets security fixes only until
+> **February 10, 2027**, and no Helm 3 release of any kind after that date
+> ([Helm 3 end of life](https://helm.sh/blog/helm-v3-end-of-life), June 2,
+> 2026). Plan the move to Helm 4 before then, and test these commands on
+> Helm 4 before you rely on them.
 
 A clean local cluster + the four Bookstore images loaded (the same
 self-bootstrap as every prior chapter; the chart pulls `postgres:16`,
@@ -204,8 +216,8 @@ for s in catalog orders payments-worker storefront; do kind load docker-image bo
 ```
 
 > **Self-bootstrapping note.** After any `kind delete && kind create` you must
-> re-`kind load` the four images and re-run the `helm install` below — a fresh
-> cluster has neither. Unlike the raw-manifests chapters, there is **no
+> re-`kind load` the four images and re-run the namespace and `helm install`
+> steps below. A fresh cluster has neither. Unlike the raw-manifests chapters, there is **no
 > `kubectl apply` chain to replay**: a single `helm install` creates the
 > namespace (PSA-labelled), every object, and runs the migration hook. That
 > consolidation is the point of this chapter.
@@ -216,9 +228,14 @@ for s in catalog orders payments-worker storefront; do kind load docker-image bo
 
 ```sh
 helm lint examples/bookstore/helm/bookstore
-# ==> Linting examples/bookstore/helm/bookstore
-# [INFO] Chart.yaml: icon is recommended
-# 1 chart(s) linted, 0 chart(s) failed
+```
+
+<!-- gate: output -->
+```text
+==> Linting examples/bookstore/helm/bookstore
+[INFO] Chart.yaml: icon is recommended
+# ...
+1 chart(s) linted, 0 chart(s) failed
 ```
 
 `0 chart(s) failed`. The single `[INFO]` is cosmetic (a chart `icon:` URL is
@@ -237,26 +254,146 @@ Sanity-check it against the API server **without applying** (client dry-run):
 
 ```sh
 helm template bookstore examples/bookstore/helm/bookstore -n bookstore \
-  | kubectl apply --dry-run=client -f -
-# ...every object: "<OBJ> created (dry run)"
-# With DEFAULT values, ZERO "no matches for kind" — every object is built-in.
+  | kubectl apply --dry-run=client -f - 2>&1 | grep -c "created (dry run)"
+helm template bookstore examples/bookstore/helm/bookstore -n bookstore \
+  | kubectl apply --dry-run=client -f - 2>&1 | grep -c "no matches for kind"
 ```
+
+On an empty cluster all 49 objects report `created (dry run)`. The lab cluster
+already held the three `bookstore-*` PriorityClasses from an earlier run, so
+its count was 46 and those three reported `configured (dry run)`. Its count of
+`no matches for kind` was 0. The lab output in this chapter came from a cluster
+with a different name, and the transcript records that substitution.
 
 That zero is by design: every CRD-backed object (ServiceMonitor,
 PrometheusRule, KEDA `ScaledObject`, Gateway, Kyverno `ClusterPolicy`,
 VolumeSnapshot) is behind a value toggle that defaults **off** where the CRD
 is not built into Kubernetes, so a plain render is 100% built-in API kinds.
 
-### 2. Install the release
+### 1a. Values that cannot weaken the baseline
 
-`--create-namespace` makes the bare namespace; the chart *also* templates the
-`Namespace` object so the **PSA `restricted` labels + ResourceQuota +
-LimitRange** travel with the release:
+Helm merges the chart's values, then each `-f` file, then each `--set`, so any
+of them can change a field. The chart's `values.schema.json` fixes the baseline
+fields in every `securityProfiles` entry: `runAsNonRoot: true`, `runAsUser` of
+at least 1, `allowPrivilegeEscalation: false`, `readOnlyRootFilesystem: true`,
+`capabilities.drop` containing `ALL`, and the `RuntimeDefault` seccomp profile.
+Helm validates the values before it renders, so a weaker value stops the
+command and nothing is produced:
 
 ```sh
-helm install bookstore examples/bookstore/helm/bookstore \
-  -n bookstore --create-namespace --wait
+helm template bookstore examples/bookstore/helm/bookstore -n bookstore \
+  --set securityProfiles.goService.container.allowPrivilegeEscalation=true 2>&1 | tail -n 3
 ```
+
+<!-- gate: output -->
+```text
+bookstore:
+- at '/securityProfiles/goService/container/allowPrivilegeEscalation': value must be false
+```
+
+`readOnlyRootFilesystem=false` and `runAsUser=0` fail the same way. A workload
+that needs a writable path gets an `emptyDir` mounted at that path, as the
+baseline's `/tmp` mount does, not a looser profile.
+
+### 1b. Pin a chart you did not write, and check it first
+
+A third-party chart is someone else's code running with your cluster rights:
+its templates decide what gets applied, and its hooks run Jobs during install.
+Pin the exact artifact, check its signature if the publisher makes one, and
+read the render before you install. The example here is the Argo CD chart,
+which [07.04](04-gitops-argocd.md) installs.
+
+Read the version and the digest that the registry serves for it:
+
+```sh
+helm show chart oci://ghcr.io/argoproj/argo-helm/argo-cd --version 10.11.6 | grep -E '^(version|appVersion):'
+```
+
+<!-- gate: output -->
+```text
+Pulled: ghcr.io/argoproj/argo-helm/argo-cd:10.11.6
+Digest: sha256:90f462a0695121f65a71cd053619f80023b4efef6bc211f750ffcaaa1628b5b6
+appVersion: v3.5.6
+version: 10.11.6
+```
+
+From now on, name the chart by that digest, as in
+`oci://ghcr.io/argoproj/argo-helm/argo-cd@sha256:90f4...`. A digest cannot be
+moved the way a tag can, so the artifact you reviewed is the one that installs. Helm accepts the digest form in `helm show` and
+`helm template`.
+
+Check for a signature. On the day of the captured run, cosign found none for
+this digest under the publisher's GitHub Actions identity:
+
+```sh
+cosign verify --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  --certificate-identity-regexp 'https://github.com/argoproj/argo-helm/.*' \
+  ghcr.io/argoproj/argo-helm/argo-cd@sha256:90f462a0695121f65a71cd053619f80023b4efef6bc211f750ffcaaa1628b5b6
+```
+
+<!-- gate: output -->
+```text
+Error: no signatures found
+error during command execution: no signatures found
+```
+
+A missing signature is a fact to record, not a pass. The digest pin and the
+render review are then the checks you have. When a publisher does sign, keep
+the verification and name the identity you expect.
+
+Render the chart to a file, count its objects and scan the render. Helm
+renders with the chart's default values here; a real install uses your values.
+
+```sh
+mkdir -p review
+helm template argo-cd oci://ghcr.io/argoproj/argo-helm/argo-cd@sha256:90f462a0695121f65a71cd053619f80023b4efef6bc211f750ffcaaa1628b5b6 \
+  -n argocd > review/argo-cd.yaml
+grep -c "^kind:" review/argo-cd.yaml
+trivy config --quiet --severity HIGH,CRITICAL review | grep -E "^(Total|Failures|review/)|Tests:"
+```
+
+<!-- gate: output -->
+```text
+59
+```
+
+<!-- gate: output -->
+```text
+Tests: 47 (SUCCESSES: 35, FAILURES: 12)
+Failures: 12 (HIGH: 7, CRITICAL: 5)
+```
+
+Twelve checks fail at HIGH or CRITICAL on the defaults. A scan is a review
+queue, not a verdict: for each failure, fix it in values, record an exception
+with its reason and an expiry, or do not install. Hooks are rendered too, so
+search the render for `helm.sh/hook` before you install. `helm template` runs
+no workload, but `helm install` will run every hook it finds.
+
+### 2. Create the namespace, then install the release
+
+The chart renders a `Namespace` object, so `helm template` shows the whole app
+(49 objects). `helm install` cannot use that object. Helm stores its release
+record in the release namespace before it applies anything, so the namespace
+must already exist, and `--create-namespace` then collides with the chart's own
+`Namespace` (Helm reports `namespaces "bookstore" already exists`). Create the
+namespace yourself with the Pod Security labels, and install with
+`namespace.create=false`. The ResourceQuota and LimitRange are rendered either
+way. Installing into a namespace that does not exist fails with
+`namespaces "bookstore" not found`, for the same reason.
+
+```sh
+kubectl create namespace bookstore
+kubectl label namespace bookstore \
+  pod-security.kubernetes.io/enforce=restricted \
+  pod-security.kubernetes.io/audit=restricted \
+  pod-security.kubernetes.io/warn=restricted
+helm install bookstore examples/bookstore/helm/bookstore \
+  -n bookstore --set namespace.create=false --wait
+```
+
+Every later `helm upgrade` in this chapter repeats
+`--set namespace.create=false`. A value that is not passed falls back to the chart default, which is `true`,
+and the upgrade would then try to create the Namespace again.
 
 `--wait` gates the command until the normal objects are Ready *and* the
 post-install `db-migrate` hook Job has completed — so the inspections below
@@ -284,13 +421,14 @@ kubectl get pods -n bookstore        # all Running — restricted did NOT reject
 ### 3. Inspect the release (the thing raw `kubectl` never gave us)
 
 ```sh
+# Illustrative output (not captured in the lab run):
 helm list -n bookstore
 # NAME       NAMESPACE  REVISION  STATUS    CHART            APP VERSION
-# bookstore  bookstore  1         deployed  bookstore-0.1.0  dev
+# bookstore  bookstore  1         deployed  bookstore-0.1.1  dev
 
 helm status bookstore -n bookstore                 # status + NOTES
 helm get manifest bookstore -n bookstore | head    # the EXACT YAML applied
-helm get values  bookstore -n bookstore            # user-supplied values (none yet)
+helm get values  bookstore -n bookstore            # user-supplied values: namespace.create=false
 helm history bookstore -n bookstore                # one revision so far
 ```
 
@@ -303,6 +441,45 @@ kubectl get secret -n bookstore -l owner=helm
 # sh.helm.release.v1.bookstore.v1      helm.sh/release.v1   ...
 ```
 
+#### Secrets in values and in the release record
+
+The release record holds the rendered manifest and the values you supplied.
+Whoever can read Secrets in that namespace can read both. The chart writes the
+demo database Secret with `stringData`, so the password is in clear text in
+the render:
+
+```sh
+helm template bookstore examples/bookstore/helm/bookstore -n bookstore | grep -n "POSTGRES_PASSWORD:"
+```
+
+<!-- gate: output -->
+```text
+603:  POSTGRES_PASSWORD: "devpassword"
+```
+
+On a live release, `helm get manifest bookstore -n bookstore` returns the same
+value, because the manifest is stored with the release. `helm get values`
+prints only the values you supplied, so with the defaults it shows no password.
+`helm get values bookstore -n bookstore --all` prints every computed value,
+password included. The CLI help reads `-a, --all  dump all (computed) values`.
+
+Prod turns the demo Secret off:
+
+```sh
+helm template bookstore examples/bookstore/helm/bookstore -n bookstore \
+  -f examples/bookstore/helm/bookstore/values-prod.yaml | grep -A3 "^kind: Secret" | grep "  name:"
+```
+
+<!-- gate: output -->
+```text
+  name: rabbitmq-conn
+```
+
+`db-credentials` is gone in prod (`dbCredentials.create: false`). One Secret
+remains: `rabbitmq-conn`, the KEDA scaler's connection string, which still
+carries the stock `guest:guest` demo credentials. The chart has no toggle for
+it yet, so until it has one, create that Secret from outside the chart as well.
+
 ### 4. Override values, upgrade, roll back
 
 The chart ships per-environment value files. Preview a `dev` override as a
@@ -311,7 +488,7 @@ diff against the live release using only built-in tooling:
 ```sh
 helm get manifest bookstore -n bookstore > /tmp/cur.yaml
 helm template bookstore examples/bookstore/helm/bookstore -n bookstore \
-  -f examples/bookstore/helm/bookstore/values-dev.yaml > /tmp/new.yaml
+  --set namespace.create=false -f examples/bookstore/helm/bookstore/values-dev.yaml > /tmp/new.yaml
 diff /tmp/cur.yaml /tmp/new.yaml | head -40
 #  catalog/storefront/orders replicas -> 1, LOG_LEVEL -> debug, no HPA/PDB
 ```
@@ -320,10 +497,11 @@ diff /tmp/cur.yaml /tmp/new.yaml | head -40
 > Helm's *apply order*; `helm template` emits them in *file-alphabetical*
 > order — so a raw `diff` shows large blocks "moved" even when nothing
 > changed. For a clean semantic diff use the **`helm-diff`** plugin
-> (`helm plugin install https://github.com/databus23/helm-diff`), then:
+> (`helm plugin install https://github.com/databus23/helm-diff --version v3.15.15`),
+> then. The plugin runs with your kubeconfig rights, so pin it like a chart:
 >
 > ```sh
-> helm diff upgrade bookstore examples/bookstore/helm/bookstore -n bookstore -f …/values-dev.yaml
+> helm diff upgrade bookstore examples/bookstore/helm/bookstore -n bookstore --set namespace.create=false -f …/values-dev.yaml
 > ```
 >
 > This compares the *live release* to the *proposed* release and reports only real changes.
@@ -333,9 +511,9 @@ Apply it as **revision 2**, then change one value via `--set` as **revision
 
 ```sh
 helm upgrade bookstore examples/bookstore/helm/bookstore -n bookstore \
-  -f examples/bookstore/helm/bookstore/values-dev.yaml --wait
+  --set namespace.create=false -f examples/bookstore/helm/bookstore/values-dev.yaml --wait
 helm upgrade bookstore examples/bookstore/helm/bookstore -n bookstore \
-  -f examples/bookstore/helm/bookstore/values-dev.yaml \
+  --set namespace.create=false -f examples/bookstore/helm/bookstore/values-dev.yaml \
   --set catalog.image.tag=dev --set catalogConfig.data.LOG_LEVEL=warn --wait
 
 helm history bookstore -n bookstore        # 3 revisions
@@ -400,7 +578,7 @@ helm template bookstore examples/bookstore/helm/bookstore -n bookstore \
   | kubectl apply --dry-run=client -f - 2>&1 | grep -E 'ScaledObject|ServiceMonitor' | tail
 ```
 
-If KEDA is **not** installed you will see:
+If KEDA is **not** installed you will see this (illustrative, not captured in the lab run):
 
 ```
 ... no matches for kind "ScaledObject" in version "keda.sh/v1alpha1"
@@ -417,9 +595,9 @@ when a new release ships), then the same toggle applies cleanly:
 
 ```sh
 helm repo add kedacore https://kedacore.github.io/charts && helm repo update
-helm install keda kedacore/keda -n keda --create-namespace --wait
+helm install keda kedacore/keda --version 2.21.0 -n keda --create-namespace --wait
 helm upgrade bookstore examples/bookstore/helm/bookstore -n bookstore \
-  --set keda.enabled=true --wait
+  --set namespace.create=false --set keda.enabled=true --wait
 kubectl get scaledobject,hpa -n bookstore     # KEDA created the managed HPA
 ```
 
@@ -441,14 +619,10 @@ helm uninstall bookstore -n bookstore
 # helm.sh/resource-policy: keep — so a parallel release/workload still
 # referencing them is not broken.
 #
-# DESTRUCTIVE: because this chart TEMPLATES the Namespace
-# (namespace.create=true by default), `helm uninstall` deletes the `bookstore`
-# Namespace and EVERYTHING in it — including the postgres PVC
-# `data-postgres-0` and all its data. After this command the namespace is
-# GONE. If the namespace/data must outlive the release (the usual production
-# stance), install with `namespace.create=false` and pre-create the namespace
-# (or `kubectl create namespace` / `--create-namespace`); then `helm
-# uninstall` leaves the namespace and its PVCs intact.
+# The namespace stays, because you created it. So does the postgres PVC
+# `data-postgres-0`: a StatefulSet's volume claims are not release objects, so
+# Helm does not delete them. Delete the namespace yourself when the data is
+# no longer needed.
 kind delete cluster --name bookstore
 ```
 
@@ -512,16 +686,15 @@ release's objects and Secrets — except resources annotated
 `helm.sh/resource-policy: keep` (the PriorityClasses and the opt-in
 StorageClass here, because they are cluster-scoped and may be referenced by
 another release/workload; deleting a referenced PriorityClass/StorageClass
-would break future Pod admission or PVC binding). **A subtle, destructive
-consequence: this chart templates the `Namespace`
-(`namespace.create=true`).** That makes the Namespace a release-owned object,
-so `helm uninstall` deletes it — and with it *every* object inside, including
-the postgres PVC `data-postgres-0` and all its data, regardless of any
-per-object retention. If the namespace and its persistent data must outlive
-the release (the production norm), set `namespace.create=false` and provide
-the namespace out of band (`--create-namespace` or a pre-created, pre-labelled
-namespace); then `helm uninstall` leaves the namespace and its PVCs intact and
-removes only the release's own objects.
+would break future Pod admission or PVC binding). **The namespace is not a
+release object in practice.** The chart renders a `Namespace`
+(`namespace.create=true`, the default, so `helm template` shows all 49
+objects), but `helm install` cannot use it. Helm stores the release record in
+the namespace before it applies anything, so the namespace must already exist,
+and then the chart's own object conflicts with it. Installs therefore set
+`namespace.create=false` and provide the labelled namespace themselves.
+`helm uninstall` then removes only the release's objects; the namespace and its
+PVCs stay.
 
 **Hooks and the migration-Job-as-hook pattern.** A normal release object is
 created/updated with the release. A **hook** is an object annotated
@@ -596,8 +769,8 @@ and `helm-diff` (preview an upgrade's three-way diff before applying).
 > pin an image tag.
 
 > **In production: publish charts to an OCI registry, signed.** `helm package`
-> then `helm push bookstore-0.1.0.tgz oci://<REGISTRY>/charts` (Helm 3 OCI
-> support is GA); install with `helm install … oci://…/bookstore --version 0.1.0`.
+> then `helm push bookstore-0.1.1.tgz oci://<REGISTRY>/charts` (Helm 3 OCI
+> support is GA); install with `helm install … oci://…/bookstore --version 0.1.1`.
 > Sign with `helm package --sign` (a provenance `.prov` file) and
 > verify with `helm verify`/`--verify`, or use Cosign on the OCI artifact
 > (Part 05 ch.03's supply-chain story applies to charts, not just images). A
@@ -612,8 +785,8 @@ and `helm-diff` (preview an upgrade's three-way diff before applying).
 > the same name out of band; enable encryption-at-rest on the apiserver. For
 > values files that *do* contain sensitive config, use `helm secrets`
 > (SOPS-backed) so the file is encrypted in Git and decrypted only at
-> install. Secrets in `values.yaml` also leak into the release Secret and
-> `helm get values` — another reason to keep them out.
+> install. Secrets in `values.yaml` also end up in the release record, and
+> `helm get values --all` prints them. The hands-on section shows both.
 
 > **In production: GitOps renders the chart; humans rarely run `helm install`.**
 > Argo CD / Flux watch a Git repo, render this chart with
@@ -656,17 +829,19 @@ helm template bookstore examples/bookstore/helm/bookstore -n bookstore \
   | kubectl apply --dry-run=server -f -            # full admission incl. PSA
 
 # Install / inspect / upgrade / roll back
-helm install  bookstore examples/bookstore/helm/bookstore -n bookstore --create-namespace
+kubectl create namespace bookstore     # then label it, as in section 2
+helm install  bookstore examples/bookstore/helm/bookstore -n bookstore --set namespace.create=false
 helm list -n bookstore ; helm status bookstore -n bookstore
 helm get manifest bookstore -n bookstore ; helm history bookstore -n bookstore
 helm upgrade  bookstore examples/bookstore/helm/bookstore -n bookstore \
-  -f examples/bookstore/helm/bookstore/values-prod.yaml --atomic --wait
+  --set namespace.create=false -f examples/bookstore/helm/bookstore/values-prod.yaml \
+  --atomic --wait
 helm rollback bookstore 1 -n bookstore --wait
 helm uninstall bookstore -n bookstore
 
 # Package / publish (OCI)
-helm package examples/bookstore/helm/bookstore --version 0.1.0
-helm push bookstore-0.1.0.tgz oci://<REGISTRY>/charts
+helm package examples/bookstore/helm/bookstore --version 0.1.1
+helm push bookstore-0.1.1.tgz oci://<REGISTRY>/charts
 ```
 
 Minimal `values.yaml` skeleton (the shape; full documented set in the chart):
@@ -704,6 +879,12 @@ Checklist:
 - [ ] `Chart.yaml` SemVer bumped on chart changes; chart signed & pushed to
       OCI; consumers pin the version
 - [ ] `helm upgrade --install --atomic --wait`; rollback path tested
+- [ ] `values.schema.json` fixes the baseline fields of every `securityProfiles`
+      entry; `--set` of a weaker value fails the render
+- [ ] Third-party charts are pinned by digest, checked for a signature,
+      rendered and scanned before install; hooks read in the render
+- [ ] Secrets stay out of values and out of the release record in prod, and
+      `helm get values --all` is treated as secret-bearing output
 
 ## Test your understanding
 
@@ -741,6 +922,13 @@ Checklist:
    <details><summary>Show answer</summary>
 
    When the deltas across environments are small and concrete (a replica count, an image tag, a host name) and the chart's templating is mostly "render the same YAML conditionally" — Kustomize's patch-the-base model is cleaner, more transparent, and GitOps-native. When the chart is **distributed** (consumed by other teams or sold/published), templating with a documented `values.schema.json` is the more discoverable interface. Many real systems use **both**: a Helm chart for the app, Kustomize post-render for the environment patch. See [ch.02](02-packaging-kustomize.md)'s Helm vs Kustomize closer.
+
+   </details>
+
+6. **A teammate adds `--set securityProfiles.goService.container.allowPrivilegeEscalation=true` to get a sidecar past a startup error. What happens, and what should they do instead?**
+   <details><summary>Show answer</summary>
+
+   The render stops before anything is applied: the schema says `value must be false` at that path. The schema covers every `securityProfiles` entry, so no single value can weaken the shared baseline. The right fix is in the workload's image or its command, or a reviewed change to the schema that every profile would also have to satisfy. A flag on the install command is not that review.
 
    </details>
 

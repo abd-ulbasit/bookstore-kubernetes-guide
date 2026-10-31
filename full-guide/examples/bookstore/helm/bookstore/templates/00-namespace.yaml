@@ -1,9 +1,10 @@
 {{/*
   Namespace + ResourceQuota + LimitRange (raw-manifests 00-namespace.yaml).
-  Templated so the PSA `restricted` labels and the governance objects travel
-  WITH the release. `helm install --create-namespace` makes the bare ns;
-  Helm applies this object too and reconciles the labels onto it. Set
-  namespace.create=false if a platform/GitOps pre-creates + pre-labels it.
+  The PSA `restricted` labels live on the Namespace object, so they are
+  reviewed with the chart. Helm 3 cannot install that object into a namespace
+  that does not exist yet (the release record must be stored there first), so
+  install with namespace.create=false into a namespace labelled the same way.
+  The ResourceQuota and LimitRange follow their own toggles.
 */}}
 {{- if .Values.namespace.create }}
 apiVersion: v1
@@ -22,7 +23,7 @@ metadata:
     pod-security.kubernetes.io/warn: {{ .Values.namespace.psa.warn }}
     pod-security.kubernetes.io/warn-version: {{ .Values.namespace.psa.warnVersion }}
 {{- end }}
-{{- if and .Values.namespace.create .Values.namespace.resourceQuota.enabled }}
+{{- if .Values.namespace.resourceQuota.enabled }}
 ---
 # Caps the SUM of requests/limits across all Pods in the namespace.
 apiVersion: v1
@@ -36,7 +37,7 @@ spec:
   hard:
     {{- toYaml .Values.namespace.resourceQuota.hard | nindent 4 }}
 {{- end }}
-{{- if and .Values.namespace.create .Values.namespace.limitRange.enabled }}
+{{- if .Values.namespace.limitRange.enabled }}
 ---
 # Per-CONTAINER defaults + min/max (makes the ResourceQuota ergonomic).
 apiVersion: v1

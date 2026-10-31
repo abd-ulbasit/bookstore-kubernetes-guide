@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft-07/schema#",
   "title": "Bookstore chart values",
-  "description": "Schema for the Bookstore Helm chart. Validates the toggles and the per-service image blocks; intentionally permissive on the deep maps (resources/securityProfiles) so advanced overrides are not blocked.",
+  "description": "Schema for the Bookstore Helm chart. Validates the toggles and the per-service image blocks. securityProfiles cannot weaken the baseline (the fields below are fixed). Other deep maps (resources) stay permissive so advanced overrides are not blocked.",
   "type": "object",
   "additionalProperties": true,
   "definitions": {
@@ -13,6 +13,41 @@
         "repository": { "type": "string", "minLength": 1 },
         "tag": { "type": "string", "minLength": 1 },
         "pullPolicy": { "type": "string", "enum": ["Always", "IfNotPresent", "Never"] }
+      }
+    },
+    "securityProfile": {
+      "type": "object",
+      "required": ["pod", "container"],
+      "additionalProperties": true,
+      "properties": {
+        "pod": {
+          "type": "object",
+          "required": ["runAsNonRoot", "runAsUser", "seccompProfile"],
+          "additionalProperties": true,
+          "properties": {
+            "runAsNonRoot": { "const": true },
+            "runAsUser": { "type": "integer", "minimum": 1 },
+            "seccompProfile": {
+              "type": "object",
+              "required": ["type"],
+              "properties": { "type": { "const": "RuntimeDefault" } }
+            }
+          }
+        },
+        "container": {
+          "type": "object",
+          "required": ["allowPrivilegeEscalation", "readOnlyRootFilesystem", "capabilities"],
+          "additionalProperties": true,
+          "properties": {
+            "allowPrivilegeEscalation": { "const": false },
+            "readOnlyRootFilesystem": { "const": true },
+            "capabilities": {
+              "type": "object",
+              "required": ["drop"],
+              "properties": { "drop": { "type": "array", "contains": { "const": "ALL" } } }
+            }
+          }
+        }
       }
     },
     "serviceWorkload": {
@@ -28,6 +63,10 @@
   "properties": {
     "nameOverride": { "type": "string" },
     "fullnameOverride": { "type": "string" },
+    "securityProfiles": {
+      "type": "object",
+      "additionalProperties": { "$ref": "#/definitions/securityProfile" }
+    },
     "namespace": {
       "type": "object",
       "additionalProperties": true,
