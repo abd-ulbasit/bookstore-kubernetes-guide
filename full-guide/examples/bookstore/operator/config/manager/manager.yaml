@@ -41,9 +41,13 @@ spec:
         control-plane: controller-manager
     spec:
       serviceAccountName: bookstore-operator-controller-manager
+      # The manager calls the API, so it needs its token. It has its own
+      # ServiceAccount, which is the condition for keeping the token mounted.
+      automountServiceAccountToken: true
       securityContext:
         runAsNonRoot: true
         runAsUser: 65532
+        runAsGroup: 65532
         seccompProfile:
           type: RuntimeDefault
       containers:

@@ -73,6 +73,7 @@ stable.
 | EP6 | Git push and CI apply | Review and diff before apply (T3) |
 | EP7 | kubeconfig on a workstation or CI runner | Short-lived credentials (S2) |
 | EP8 | Pod-to-Pod network, until `raw-manifests/60-networkpolicy.yaml` applies | Default deny (S3) |
+| EP9 | The webhook Service, which the API server calls over TLS for every matching write | A ClusterIP Service only, a `caBundle` that pins the serving CA, and a NetworkPolicy for the webhook's namespace (02.06) |
 
 ## STRIDE pass
 
@@ -100,6 +101,7 @@ guide yet). Part 00 ch.08 names the enforcer of each baseline field.
 | T2 | An image is replaced under the same tag | Digest pins for third-party images; signing and provenance | review (pins), later (signing) | 01.01, `#baseline-image-digest`; 05.03 |
 | T3 | A spec changes outside review | Apply reviewed files from Git, `kubectl diff`, GitOps | cluster | 00.06; 07.04 |
 | T4 | Objects in etcd change without the API server | Only the API server holds etcd credentials | cluster | 00.04; 05.04 |
+| T5 | A webhook configuration is edited, or its backend fails, so a check stops running | RBAC on the webhook configurations, reviewed files applied from Git, a per-webhook `failurePolicy`, and a selector scoped to the app namespace | cluster | 11.01, `#failure-modes-as-attack-surface` |
 
 ### Repudiation
 
@@ -135,6 +137,7 @@ guide yet). Part 00 ch.08 names the enforcer of each baseline field.
 | E4 | A Pod asks for host namespaces, privileged mode or a `hostPath` | Pod Security Admission at `restricted` on the namespace | baseline | 01.01, `#baseline-namespace`; 05.02 |
 | E5 | An unpatched runtime lets a container escape, as with CVE-2024-21626 | A patched containerd and runc on every node | cluster | 05.06 <!-- link-later: 05.06 --> |
 | E6 | An RBAC grant lets a workload create a privileged Pod | Narrow RBAC, and `restricted` on the namespace | cluster | 05.01; 05.02 |
+| E7 | A mutation adds privilege the Pod did not ask for | A mutating webhook sets only restrictive fields, and only when absent; a validating check runs after it | review | 11.01, `#mental-model` |
 
 ## Attacker goals
 

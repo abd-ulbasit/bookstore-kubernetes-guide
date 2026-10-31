@@ -1,0 +1,168 @@
+# Transcript for full-guide/11-advanced-production-patterns/01-admission-webhooks.md
+# Tier A: kind cluster sf-pilot, Kubernetes v1.37.0 server, kubectl v1.37.2.
+# Run from a scratch directory, one step after another, against the shared
+# lab cluster. Every namespace is p11-01-*. The chapter prints bookstore for
+# p11-01-bookstore and bookstore-operator-system for p11-01-operator-system.
+# Cluster-scoped objects are named p11-01-* except the ValidatingAdmissionPolicy
+# and binding bookstore-require-part-of, which kept the chapter name (checked absent).
+# Steps marked DELIBERATE break the setup on purpose. All are deleted at the end.
+
+$ kubectl version 2>&1 | grep -i '^Server'
+Server Version: v1.37.0
+[exit 0]
+
+$ kubectl get validatingwebhookconfigurations,mutatingwebhookconfigurations -o name
+[exit 0]
+
+## step 1: namespaces with the Pod Security labels and the webhook Service
+$ kubectl apply -f ns.yaml
+namespace/p11-01-bookstore created
+namespace/p11-01-operator-system created
+[exit 0]
+
+$ kubectl get namespaces p11-01-bookstore p11-01-operator-system -L pod-security.kubernetes.io/enforce
+NAME                     STATUS   AGE   ENFORCE
+p11-01-bookstore         Active   1s    restricted
+p11-01-operator-system   Active   1s    restricted
+[exit 0]
+
+$ kubectl apply -f svc.yaml
+service/bookstore-operator-webhook-service created
+[exit 0]
+
+$ kubectl get endpoints -n p11-01-operator-system bookstore-operator-webhook-service 2>/dev/null
+[exit 1]
+
+## step 2: the validating webhook, failurePolicy Fail, scoped to the app namespace only
+$ kubectl apply -f secure-vpod.yaml
+validatingwebhookconfiguration.admissionregistration.k8s.io/p11-01-vpod created
+[exit 0]
+
+$ kubectl get validatingwebhookconfiguration p11-01-vpod -o jsonpath='{.webhooks[0].failurePolicy}'; echo
+Fail
+[exit 0]
+
+## step 3: the webhook backend is down, so a compliant Pod is refused
+$ kubectl apply -f probe.yaml
+serviceaccount/probe created
+Error from server (InternalError): error when creating "probe.yaml": Internal error occurred: failed calling webhook "vpod.bookstore.example.com": failed to call webhook: Post "https://bookstore-operator-webhook-service.p11-01-operator-system.svc:443/validate--v1-pod?timeout=5s": dial tcp 10.96.29.113:443: connect: connection refused
+[exit 1]
+
+## step 4: DELIBERATE, widen the selector to the webhook's own namespace
+$ kubectl patch validatingwebhookconfiguration p11-01-vpod --type=json --patch-file=widen.json
+validatingwebhookconfiguration.admissionregistration.k8s.io/p11-01-vpod patched
+[exit 0]
+
+$ kubectl apply -f probe-own.yaml
+serviceaccount/probe created
+Error from server (InternalError): error when creating "probe-own.yaml": Internal error occurred: failed calling webhook "vpod.bookstore.example.com": failed to call webhook: Post "https://bookstore-operator-webhook-service.p11-01-operator-system.svc:443/validate--v1-pod?timeout=5s": dial tcp 10.96.29.113:443: connect: connection refused
+[exit 1]
+
+## step 5: restore the reviewed file, then the same Pod in the app namespace
+$ kubectl apply -f secure-vpod.yaml
+validatingwebhookconfiguration.admissionregistration.k8s.io/p11-01-vpod configured
+[exit 0]
+
+$ kubectl apply -f probe-own.yaml
+serviceaccount/probe unchanged
+pod/probe created
+[exit 0]
+
+$ kubectl delete pod probe -n p11-01-operator-system --wait=true
+pod "probe" deleted from p11-01-operator-system namespace
+I1031 09:13:05.150343   57453 reflector.go:664] "Warning: watch ended with error" reflector="k8s.io/client-go/tools/watch/informerwatcher.go:162" type="*unstructured.Unstructured" err="an error on the server (\"unable to decode an event from the watch stream: http2: client connection lost\") has prevented the request from succeeding"
+I1031 09:14:22.247091   57453 reflector.go:664] "Warning: watch ended with error" reflector="k8s.io/client-go/tools/watch/informerwatcher.go:162" type="*unstructured.Unstructured" err="an error on the server (\"unable to decode an event from the watch stream: http2: client connection lost\") has prevented the request from succeeding"
+[exit 0]
+
+## step 6: DELIBERATE, set failurePolicy to Ignore, then create the Pod
+$ kubectl patch validatingwebhookconfiguration p11-01-vpod --type=json --patch-file=ignore.json
+validatingwebhookconfiguration.admissionregistration.k8s.io/p11-01-vpod patched
+[exit 0]
+
+$ kubectl apply -f probe.yaml
+serviceaccount/probe unchanged
+pod/probe created
+[exit 0]
+
+$ kubectl get pod probe -n p11-01-bookstore -o name
+pod/probe
+[exit 0]
+
+$ kubectl apply -f secure-vpod.yaml
+validatingwebhookconfiguration.admissionregistration.k8s.io/p11-01-vpod configured
+[exit 0]
+
+$ kubectl delete pod probe -n p11-01-bookstore --wait=true
+pod "probe" deleted from p11-01-bookstore namespace
+[exit 0]
+
+## step 7: who may change the webhook configuration (RBAC)
+$ kubectl auth can-i patch validatingwebhookconfigurations.admissionregistration.k8s.io --as=system:serviceaccount:p11-01-bookstore:probe 2>/dev/null
+no
+[exit 1]
+
+$ kubectl auth can-i patch validatingwebhookconfigurations.admissionregistration.k8s.io 2>/dev/null
+yes
+[exit 0]
+
+## step 8: remove the broken webhook, then the in-tree policy instead
+$ kubectl delete validatingwebhookconfiguration p11-01-vpod
+validatingwebhookconfiguration.admissionregistration.k8s.io "p11-01-vpod" deleted
+[exit 0]
+
+$ kubectl apply -f vap.yaml
+validatingadmissionpolicy.admissionregistration.k8s.io/bookstore-require-part-of created
+validatingadmissionpolicybinding.admissionregistration.k8s.io/bookstore-require-part-of created
+[exit 0]
+
+# The first request right after the policy is created can miss it. Try once
+# at once, then again after a pause.
+$ sed '/app.kubernetes.io\/part-of/d' probe.yaml | kubectl apply -f -
+serviceaccount/probe unchanged
+pod/probe created
+[exit 0]
+
+$ kubectl delete pod probe -n p11-01-bookstore --wait=true
+pod "probe" deleted from p11-01-bookstore namespace
+[exit 0]
+
+$ sleep 10
+[exit 0]
+
+$ sed '/app.kubernetes.io\/part-of/d' probe.yaml | kubectl apply -f -
+serviceaccount/probe unchanged
+The pods "probe" is invalid: : ValidatingAdmissionPolicy 'bookstore-require-part-of' with binding 'bookstore-require-part-of' denied request: pods in the Bookstore namespace must carry app.kubernetes.io/part-of
+[exit 1]
+
+$ kubectl apply -f probe.yaml
+serviceaccount/probe unchanged
+pod/probe created
+[exit 0]
+
+$ kubectl delete pod probe -n p11-01-bookstore --wait=true
+pod "probe" deleted from p11-01-bookstore namespace
+[exit 0]
+
+## step 9: clean up everything this run created
+$ kubectl delete validatingadmissionpolicybinding bookstore-require-part-of
+validatingadmissionpolicybinding.admissionregistration.k8s.io "bookstore-require-part-of" deleted
+[exit 0]
+
+$ kubectl delete validatingadmissionpolicy bookstore-require-part-of
+validatingadmissionpolicy.admissionregistration.k8s.io "bookstore-require-part-of" deleted
+[exit 0]
+
+$ kubectl delete namespace p11-01-bookstore p11-01-operator-system
+namespace "p11-01-bookstore" deleted
+namespace "p11-01-operator-system" deleted
+[exit 0]
+
+$ for i in $(seq 1 60); do kubectl get namespace p11-01-bookstore >/dev/null 2>&1 || kubectl get namespace p11-01-operator-system >/dev/null 2>&1 || break; sleep 2; done; echo waited
+waited
+[exit 0]
+
+$ kubectl get validatingwebhookconfigurations,validatingadmissionpolicies,validatingadmissionpolicybindings,namespaces -o name 2>/dev/null | grep -c 'p11-01\|bookstore-require-part-of'
+0
+[exit 1]
+
+# done

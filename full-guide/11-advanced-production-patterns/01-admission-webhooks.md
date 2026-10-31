@@ -16,9 +16,14 @@
 > `reinvocationPolicy`, `timeoutSeconds`, ordering, idempotency, the
 > own-namespace **deadlock footgun**); and the in-tree
 > **ValidatingAdmissionPolicy + CEL** (v1.30 GA), with its mutating sibling
-> **MutatingAdmissionPolicy** (v1.36 GA), as the webhook-less modern
+> **MutatingAdmissionPolicy** (stable since v1.36), as the webhook-less modern
 > alternative — applied by shipping a real distroless webhook server in
 > [`examples/bookstore/operator/`](../examples/bookstore/operator/README.md).
+
+**Tier A (kind).** The hands-on runs on a kind cluster that you own. Run it
+only against clusters you own. The captured output in this chapter came from
+a lab cluster with a different name; the transcript header records the names
+it used.
 
 **Estimated time:** ~60 min read · ~120 min hands-on
 **Prerequisites:** [Part 00 ch.04](../00-foundations/04-control-plane-deep-dive.md) — admission pipeline order this chapter writes into · [Part 05 ch.02](../05-security/02-pod-security.md) — PSA-restricted baseline the webhook reinforces · [Part 05 ch.03](../05-security/03-supply-chain.md) — Kyverno layer this chapter sits below
@@ -115,7 +120,7 @@ may only judge.**
   `failurePolicy`-as-outage, no network hop. It cannot mutate and CEL is not
   general code, but for "deny if <EXPRESSION>" it is now the **default
   choice**. For CEL-expressible mutation, use its sibling
-  **MutatingAdmissionPolicy** (`admissionregistration.k8s.io/v1`, GA and on
+  **MutatingAdmissionPolicy** (`admissionregistration.k8s.io/v1`, stable and on
   by default since v1.36). A webhook is for logic CEL can't express
   (external I/O, lookups).
 
@@ -124,6 +129,21 @@ matching API write, and a new failure domain for the control plane.** "Just add
 a webhook" is rarely just — `failurePolicy: Fail` + a too-broad scope is the
 classic way to take down a cluster. Build the narrowest webhook that does the
 job, or use VAP/Kyverno and avoid running the server at all.
+
+## Threats and controls
+
+A webhook is code on the write path, so it adds attack surface of its own. The
+rows below are specific to this subject. Their IDs are in the
+[Bookstore threat model](../examples/bookstore/THREAT-MODEL.md), which this
+chapter extends. The Pod that runs the webhook server carries the baseline from
+[01.01](../01-core-workloads/01-pods.md#baseline); this chapter does not repeat
+it.
+
+| Threat | Control in this chapter | Deeper |
+|---|---|---|
+| T5: a webhook configuration is edited, or its backend fails, so a check stops running | RBAC on the configurations, reviewed files applied from Git, a `failurePolicy` chosen per webhook, and a selector scoped to the app namespace | [Failure modes](#failure-modes-as-attack-surface); [05.01](../05-security/01-authn-authz-rbac.md) for RBAC |
+| E7: a mutation adds privilege the Pod did not ask for | The mutating webhook sets only restrictive fields, and only when they are absent, and a validating check runs after it | [Mental model](#mental-model); [05.02](../05-security/02-pod-security.md) |
+| EP9: the webhook Service takes calls from anything that can reach it | A ClusterIP Service only, TLS pinned by `caBundle`, and a NetworkPolicy for the webhook's namespace | [TLS and caBundle](#failure-modes-as-attack-surface); [02.06](../02-networking/06-network-policies.md) |
 
 ## Diagrams
 
@@ -145,8 +165,7 @@ sequenceDiagram
     A->>A: re-invoke mutating if a later<br/>hook mutated (reinvocationPolicy)
     A->>A: object-schema + built-in validation
     Note over A,V: VALIDATING admission (after schema, parallel)
-    A->>A: PodSecurity (PSA restricted) — the floor
-    A->>A: ValidatingAdmissionPolicy (CEL, in-tree)<br/>— webhook-less alternative
+    Note over A: PodSecurity and ValidatingAdmissionPolicy<br/>run in-process, with no webhook hop
     A->>V: AdmissionReview (final Pod)
     V-->>A: allow / deny("not restricted-compliant: ...")
     alt all allow
@@ -166,7 +185,7 @@ sequenceDiagram
   Need to MUTATE the object (inject label/sidecar/default SC)?
     YES → is general code / external I/O / cross-object lookup needed?
             NO  ──────────────────────► MutatingAdmissionPolicy (CEL)
-                  in-tree (GA v1.36): set-if-absent label, default a
+                  in-tree (stable v1.36): set-if-absent label, default a
                   field; NO server, NO TLS, NO network hop.
             YES ──────────────────────► MUTATING WEBHOOK
                   (ConfigMap profile lookup, external I/O; controller-
@@ -209,13 +228,13 @@ It does **not** modify any canonical Bookstore manifest, Helm chart, Kustomize
 overlay, or other `examples/bookstore/**` file — it is purely additive (the
 same discipline as the Gateway-vs-Ingress and CloudNativePG precedents).
 
-We will: (0) build + vet the server; (1) read the two webhook configs and the
-deadlock-avoidance scoping; (2) the honest local-vs-cluster story + cert-manager
-(pinned) install; (3) deploy the operator and see the mutating webhook stamp a
-Pod and the validating webhook reject a bad one; (4) the same rule as a
-**ValidatingAdmissionPolicy** with zero server.
+We will: (0) build and vet the server; (1) read the two webhook configs and
+their scoping; (2) install cert-manager, pinned, into a restricted namespace;
+(3) deploy the operator and see both webhooks act, on your own cluster; (4)
+break the webhook on purpose and watch how each failure mode shows up; (5)
+write the same kind of rule as a **ValidatingAdmissionPolicy** with no server.
 
-### 0. Build and vet the webhook server (always reproducible, no cluster)
+### 0. Build and vet the webhook server (no cluster needed)
 
 The server is real Go (controller-runtime), built into a distroless image with
 the **exact** pattern of
@@ -223,8 +242,8 @@ the **exact** pattern of
 
 ```sh
 cd examples/bookstore/operator
-go vet ./...                                  # passes clean
-docker build -t bookstore/operator:dev .      # distroless static nonroot (~51 MB)
+go vet ./...                                  # prints nothing and exits 0
+docker build -t bookstore/operator:dev .      # multi-stage, distroless nonroot
 cd ../../..
 ```
 
@@ -284,6 +303,13 @@ The settings, and **why each is exactly this**:
 | `admissionReviewVersions` | `["v1"]` | `["v1"]` | Pin the wire version; `v1` is the only non-deprecated one. |
 | `clientConfig.service` + `caBundle` | the in-cluster Service | same | The apiserver reaches the webhook via a Service; cert-manager injects the matching `caBundle` (next step). |
 
+**Do not apply the mutating configuration to a cluster you share.** Its
+selector matches every namespace except the three it excludes, so it reaches
+Pods owned by every team. The validating configuration names only `bookstore`.
+The scope is the first control: a webhook can harm only what its selector
+sends it. The failure-mode lab below applies only the validating configuration,
+and only to the namespaces it names.
+
 ### 2. The honest local story + TLS (cert-manager, pinned)
 
 > **What is and isn't locally reproducible.** The Go server, `go vet`,
@@ -303,12 +329,35 @@ it. Install cert-manager via its **pinned Helm chart** — per this guide's rule
 **never** a `releases/latest/download/<PINNED-FILE>.yaml` URL (it 404s when a
 new release ships; same precedent as Kyverno/KEDA/CNPG installs):
 
+Label the namespace before the chart puts anything in it. The chart's Pods
+already meet `restricted`: in the v1.21.3 chart, each Deployment sets
+`runAsNonRoot`, the `RuntimeDefault` seccomp profile, no privilege escalation,
+a read-only root file system and every capability dropped. The namespace needs
+no exception.
+
+```yaml
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: cert-manager
+  labels:
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/warn: restricted
+```
+
+Save that as `cert-manager-namespace.yaml`, then install the pinned chart. The
+chart installs cluster-scoped CRDs and webhooks, so run this only on a cluster
+you own.
+
 ```sh
-CERT_MANAGER_CHART_VERSION=v1.15.3        # jetstack/cert-manager chart (pin)
+CERT_MANAGER_CHART_VERSION=v1.21.3        # jetstack/cert-manager chart (pin)
+kubectl apply -f cert-manager-namespace.yaml
 helm repo add jetstack https://charts.jetstack.io
 helm repo update
 helm install cert-manager jetstack/cert-manager \
-  --namespace cert-manager --create-namespace \
+  --namespace cert-manager \
   --version "$CERT_MANAGER_CHART_VERSION" \
   --set crds.enabled=true --wait
 kubectl -n cert-manager rollout status deploy/cert-manager-webhook
@@ -324,6 +373,13 @@ kubectl -n cert-manager rollout status deploy/cert-manager-webhook
 > operational footgun, which is why it is the default path here.
 
 ### 3. Deploy the operator and watch both webhooks act
+
+**Run this on your own kind cluster.** The deployment needs the
+BookstoreTenant CRD and the operator's cluster RBAC. Both are cluster-scoped,
+so the lab cluster used for the captured output in this chapter did not take
+them on. The output shown in this step is illustrative and was not captured.
+The failure modes below were captured, using the same validating configuration
+with no operator behind it.
 
 `make deploy` renders [`config/default`](../examples/bookstore/operator/config/default/kustomization.yaml)
 (CRD + RBAC + the restricted-compliant manager Deployment + the webhook configs
@@ -349,99 +405,332 @@ kubectl -n bookstore-operator-system rollout status deploy/bookstore-operator-co
 kubectl get mutatingwebhookconfiguration,validatingwebhookconfiguration | grep bookstore
 ```
 
-**See the mutating webhook stamp a Pod.** Create a minimal compliant Pod in
-`bookstore` and observe the injected label (the `securityContext` default only
-fills if you omit it; here we set a compliant one so PSA also admits):
+**See the mutating webhook stamp a Pod.** Save the Pod below as `probe.yaml`
+and apply it to `bookstore`. It carries the whole baseline, so PSA admits it
+without help from the webhook. It does not set the `managed-by` label, so the
+webhook adds it. The image is the catalog image the earlier chapters build and
+load, and the Pod is never meant to serve traffic.
+
+```yaml
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: probe
+  namespace: bookstore
+automountServiceAccountToken: false
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: probe
+  namespace: bookstore
+  labels:
+    app.kubernetes.io/part-of: bookstore
+spec:
+  serviceAccountName: probe
+  automountServiceAccountToken: false
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 65532
+    runAsGroup: 65532
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: app
+      image: bookstore/catalog:dev
+      imagePullPolicy: IfNotPresent
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop: ["ALL"]
+      resources:
+        requests: { cpu: 10m, memory: 32Mi }
+        limits: { memory: 64Mi }
+      volumeMounts:
+        - name: tmp
+          mountPath: /tmp
+  volumes:
+    - name: tmp
+      emptyDir: {}
+```
 
 ```sh
-kubectl run probe -n bookstore --image=registry.k8s.io/pause:3.9 \
-  --overrides='{"spec":{"securityContext":{"runAsNonRoot":true,"runAsUser":65532,"seccompProfile":{"type":"RuntimeDefault"}},"containers":[{"name":"probe","image":"registry.k8s.io/pause:3.9","securityContext":{"allowPrivilegeEscalation":false,"capabilities":{"drop":["ALL"]},"runAsNonRoot":true,"seccompProfile":{"type":"RuntimeDefault"}}}]}}'
+kubectl apply -f probe.yaml
 kubectl get pod probe -n bookstore -o jsonpath='{.metadata.labels}'; echo
-#   ...  "app.kubernetes.io/managed-by":"bookstore-webhook"  ← the mutating webhook added it
 kubectl delete pod probe -n bookstore
 ```
 
-**See the validating webhook reject a non-compliant Pod.** Try a root,
-escalating Pod in `bookstore` — PSA *and* our validating webhook both object;
-the webhook's message is the project-specific one:
+Illustrative output, not captured on the lab cluster. The label line is the one
+the webhook adds, because the Pod did not set it:
 
-```sh
-kubectl run bad -n bookstore --image=registry.k8s.io/pause:3.9 \
-  --overrides='{"spec":{"containers":[{"name":"bad","image":"registry.k8s.io/pause:3.9","securityContext":{"allowPrivilegeEscalation":true}}]}}'
-# Error from server: admission webhook "vpod.bookstore.example.com" denied the request:
-#   pod "bad" is not restricted-PodSecurity-compliant:
-#   [spec.securityContext.runAsNonRoot must be true
-#    container "bad": allowPrivilegeEscalation must be false
-#    container "bad": capabilities must drop ["ALL"]]
+```text
+{"app.kubernetes.io/managed-by":"bookstore-webhook","app.kubernetes.io/part-of":"bookstore"}
 ```
 
-That rejection is the **app-layer reinforcement** of [Part 05
-ch.02](../05-security/02-pod-security.md): PSA is the cluster floor; this
-webhook adds a project rule with a project message, and is the same machinery
-Kyverno used in [Part 05 ch.03](../05-security/03-supply-chain.md) — now you
-own the server. Prove the deadlock-avoidance scoping holds: the **same bad
-Pod** is admitted in the operator's own namespace (excluded by
-`namespaceSelector`, so the webhook is never called — which is *exactly* what
-keeps a webhook outage recoverable):
+**See the validating webhook refuse a non-compliant Pod.** Change a copy of
+`probe.yaml` so that `allowPrivilegeEscalation` is `true`, and apply it. PSA
+checks the same restricted rules, so the refusal can come from either; the
+webhook's message is the project-specific one. Illustrative output, not
+captured on the lab cluster:
 
-```sh
-kubectl run bad -n bookstore-operator-system --image=registry.k8s.io/pause:3.9 \
-  --overrides='{"spec":{"containers":[{"name":"bad","image":"registry.k8s.io/pause:3.9","securityContext":{"allowPrivilegeEscalation":true}}]}}'
-# pod/bad created   ← webhook NOT invoked here, by design (footgun avoided)
-kubectl delete pod bad -n bookstore-operator-system
+```text
+Error from server: admission webhook "vpod.bookstore.example.com" denied the request: pod "probe" is not restricted-PodSecurity-compliant: [container "app": allowPrivilegeEscalation must be false]
 ```
 
-### 4. The same rule with zero server — ValidatingAdmissionPolicy (v1.30 GA)
+That refusal is the **app-layer reinforcement** of [Part 05
+ch.02](../05-security/02-pod-security.md): PSA is the cluster floor, and this
+webhook adds a project message. Kyverno, from [Part 05
+ch.03](../05-security/03-supply-chain.md), registers a webhook of the same
+kind. This time you own the server.
 
-For a *pure deny* the modern answer needs **no webhook at all**.
-`ValidatingAdmissionPolicy` + its `Binding` evaluate **CEL inside the
-apiserver** — no Pod, no TLS, no `failurePolicy` outage mode, no network hop.
-This is built-in (`admissionregistration.k8s.io/v1`, GA in v1.30), so it
-dry-runs clean with nothing installed:
+The scoping is the part that matters when things break. The operator's own
+namespace is outside the validating selector, so a Pod there never reaches the
+webhook. The failure-mode lab below proves what happens when that exclusion is
+missing.
 
-```sh
-cat <<'EOF' | kubectl apply --dry-run=client -f -
+### 4. The same kind of rule with no server: ValidatingAdmissionPolicy
+
+For a pure deny, the modern answer needs no webhook at all.
+`ValidatingAdmissionPolicy` and its `ValidatingAdmissionPolicyBinding` evaluate
+CEL inside the apiserver. There is no Pod, no TLS, no `failurePolicy` outage
+and no network hop. The API is built in (`admissionregistration.k8s.io/v1`, GA
+in v1.30).
+
+The rule below requires the `app.kubernetes.io/part-of` label on Pods in
+`bookstore`. PSA does not check labels, so a refusal for a missing label comes
+from this policy. The policy alone does nothing: the binding decides where it applies.
+Save this as `vap.yaml`:
+
+```yaml
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicy
-metadata: { name: bookstore-restricted-pods }
+metadata:
+  name: bookstore-require-part-of
 spec:
   failurePolicy: Fail
   matchConstraints:
     resourceRules:
       - apiGroups: [""]
         apiVersions: ["v1"]
-        operations: ["CREATE","UPDATE"]
+        operations: ["CREATE", "UPDATE"]
         resources: ["pods"]
   validations:
-    - expression: "object.spec.securityContext.?runAsNonRoot.orValue(false) == true"
-      message: "spec.securityContext.runAsNonRoot must be true"
-    - expression: "object.spec.containers.all(c, c.?securityContext.?allowPrivilegeEscalation.orValue(true) == false)"
-      message: "every container must set allowPrivilegeEscalation: false"
+    - expression: "has(object.metadata.labels) && 'app.kubernetes.io/part-of' in object.metadata.labels"
+      message: "pods in the Bookstore namespace must carry app.kubernetes.io/part-of"
 ---
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicyBinding
-metadata: { name: bookstore-restricted-pods }
+metadata:
+  name: bookstore-require-part-of
 spec:
-  policyName: bookstore-restricted-pods
-  validationActions: ["Deny"]            # or ["Audit","Warn"] first — the Part 05 ch.03 Audit→Enforce lifecycle, no add-on
+  policyName: bookstore-require-part-of
+  validationActions: ["Deny"]   # or ["Audit", "Warn"] first, then "Deny"
   matchResources:
     namespaceSelector:
-      matchLabels: { kubernetes.io/metadata.name: bookstore }
-EOF
-# validatingadmissionpolicy.../bookstore-restricted-pods created (dry run)
-# validatingadmissionpolicybinding.../bookstore-restricted-pods created (dry run)
+      matchLabels:
+        kubernetes.io/metadata.name: bookstore
 ```
 
-Same effect as the validating webhook, **none** of its operational cost. VAP
-cannot patch, but since v1.36 **MutatingAdmissionPolicy** can (CEL, via an
-apply configuration or a JSON patch), in-tree and on by default. Keep a
+Apply both, then apply the probe with its label removed. The label is the only
+thing that differs from the probe in step 3:
+
+```sh
+kubectl apply -f vap.yaml
+sed '/app.kubernetes.io\/part-of/d' probe.yaml | kubectl apply -f -
+```
+
+A policy that was created a moment ago can miss the first request. In the lab
+run, the label-less Pod was admitted right after the policy was applied. Wait a
+few seconds and try again. This time the policy refused it. The lab output,
+captured with the chapter's names:
+
+<!-- gate: output -->
+
+```text
+The pods "probe" is invalid: : ValidatingAdmissionPolicy 'bookstore-require-part-of' with binding 'bookstore-require-part-of' denied request: pods in the Bookstore namespace must carry app.kubernetes.io/part-of
+```
+
+VAP cannot change an object, and it cannot call out to anything. For
+mutation, **MutatingAdmissionPolicy** can change objects with CEL. The
+[Kubernetes docs](https://kubernetes.io/docs/reference/access-authn-authz/mutating-admission-policy/)
+state that it has been stable since v1.36 and is enabled by default. Keep a
 **webhook** for mutation or validation that needs general code or external
-I/O; the `PodDefaulter` above stays a webhook here to teach the mechanics.
-That decision is Diagram B; clean up:
+I/O. The `PodDefaulter` stays a webhook in this chapter to teach the
+mechanics. Diagram B draws the decision. Policy as code at fleet scale, with
+VAP and MAP, is in <!-- link-later: 05.07 -->Part 05 ch.07.
+
+## Failure modes as attack surface
+
+A webhook can fail in three ways: it is down, it is slow, or it answers wrongly.
+The failure has a direction. With `failurePolicy: Fail`, the apiserver refuses
+every matching write while the call fails. With `Ignore`, it admits the write
+and the check does not run. Either way, the direction is a setting in a file.
+Anyone who can change that file, or stop the backend, gets a say in what the
+cluster enforces. The table lists the failure modes this chapter covers.
+
+| Failure | What the apiserver does | The outage or the bypass | Control |
+|---|---|---|---|
+| Backend down, `Fail` | Refuses every matching create and update | An outage for every namespace in scope | Narrow selector; restore from the reviewed file |
+| Backend down, `Ignore` | Admits the request without running the check | The rule stops applying, and anyone who can stop the backend gets past it | `Ignore` only for convenience defaults |
+| Selector covers the webhook's own namespace | Refuses the Pod that would bring the webhook back | An outage the cluster cannot recover from by itself | Exclude the webhook's namespace |
+| `caBundle` does not match the serving certificate | Refuses the TLS handshake, the same as an outage | Every matching write fails until the bundle is fixed | cert-manager `inject-ca-from` |
+| Backend hangs | Waits `timeoutSeconds`, then applies `failurePolicy` | Every matching write waits up to that long | A small `timeoutSeconds` |
+| A mutation runs more than once | Calls a mutating webhook again after a later one changed the Pod | Duplicated or growing fields, if the webhook is not idempotent | Set-if-absent; `reinvocationPolicy: IfNeeded` |
+
+### Lab: break the webhook on purpose
+
+Run these steps on your own cluster after step 3. Each one is deliberate: it
+shows a failure so you can see its shape. The lab run used the same validating
+configuration with no operator behind it. Its Service had no Pods, so every
+call failed the same way. The lab used its own namespaces. The output below
+uses the chapter's names. Lines that name a lab
+namespace or the Service's address appear here as quotes from the transcript,
+not as blocks.
+
+**Deliberate: the backend goes away and `Fail` refuses everything.** Scale the
+operator to zero, then apply the probe to `bookstore`:
+
+```sh
+kubectl -n bookstore-operator-system scale deploy/bookstore-operator-controller-manager --replicas=0
+kubectl apply -f probe.yaml
+```
+
+The probe is compliant, and PSA would admit it. The apiserver still refuses it.
+In the lab, the refusal read
+`failed calling webhook "vpod.bookstore.example.com"` and ended in
+`connect: connection refused` on the Service's address. The Pod was never
+created.
+
+**Deliberate: a selector that covers the webhook's own namespace.** Widen the
+selector to include `bookstore-operator-system`, then apply the probe to that
+namespace. The lab run was refused the same way, with the same failed call. The
+webhook's own Pod cannot be created while the webhook is down, so the cluster
+cannot heal itself. Recovery takes someone with rights on the configuration,
+who removes the entry or deletes the configuration:
+
+```sh
+kubectl patch validatingwebhookconfiguration bookstore-operator-validating-webhook-configuration \
+  --type=json \
+  -p '[{"op":"replace","path":"/webhooks/0/namespaceSelector/matchExpressions/0/values","value":["bookstore","bookstore-operator-system"]}]'
+```
+
+Restore the reviewed file, then apply the probe to the operator's namespace. The
+namespace is outside the selector, so the webhook is never called:
+
+```sh
+kubectl apply -f examples/bookstore/operator/config/webhook/manifests.yaml
+sed 's/namespace: bookstore$/namespace: bookstore-operator-system/' probe.yaml | kubectl apply -f -
+```
+
+<!-- gate: output -->
+
+```text
+serviceaccount/probe unchanged
+pod/probe created
+```
+
+**Deliberate: `Ignore` during an outage.** Set `failurePolicy` to `Ignore`, then
+apply the probe to `bookstore` while the backend is still down:
+
+```sh
+kubectl patch validatingwebhookconfiguration bookstore-operator-validating-webhook-configuration \
+  --type=json -p '[{"op":"replace","path":"/webhooks/0/failurePolicy","value":"Ignore"}]'
+kubectl apply -f probe.yaml
+```
+
+<!-- gate: output -->
+
+```text
+serviceaccount/probe unchanged
+pod/probe created
+```
+
+The Pod is admitted, and the call was skipped. This probe passes PSA, so it
+shows only that the webhook stopped running. A rule that only the webhook enforces
+would be admitted the same way. PSA is the floor that stays in place.
+
+Restore the reviewed file. Re-applying it is the control that matters: the
+cluster's state goes back to what Git says, and `kubectl diff` shows any drift
+first.
+
+```sh
+kubectl apply -f examples/bookstore/operator/config/webhook/manifests.yaml
+```
+
+### Who may change the configuration
+
+A `failurePolicy` change is one `patch` away, so the question is who holds
+that verb. Check it for the identity a workload runs as, and for yourself:
+
+```sh
+kubectl auth can-i patch validatingwebhookconfigurations.admissionregistration.k8s.io \
+  --as=system:serviceaccount:bookstore:probe
+kubectl auth can-i patch validatingwebhookconfigurations.admissionregistration.k8s.io
+```
+
+<!-- gate: output -->
+
+```text
+no
+```
+
+<!-- gate: output -->
+
+```text
+yes
+```
+
+The probe's ServiceAccount has no such permission, and neither should any
+workload identity. Only identities you grant the verb can change the
+configuration, so keep that list short. Every change to these objects should
+also leave an audit record, which Part 05 ch.08 <!-- link-later: 05.08 -->
+covers.
+
+### TLS, timeouts, reinvocation and side effects
+
+The apiserver calls a webhook only over TLS, and only when the serving
+certificate chains to the `caBundle` in the configuration. A `caBundle` that
+has expired or been copied from an old CA fails the handshake. For a `Fail`
+webhook, that is an outage on every matching write. This is why the chapter
+uses cert-manager: `cert-manager.io/inject-ca-from` keeps the bundle and the
+serving certificate in step, and rotates both. The lab did not reach TLS
+because the Service had no Pods. The self-signed `caBundle` path in step 2 is
+the one to use when cert-manager is not available, and it puts rotation on you.
+
+`timeoutSeconds` bounds each call. A webhook that hangs, rather than refuses,
+costs the apiserver that much time on every matching write, and then
+`failurePolicy` decides the outcome. The default is 10 seconds, as the
+[extensible admission controllers page](https://kubernetes.io/docs/reference/access-authn-authz/extensible-admission-controllers/)
+says. The
+[good-practices guide](https://kubernetes.io/docs/concepts/cluster-administration/admission-webhooks-good-practices/)
+advises a small value, and this chapter uses 5.
+
+`reinvocationPolicy: IfNeeded` calls a mutating webhook again when a later
+webhook changed the Pod. A webhook that appends a label or a container grows the
+object on every call. The fix is set-if-absent, as in `PodDefaulter`. The same
+guide says to avoid side effects in admission webhooks, because `sideEffects:
+None` is the promise that a dry-run request may call the webhook safely.
+
+### Keep the failure mode small
+
+Run the webhook as a Deployment with at least two replicas and a
+PodDisruptionBudget, so a node drain does not start an outage. [Part 06
+ch.05](../06-production-readiness/05-reliability-and-disruptions.md) covers the
+budget. Roll out a new `Fail` webhook in `Ignore` first and watch its
+latency and error rate, then switch the policy. A `Fail` webhook that has
+never run under real traffic is the outage waiting to happen. Finally, keep a
+validating check after any mutation, so that a change which adds privilege is
+refused. The good-practices guide calls this "fail open and validate the final
+state".
+
+### Clean up
 
 ```sh
 kubectl delete -k examples/bookstore/operator/config/default --ignore-not-found
 helm uninstall cert-manager -n cert-manager
+kubectl delete validatingadmissionpolicybinding bookstore-require-part-of
+kubectl delete validatingadmissionpolicy bookstore-require-part-of
 kind delete cluster --name bookstore
 ```
 
@@ -466,8 +755,8 @@ kind delete cluster --name bookstore
   them; `reinvocationPolicy: IfNeeded` re-invokes a mutating webhook if a later
   one changed the object — which is *why* a mutating webhook **must** be
   idempotent (`set-if-absent`, never `append`). PSA and `ValidatingAdmission
-  Policy` evaluate in the validating phase alongside (in-process, before) your
-  validating webhooks — same phase, no webhook hop.
+  Policy` evaluate in the validating phase, in process, alongside your
+  validating webhooks.
 - **TLS and the `caBundle` are the trust anchor.** The apiserver only calls a
   webhook over TLS whose server cert verifies against the
   `clientConfig.caBundle` in the configuration. cert-manager issues the serving
@@ -508,39 +797,11 @@ kind delete cluster --name bookstore
 > **In production: prefer ValidatingAdmissionPolicy, then Kyverno/Gatekeeper,
 > then a hand-written webhook — in that order.** Reach for a webhook only when
 > you must run logic CEL can't; CEL-expressible mutation now belongs in
-> **MutatingAdmissionPolicy** (GA v1.36), the same way pure deny belongs in
+> **MutatingAdmissionPolicy** (stable since v1.36), the same way pure deny belongs in
 > VAP. Every webhook you run is a new control-plane failure domain on the
 > write hot path; VAP (in-tree, v1.30 GA) removes the server, the TLS, and the
 > `failurePolicy`-as-outage entirely for the common "deny if X" case. Fewer
 > webhooks is more uptime.
-
-> **In production: choose `failurePolicy` per webhook with the outage in mind,
-> and roll out Ignore → observe → Fail.** Security enforcement is `Fail`
-> (fail-closed) but only *after* the webhook has proven reliable in `Ignore`
-> under real traffic — flipping straight to `Fail` is how a flaky webhook
-> becomes a cluster outage on day one (the exact analog of [Part 05
-> ch.03](../05-security/03-supply-chain.md)'s Audit→Enforce). Convenience
-> mutation stays `Ignore`. Always set a small `timeoutSeconds` and a tight
-> scope so a slow/broken webhook degrades narrowly.
-
-> **In production: exclude `kube-system` and the webhook's own namespace,
-> always.** This is not optional hygiene — a Pod-affecting `Fail` webhook that
-> can block its own namespace or the control plane cannot be *recovered* by the
-> cluster (nothing can schedule the Pod that fixes it). Add an explicit
-> `webhook-exempt` escape label and a CEL `matchConditions` pre-filter, run the
-> webhook **HA** (≥2 replicas, PDB — [Part 06
-> ch.05](../06-production-readiness/05-reliability-and-disruptions.md)), and
-> keep its image minimal/distroless ([Part 05
-> ch.03](../05-security/03-supply-chain.md)) so it starts fast after disruption.
-
-> **In production: automate the serving cert and the `caBundle` (cert-manager),
-> and make webhooks idempotent + side-effect-free.** A manually rotated
-> `caBundle` *will* eventually expire and take down a `Fail` webhook;
-> cert-manager's `inject-ca-from` removes that class of outage. A mutating
-> webhook **must** be idempotent (`reinvocationPolicy` can call it repeatedly)
-> and declare `sideEffects: None` (so dry-run and the apiserver's retries are
-> safe) — non-idempotent or side-effecting webhooks corrupt objects or
-> double-act under perfectly normal apiserver behaviour.
 
 > **In production (managed — EKS/GKE/AKS):** the provider runs the apiserver,
 > so a `Fail` webhook that the provider's *managed add-on* controllers trip
@@ -552,62 +813,57 @@ kind delete cluster --name bookstore
 ## Quick Reference
 
 ```sh
-# Build / vet / dry-run the webhook server (no cluster needed)
+# Build and vet the webhook server (no cluster needed)
 cd examples/bookstore/operator && go vet ./... && docker build -t bookstore/operator:dev .
-kubectl apply --dry-run=client -f config/webhook/manifests.yaml   # built-in: clean
+cd -
 
-# Install cert-manager (PINNED Helm chart — never releases/latest/download URL)
+# Install cert-manager with the pinned chart, into a restricted namespace
+kubectl apply -f cert-manager-namespace.yaml
 helm repo add jetstack https://charts.jetstack.io && helm repo update
-helm install cert-manager jetstack/cert-manager -n cert-manager --create-namespace \
-  --version v1.15.3 --set crds.enabled=true --wait
+helm install cert-manager jetstack/cert-manager -n cert-manager \
+  --version v1.21.3 --set crds.enabled=true --wait
 
-# Deploy the operator+webhooks; inspect what the apiserver will call
+# Deploy the operator and its webhook configurations
 kubectl apply -k examples/bookstore/operator/config/default
-kubectl get mutatingwebhookconfiguration,validatingwebhookconfiguration
-kubectl get validatingwebhookconfiguration vpod... -o jsonpath='{.webhooks[0].failurePolicy}'
+kubectl get mutatingwebhookconfigurations,validatingwebhookconfigurations
 
-# Observe / debug an admission rejection
-kubectl run bad -n bookstore --image=registry.k8s.io/pause:3.9 --overrides='{...non-compliant...}'
-#   → "admission webhook \"vpod.bookstore.example.com\" denied the request: ..."
+# Read the failure policy of the validating webhook
+kubectl get validatingwebhookconfiguration bookstore-operator-validating-webhook-configuration \
+  -o jsonpath='{.webhooks[0].failurePolicy}{"\n"}'
+
+# Check who may change webhook configurations
+kubectl auth can-i patch validatingwebhookconfigurations.admissionregistration.k8s.io \
+  --as=system:serviceaccount:bookstore:probe
+
+# Read the webhook server's log when a request is refused
 kubectl -n bookstore-operator-system logs deploy/bookstore-operator-controller-manager
 ```
 
-Minimal skeletons (full files in `examples/bookstore/operator/config/`):
+The safety knobs on one webhook entry. This is a fragment: the full file is
+`examples/bookstore/operator/config/webhook/manifests.yaml`, and the policy
+alternative is the pair in step 4.
 
 ```yaml
-# Validating webhook config — the safety knobs are mandatory, not optional
-apiVersion: admissionregistration.k8s.io/v1
-kind: ValidatingWebhookConfiguration
-metadata: { name: vpod, annotations: { cert-manager.io/inject-ca-from: ns/cert } }
 webhooks:
-  - name: vpod.example.com
+  - name: vpod.bookstore.example.com
     admissionReviewVersions: ["v1"]
-    sideEffects: None                       # pure function (dry-run safe)
-    failurePolicy: Fail                     # security → fail-closed (roll out Ignore→Fail)
+    sideEffects: None                     # a pure function of the request
+    failurePolicy: Fail                   # enforcement fails closed
     timeoutSeconds: 5
-    clientConfig: { service: { name: webhook-svc, namespace: ns, path: /validate--v1-pod, port: 443 } }
-    rules: [ { apiGroups: [""], apiVersions: ["v1"], operations: ["CREATE","UPDATE"], resources: ["pods"], scope: Namespaced } ]
-    namespaceSelector:                      # EXCLUDE kube-system + own ns (the footgun)
+    namespaceSelector:                    # the app namespace only, never the webhook's own
       matchExpressions:
-        - { key: kubernetes.io/metadata.name, operator: NotIn, values: ["kube-system","<WEBHOOK-OWN-NS>"] }
-    matchConditions:                        # CEL pre-filter (v1.30 GA) — cheap scope cut
-      - { name: not-exempt, expression: "!has(object.metadata.labels) || !('example.com/exempt' in object.metadata.labels)" }
----
-# Webhook-less alternative for pure deny — PREFER this when it suffices
-apiVersion: admissionregistration.k8s.io/v1
-kind: ValidatingAdmissionPolicy
-metadata: { name: p }
-spec:
-  failurePolicy: Fail
-  matchConstraints: { resourceRules: [ { apiGroups: [""], apiVersions: ["v1"], operations: ["CREATE","UPDATE"], resources: ["pods"] } ] }
-  validations: [ { expression: "object.spec.?securityContext.?runAsNonRoot.orValue(false) == true", message: "runAsNonRoot required" } ]
-# + a ValidatingAdmissionPolicyBinding with validationActions: ["Deny"] (or Audit/Warn first)
+        - key: kubernetes.io/metadata.name
+          operator: In
+          values: ["bookstore"]
+    matchConditions:                      # a cheap pre-filter, after the selectors
+      - name: exclude-exempt-pods
+        expression: "!has(object.metadata.labels) || !('bookstore.example.com/webhook-exempt' in object.metadata.labels)"
 ```
 
 Checklist:
 
-- [ ] Use **VAP** for pure deny and **MutatingAdmissionPolicy** (GA v1.36)
-      for CEL-expressible defaulting; webhook only for logic CEL can't
+- [ ] Use **VAP** for pure deny and **MutatingAdmissionPolicy**
+      (stable since v1.36) for CEL-expressible defaulting; webhook only for logic CEL can't
       express; Kyverno/Gatekeeper for policy-as-data at fleet scale
 - [ ] `sideEffects: None`; mutating webhook **idempotent** (set-if-absent);
       small `timeoutSeconds`; `admissionReviewVersions: ["v1"]`
@@ -636,7 +892,7 @@ Checklist:
 2. **Your `ValidatingWebhookConfiguration` enforces PSA-restricted on `bookstore`, with `failurePolicy: Fail`. The webhook server pod crashes. What is the cluster-wide blast radius and how do you recover?**
    <details><summary>Show answer</summary>
 
-   With `failurePolicy: Fail`, every Create/Update of matching resources is rejected because the apiserver cannot reach the webhook. If `namespaceSelector` is scoped tightly to `bookstore`, only that namespace is bricked — apps elsewhere are fine. If the selector is broad (no exclusion of `kube-system` or the webhook's own namespace), you cannot recover even the webhook itself because creating the new Pod requires the webhook to be up — the classic chicken-and-egg lockout. Recovery: `kubectl delete validatingwebhookconfiguration <name>` (cluster-admin bypasses admission for some core resources but you may need to edit the apiserver flags via the provider). Prevention: scoped `namespaceSelector` + `Ignore` for the webhook's own namespace + an exempt label escape hatch.
+   With `failurePolicy: Fail`, every Create/Update of matching resources is rejected because the apiserver cannot reach the webhook. If `namespaceSelector` is scoped tightly to `bookstore`, only that namespace is bricked. Apps elsewhere are fine. If the selector is broad (no exclusion of `kube-system` or the webhook's own namespace), you cannot recover even the webhook itself because creating the new Pod requires the webhook to be up — the classic chicken-and-egg lockout. Recovery: `kubectl delete validatingwebhookconfiguration <name>` (deleting the configuration does not go through the webhook, because the webhook matches only Pods, so an administrator can remove it even while the webhook is down). Prevention: scoped `namespaceSelector` + `Ignore` for the webhook's own namespace + an exempt label escape hatch.
 
    </details>
 
@@ -647,10 +903,10 @@ Checklist:
 
    </details>
 
-4. **Hands-on: deploy a mutating webhook that injects `app.kubernetes.io/managed-by=admission-webhook` on every Pod in `bookstore`. Then `kubectl create deployment test --image=nginx -n bookstore`. Where does the label end up — on the Pod, the ReplicaSet, the Deployment?**
-   <details><summary>What you should see</summary>
+4. **A teammate's pipeline patches the validating webhook's `failurePolicy` from `Fail` to `Ignore` during a deploy, and the backend is down. Which identities can make that change, what does the apiserver do with the next Pod the webhook would refuse, and which controls would have caught it?**
+   <details><summary>Show answer</summary>
 
-   Only on the Pod. The Deployment's PodTemplate is the spec the ReplicaSet renders Pods from, but the webhook fires per Pod create, so the label is added by the webhook on the way to etcd — *after* the controller has rendered the spec. The ReplicaSet and Deployment templates remain unchanged. If you want the label on the Deployment too, the webhook must match `apps/v1` resources, not just Pods. This is the "which resource does the webhook see" gotcha that catches everyone first time.
+   Any identity with `patch` or `update` on `validatingwebhookconfigurations`. The lab's probe ServiceAccount could not make the change, and a cluster administrator can. With `Ignore`, the apiserver skips the call when the backend is unreachable, so a Pod that the webhook would refuse is admitted, and no error is raised. The controls are RBAC that keeps the verb to a short list, and applying from Git with `kubectl diff`, so the drift shows at the next apply (T3). The audit record of the change is the detection step, covered in Part 05 ch.08 <!-- link-later: 05.08 -->.
 
    </details>
 
@@ -668,7 +924,7 @@ Checklist:
   <https://kubernetes.io/docs/reference/access-authn-authz/extensible-admission-controllers/>,
   ValidatingAdmissionPolicy (CEL, GA v1.30)
   <https://kubernetes.io/docs/reference/access-authn-authz/validating-admission-policy/>,
-  MutatingAdmissionPolicy (CEL, GA v1.36)
+  MutatingAdmissionPolicy (CEL, stable since v1.36)
   <https://kubernetes.io/docs/reference/access-authn-authz/mutating-admission-policy/>,
-  and the admission webhook good-practices / `matchConditions`
-  <https://kubernetes.io/docs/reference/access-authn-authz/admission-webhooks-good-practices/>.
+  and the admission webhook good practices
+  <https://kubernetes.io/docs/concepts/cluster-administration/admission-webhooks-good-practices/>.
