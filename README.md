@@ -30,13 +30,14 @@ habit that a later chapter reverses. The reasoning is in
 chapter follows are in [`docs/security-first-authoring.md`](docs/security-first-authoring.md),
 and the targets are Kubernetes 1.37 and kind v0.33.0.
 
-**Done so far.** Part 01 Core workloads is rewritten, all eight chapters, and
-two chapters from other Parts are too. CI fails a pull request that breaks
-any of them:
+**Done so far.** Part 01 Core workloads (all eight chapters) and Part 10 Cloud
+and managed Kubernetes (all six chapters) are rewritten, and two chapters from
+other Parts are too. CI fails a pull request that breaks any of them:
 
 - [01.01 Pods](full-guide/01-core-workloads/01-pods.md) through [01.08 Deployment strategies](full-guide/01-core-workloads/08-deployment-strategies.md), the baseline from the first manifest in 01.01;
 - [05.02 Pod security](full-guide/05-security/02-pod-security.md), with the attacks run on a lab cluster;
-- [07.03 The CI/CD pipeline](full-guide/07-delivery/03-cicd-pipeline.md), the pipeline the example services use.
+- [07.03 The CI/CD pipeline](full-guide/07-delivery/03-cicd-pipeline.md), the pipeline the example services use;
+- [10.01 The managed Kubernetes model](full-guide/10-cloud-and-managed-kubernetes/01-managed-kubernetes-model.md) through [10.06 Node autoscaling, cost & multi-cloud](full-guide/10-cloud-and-managed-kubernetes/06-node-autoscaling-cost-multicloud.md), with every workload manifest on the baseline from 01.01.
 
 **Everything else** is still the earlier text. Its manifests do not all pass
 the new gates yet, and the run summary of the `security-gates` workflow

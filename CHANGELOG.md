@@ -102,6 +102,9 @@ versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   checked by the evidence gate. The admission gate judges a registered
   namespace at its registered level only for the chapter it names, and
   `01-core-workloads/` joins the enforced list.
+- Part 10 Cloud and managed Kubernetes (10.01 to 10.06) is rewritten
+  security-first, and `10-cloud-and-managed-kubernetes/` joins the enforced
+  list.
 
 ### Fixed
 - Standalone EKS add-ons (kube-proxy, CoreDNS, EBS CSI) now follow
