@@ -1,0 +1,135 @@
+# Transcript for 03-config-and-storage/02-secrets.md, lab steps 0 to 9.
+# Tier A: a kind cluster that the lab owns. Kubernetes v1.37.0 server, kubectl
+# v1.37.2, gitleaks v8.30.1 (the CI pin).
+# Recorded by running examples/security-lab/labs/03-02.sh from full-guide/.
+# The lab used its own namespace, p03-02-secrets. The chapter names the
+# bookstore namespace and applies the same files. Lines that name the lab
+# namespace are kept as captured.
+# The db-credentials value was generated when the script started and written
+# into 16-db-credentials.yaml in place of the demo literal. The script never
+# prints it: where a check needs the value, the transcript shows a count, a
+# length, a key name or a checksum.
+## step 0: versions and a clean start
+$ kubectl version
+Client Version: v1.37.2
+Server Version: v1.37.0
+$ kubectl get namespace p03-02-secrets
+Error from server (NotFound): namespaces "p03-02-secrets" not found
+
+## step 1: a namespace that enforces restricted, and three ServiceAccounts
+$ kubectl create namespace p03-02-secrets
+namespace/p03-02-secrets created
+$ kubectl label namespace p03-02-secrets pod-security.kubernetes.io/enforce=restricted pod-security.kubernetes.io/audit=restricted pod-security.kubernetes.io/warn=restricted
+namespace/p03-02-secrets labeled
+$ kubectl apply -f -   # three ServiceAccounts in p03-02-secrets; none mounts a token
+serviceaccount/secret-reader created
+serviceaccount/secret-lister created
+serviceaccount/pod-creator created
+
+## step 2: the db-credentials Secret, with a value generated now
+$ PW=$(openssl rand -hex 16)   # generated now, never printed
+$ sed -e 's/devpassword/$PW/' -e 's/namespace: bookstore/namespace: p03-02-secrets/' examples/bookstore/raw-manifests/16-db-credentials.yaml | kubectl apply -f -
+secret/db-credentials created
+$ kubectl get secret db-credentials -n p03-02-secrets -o jsonpath='{.data.POSTGRES_DB}'; echo
+Ym9va3N0b3Jl
+$ kubectl get secret db-credentials -n p03-02-secrets -o jsonpath='{.data.POSTGRES_DB}' | base64 -d; echo
+bookstore
+$ kubectl get secret db-credentials -n p03-02-secrets -o jsonpath='{.data.POSTGRES_PASSWORD}' | base64 -d | wc -c | tr -d ' '
+32
+$ decoded POSTGRES_PASSWORD equals $PW (compared, not printed)
+yes
+$ kubectl get secret db-credentials -n p03-02-secrets -o jsonpath='{.metadata.annotations.kubectl\.kubernetes\.io/last-applied-configuration}' | grep -c stringData
+1
+$ kubectl get secret db-credentials -n p03-02-secrets -o jsonpath='{...last-applied-configuration}' | grep -c "$PW"   # the generated value, counted not printed
+1
+$ grep -n 'password=$(POSTGRES_PASSWORD)' examples/bookstore/raw-manifests/10-catalog-deploy.yaml examples/bookstore/raw-manifests/14-orders-deploy.yaml
+examples/bookstore/raw-manifests/10-catalog-deploy.yaml:164:              value: "host=postgres.bookstore.svc.cluster.local port=5432 user=$(POSTGRES_USER) password=$(POSTGRES_PASSWORD) dbname=$(POSTGRES_DB) sslmode=disable"
+examples/bookstore/raw-manifests/14-orders-deploy.yaml:109:              value: "host=postgres.bookstore.svc.cluster.local port=5432 user=$(POSTGRES_USER) password=$(POSTGRES_PASSWORD) dbname=$(POSTGRES_DB) sslmode=disable"
+
+## step 3: RBAC on one named Secret: get is named, list and create are not
+$ kubectl apply -f -   # Role db-credentials-reader and its RoleBinding in p03-02-secrets
+role.rbac.authorization.k8s.io/db-credentials-reader created
+rolebinding.rbac.authorization.k8s.io/db-credentials-reader created
+$ kubectl auth can-i get secret/db-credentials -n p03-02-secrets --as=system:serviceaccount:p03-02-secrets:secret-reader
+yes
+$ kubectl auth can-i get secret/other-creds -n p03-02-secrets --as=system:serviceaccount:p03-02-secrets:secret-reader
+no
+$ kubectl auth can-i get secrets -n p03-02-secrets --as=system:serviceaccount:p03-02-secrets:secret-reader
+no
+$ kubectl auth can-i list secrets -n p03-02-secrets --as=system:serviceaccount:p03-02-secrets:secret-reader
+no
+$ kubectl auth can-i create secrets -n p03-02-secrets --as=system:serviceaccount:p03-02-secrets:secret-reader
+no
+$ kubectl get secrets -n p03-02-secrets --as=system:serviceaccount:p03-02-secrets:secret-reader -o name
+Error from server (Forbidden): secrets is forbidden: User "system:serviceaccount:p03-02-secrets:secret-reader" cannot list resource "secrets" in API group "" in the namespace "p03-02-secrets"
+$ kubectl get secrets -n p03-02-secrets --as=system:serviceaccount:p03-02-secrets:secret-reader --field-selector metadata.name=db-credentials -o name
+secret/db-credentials
+$ kubectl create secret generic extra -n p03-02-secrets --from-literal=k=v --as=system:serviceaccount:p03-02-secrets:secret-reader
+error: failed to create secret secrets is forbidden: User "system:serviceaccount:p03-02-secrets:secret-reader" cannot create resource "secrets" in API group "" in the namespace "p03-02-secrets"
+
+## step 4: a list with no names returns every value
+$ kubectl apply -f -   # Role secret-lister (list secrets, no names) and its RoleBinding in p03-02-secrets
+role.rbac.authorization.k8s.io/secret-lister created
+rolebinding.rbac.authorization.k8s.io/secret-lister created
+$ kubectl get secrets -n p03-02-secrets --as=system:serviceaccount:p03-02-secrets:secret-lister -o json | grep -o '"POSTGRES_[A-Z]*"' | sort -u
+"POSTGRES_DB"
+"POSTGRES_PASSWORD"
+"POSTGRES_USER"
+
+## step 5: a Pod that may only create Pods reads the Secret
+$ kubectl apply -f -   # Role pod-creator (create pods) and its RoleBinding in p03-02-secrets
+role.rbac.authorization.k8s.io/pod-creator created
+rolebinding.rbac.authorization.k8s.io/pod-creator created
+$ kubectl auth can-i create pods -n p03-02-secrets --as=system:serviceaccount:p03-02-secrets:pod-creator
+yes
+$ kubectl auth can-i get secrets -n p03-02-secrets --as=system:serviceaccount:p03-02-secrets:pod-creator
+no
+$ kubectl apply -f -   # secret-reveal: runs as pod-creator, mounts db-credentials, prints checksums
+pod/secret-reveal created
+$ kubectl wait pod/secret-reveal -n p03-02-secrets --for='jsonpath={.status.phase}=Succeeded' --timeout=300s
+pod/secret-reveal condition met
+$ kubectl logs secret-reveal -n p03-02-secrets
+5a40a4a0c10e4630b75eb7bb63b6787d58cb989785d7cd1bda6e7401aac7cd14  /creds/POSTGRES_PASSWORD
+POSTGRES_DB
+POSTGRES_PASSWORD
+POSTGRES_USER
+$ the first checksum equals the checksum of $PW (compared, not printed)
+yes
+$ kubectl delete pod secret-reveal -n p03-02-secrets --now
+pod "secret-reveal" deleted from p03-02-secrets namespace
+
+## step 6: the Secret as files, and the mode an inspection Pod sees
+$ kubectl apply -f -   # secret-files: runs as secret-reader, mounts db-credentials with defaultMode 0440 and fsGroup 65532
+pod/secret-files created
+$ kubectl wait pod/secret-files -n p03-02-secrets --for='jsonpath={.status.phase}=Succeeded' --timeout=300s
+pod/secret-files condition met
+$ kubectl logs secret-files -n p03-02-secrets
+uid=65532 gid=65532 groups=65532
+total 12
+-r--r-----    1 0        65532            9 Oct 31 02:02 POSTGRES_DB
+-r--r-----    1 0        65532           32 Oct 31 02:02 POSTGRES_PASSWORD
+-r--r-----    1 0        65532            9 Oct 31 02:02 POSTGRES_USER
+tmpfs /etc/creds tmpfs ro,relatime,size=65536k,inode64,noswap 0 0
+$ kubectl delete pod secret-files -n p03-02-secrets --now
+pod "secret-files" deleted from p03-02-secrets namespace
+
+## step 7: an immutable Secret refuses an in-place change
+$ kubectl apply -f -   # immutable-demo: Secret with immutable: true, value generated now
+secret/immutable-demo created
+$ kubectl get secret immutable-demo -n p03-02-secrets -o jsonpath='{.immutable}'; echo
+true
+$ kubectl patch secret immutable-demo -n p03-02-secrets --type merge -p "{\"stringData\":{\"token\":\"$(openssl rand -hex 16)\"}}"
+The Secret "immutable-demo" is invalid: data: Forbidden: field is immutable when `immutable` is set
+$ kubectl delete secret immutable-demo -n p03-02-secrets
+secret "immutable-demo" deleted from p03-02-secrets namespace
+
+## step 8: gitleaks over the raw manifests (CI pin v8.30.1)
+$ gitleaks version
+8.30.1
+$ gitleaks dir --config ../.gitleaks.toml --no-banner --no-color --redact examples/bookstore/raw-manifests
+7:02AM INF scanned ~162680 bytes (162.68 KB) in 24.5ms
+7:02AM INF no leaks found
+
+## step 9: clean up
+$ kubectl delete namespace p03-02-secrets --wait=true
+namespace "p03-02-secrets" deleted
