@@ -6,7 +6,9 @@
 > each production concern with its own check, then tear it down, orchestrating
 > only artifacts the earlier parts already built.
 
-**Estimated time:** ~45 min read · half-day hands-on **Prerequisites:** [Part
+**Estimated time:** ~45 min read · half-day hands-on
+**Lab tier:** A (kind). Run this chapter's commands only against clusters you own.
+**Prerequisites:** [Part
 07 ch.04](../07-delivery/04-gitops-argocd.md), Argo CD reconciles the
 Kustomize overlays · [Part 07
 ch.05](../07-delivery/05-progressive-delivery.md), the catalog Rollout for
@@ -112,9 +114,9 @@ and the chapter that owns the topic.
 |---|---|---|
 | A third-party chart creates an unlabelled namespace, which then runs privileged | Label each namespace before its install, at the lowest level the component needs (c) | [05.02](../05-security/02-pod-security.md) |
 | A Pod passes the scanner and then fails on a read-only root filesystem | Every workload carries the baseline, and the readiness waits in (d) check it | [01.01](../01-core-workloads/01-pods.md) |
-| A demo override left live becomes the state | The kind-only image override is reverted, and the demo Secret never reaches prod (d) | [07.04](../07-delivery/04-gitops-argocd.md) |
+| A demo override left live becomes the state | The kind-only image override is reverted in the working tree, and the prod render drops the demo Secret (d). A running cluster keeps the kind images until the next sync | [07.04](../07-delivery/04-gitops-argocd.md) |
 | A Pod outside the edge reaches the data tier | A bookstore Pod with no allow rule is refused on its way to Postgres (e) | [02.06](../02-networking/06-network-policies.md) |
-| An image other than the signed digest reaches prod | Verify the pinned catalog digest with cosign before the apply (d) | [07.03](../07-delivery/03-cicd-pipeline.md) |
+| An image other than the signed digest reaches prod | Check that the release workflow signed the pinned catalog digest before the apply (d). Admission-time enforcement is in [05.03](../05-security/03-supply-chain.md) and <!-- link-later: 05.07 -->05.07 | [07.03](../07-delivery/03-cicd-pipeline.md) |
 | An exception reused by another namespace | One registry entry per namespace, with a reason and an expiry (c) | [00.08](../00-foundations/08-security-foundations.md) |
 | A restore returns objects without their data | Check the rows after a restore, not the Pod status (j) | [08.02](../08-day-2-operations/02-backup-and-dr.md) |
 
@@ -220,13 +222,14 @@ debugged with `kubectl debug --profile=restricted`, never with `exec ... sh`.
 
 **Pin every chart version.** Each `helm install` takes a `*_CHART_VERSION`
 variable. Each value is the version its home chapter pins, and `helm show
-chart` prints the same number:
+chart` prints the same number. The Kyverno pin has no home chapter yet, so (c)5
+checks it with `helm show chart` as well:
 
 ```sh
 export TRAEFIK_CHART_VERSION=42.2.0     # 02.04
 export KPS_CHART_VERSION=92.16.1        # 06.01
 export KEDA_CHART_VERSION=2.21.0        # 06.04
-export KYVERNO_CHART_VERSION=3.9.2      # 05.07
+export KYVERNO_CHART_VERSION=3.9.2      # (c)5, no home chapter yet
 export VELERO_CHART_VERSION=12.2.2      # 08.02
 ```
 
@@ -248,22 +251,23 @@ balancer and no managed etcd ([Part 00
 ch.07](../00-foundations/07-local-cluster-setup.md)). Everything else is real
 Kubernetes.
 
-**The captured run.** The outputs marked as captured came from a lab cluster with
-a different name and one node. The lab's namespaces carry a prefix, so a captured
-line can show `<prefix>-bookstore` where the commands print `bookstore`. Each step
-that needs more than one worker, a metrics pipeline or an object store is labelled
-**cited, not run**.
+**The captured run.** The outputs marked as captured came from a lab cluster
+with a different name and one node. Its namespaces carried a lab prefix, which
+the commands here do not print, and the transcript header records that
+substitution. Each step that needs more than one worker, a metrics pipeline or
+an object store is labelled **cited, not run**, and so is any step the lab did
+not execute.
 
 ### (a) Cluster: a multi-node kind cluster
 
-A single-node kind cluster runs the app, but this walkthrough proves
-**scheduling spread** ([Part 04
-ch.02](../04-scheduling/02-affinity-taints-topology.md)) and **PDB-respecting
-drains** ([Part 06
-ch.05](../06-production-readiness/05-reliability-and-disruptions.md)), both of
-which need ≥2 worker nodes. We use the canonical multi-node config the guide
-established in Part 04 ch.02 (1 control-plane + 3 workers; synthetic zone
-labels; one dedicated, tainted DB node), plus `extraPortMappings` so Traefik's
+**Cited, not run.** The lab cluster already existed. Steps (b) to (f) and (h)
+to (l) need only one node. The scheduling spread in [Part 04
+ch.02](../04-scheduling/02-affinity-taints-topology.md) and the PDB-respecting
+drains in [Part 06
+ch.05](../06-production-readiness/05-reliability-and-disruptions.md) need at
+least two worker nodes. The config below is the multi-node pattern from Part 04
+ch.02: one control-plane and three workers, synthetic zone labels, and one
+dedicated, tainted DB node. It also adds `extraPortMappings`, so Traefik's
 NodePorts answer on `localhost` ([Part 02
 ch.04](../02-networking/04-ingress.md)). Save as `kind-capstone.yaml` (infra,
 **not** a Bookstore manifest):
@@ -307,15 +311,18 @@ kind create cluster --name bookstore --config kind-capstone.yaml
 kubectl get nodes -L topology.kubernetes.io/zone,dedicated   # 1 cp + 3 workers
 ```
 
-> Single-node fallback: `kind create cluster --name bookstore` works for steps
-> (b)–(f), (h)–(l); the spread/drain checks in (g) degrade gracefully (they
-> note "needs ≥2 nodes"). The multi-node config is preferred for the full run.
+> Single-node fallback: `kind create cluster --name bookstore` is enough for
+> steps (b) to (f) and (h) to (l). The spread and drain checks in (g) need the
+> multi-node config above, so the full run uses it.
 > Cluster lifecycle (versions, upgrades, the "rebuild from zero" property) is
 > [Part 08 ch.01](../08-day-2-operations/01-cluster-lifecycle.md); the
 > create/teardown contract is [Part 00
 > ch.07](../00-foundations/07-local-cluster-setup.md).
 
 ### (b) Images: build and load the four services
+
+**Cited, not run.** The lab cluster already held these four images, so the build
+and load were not repeated.
 
 The Bookstore images are local (`bookstore/<SVC>:dev`); a kind node cannot
 pull them from a registry, so they must be **loaded** into the node
@@ -335,11 +342,12 @@ done
 docker exec bookstore-control-plane crictl images | grep bookstore  # loaded
 ```
 
-(The four images are distroless, `catalog`/`orders`/`payments-worker` are
-`gcr.io/distroless/static:nonroot` (UID 65532), `storefront` is
-nginx-unprivileged (UID 101). That is why every workload is
-restricted-compliant and why step (k) debugs them with `kubectl debug`, not
-`exec sh`.)
+Three of the images are Go binaries on `gcr.io/distroless/static:nonroot`,
+running as UID 65532. `storefront` is `nginx:1.30-alpine` with the chapter's
+`nginx.conf` and `index.html`, runs as UID 101, and keeps a shell. Each
+workload meets `restricted` through the `securityContext` in its manifest, not
+through its base image. Step (k) debugs catalog with `kubectl debug`, because
+catalog has no shell, so `exec sh` fails.
 
 ### (c) Platform components: a labelled namespace before each install
 
@@ -380,16 +388,12 @@ helm repo update traefik
 helm show chart traefik/traefik --version "$TRAEFIK_CHART_VERSION" \
   | grep -E '^(appVersion|name|version):'
 helm install traefik traefik/traefik --version "$TRAEFIK_CHART_VERSION" \
-  --namespace traefik -f traefik-values.yaml --dry-run=server 2>&1 \
-  | grep -iE 'warning|error|^STATUS:'
-helm install traefik traefik/traefik --version "$TRAEFIK_CHART_VERSION" \
   --namespace traefik -f traefik-values.yaml --wait
 kubectl -n traefik get pods,svc
 kubectl get ingressclass traefik
 ```
 
-The chart's version and its Traefik release line up, and the server dry run
-prints no PodSecurity warning, so the install is admitted at `restricted`:
+The chart's version and its Traefik release line up:
 
 <!-- gate: output -->
 ```text
@@ -398,10 +402,10 @@ name: traefik
 version: 42.2.0
 ```
 
-<!-- gate: output -->
-```text
-STATUS: pending-install
-```
+The `--wait` install admits the Traefik Pod at `restricted`. A Pod that broke
+the level would never reach `Running`: the ReplicaSet could not create it, so
+`--wait` would time out. A `--dry-run=server` install never reaches admission,
+so it cannot show a PodSecurity warning, and this chapter does not rely on one.
 
 <!-- gate: output -->
 ```text
@@ -447,7 +451,23 @@ run.**
 
 **5) Kyverno, policy.** Label `kyverno` `restricted`, then install with
 `--version "$KYVERNO_CHART_VERSION"`. The policy set and its Audit report belong
-to <!-- link-later: 05.07 -->05.07. **Cited, not run.**
+to <!-- link-later: 05.07 -->05.07. **Cited, not run.** The chart version is
+checked against its repository with `helm show chart`, which was run below.
+The install is not run. Kyverno's upstream documentation is at
+<https://kyverno.io/docs/>, and this chart ships Kyverno v1.19.2.
+
+```sh
+helm repo add kyverno https://kyverno.github.io/kyverno/
+helm show chart kyverno/kyverno --version "$KYVERNO_CHART_VERSION" \
+  | grep -E '^(appVersion|name|version):'
+```
+
+<!-- gate: output -->
+```text
+appVersion: v1.19.2
+name: kyverno
+version: 3.9.2
+```
 
 **6) Velero, backup.** Install from
 [08.02](../08-day-2-operations/02-backup-and-dr.md), which owns the
@@ -530,19 +550,84 @@ entries in
 then serve the run. This is a local override, and its revert is at the end of
 the block.
 
-**kind only: the demo Secret.** `16-db-credentials.yaml` is the demo Secret.
-The prod overlay removes it, because prod receives `db-credentials` from
+**kind only: the database Secret.** The prod overlay removes the in-repo demo
+Secret in `16-db-credentials.yaml`, because prod receives `db-credentials` from
 External Secrets, Sealed Secrets or Vault
 ([Part 05 ch.04](../05-security/04-secrets-and-cluster-hardening.md)). kind has
-none of those, so the run applies the demo one. Never apply `16-` to a real
-prod cluster.
+none of those, so this run creates the Secret by hand with a generated password
+and the same three keys the demo file carries. Nothing is committed, and this
+chapter never applies the demo file, which holds a fixed password. `kubectl
+apply -k` does not prune, so the hand-made Secret stays when the overlay
+renders without it.
+
+**Verify the pinned digest before the apply.** Catalog's prod pin is a digest
+in `ghcr.io`. [07.03](../07-delivery/03-cicd-pipeline.md) signs each release
+image without a long-lived key, bound to the release workflow's identity. The
+check confirms who built that digest, not only that the digest exists. It runs
+first and covers the registry pin. On kind the apply uses the local `:dev`
+images from the override above, so this check does not cover the images the
+kind run serves. Admission-time enforcement, which refuses an unsigned image
+inside the cluster, is in [05.03](../05-security/03-supply-chain.md) and
+<!-- link-later: 05.07 -->05.07.
+
+```sh
+set -o pipefail
+cosign verify \
+  --certificate-identity 'https://github.com/abd-ulbasit/bookstore-kubernetes-guide/.github/workflows/bookstore-pipeline.yml@refs/heads/main' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  ghcr.io/abd-ulbasit/bookstore-catalog@sha256:eaa26ada0a2e1575026a5e71e74572ed0bfdde80f50012e91a7be28f0de16ced \
+  | jq -r '.[0].critical | .identity["docker-reference"], .image["docker-manifest-digest"], .type'
+echo "exit=$?"
+```
+
+<!-- gate: output -->
+```text
+Verification for ghcr.io/abd-ulbasit/bookstore-catalog@sha256:eaa26ada0a2e1575026a5e71e74572ed0bfdde80f50012e91a7be28f0de16ced --
+The following checks were performed on each of these signatures:
+  - The cosign claims were validated
+  - Existence of the claims in the transparency log was verified offline
+  - The code-signing certificate was verified using trusted certificate authority certificates
+ghcr.io/abd-ulbasit/bookstore-catalog@sha256:eaa26ada0a2e1575026a5e71e74572ed0bfdde80f50012e91a7be28f0de16ced
+sha256:eaa26ada0a2e1575026a5e71e74572ed0bfdde80f50012e91a7be28f0de16ced
+https://sigstore.dev/cosign/sign/v1
+exit=0
+```
+
+The negative control names the branch `feature-x` in the identity, which the
+release workflow never signed from. cosign refuses the signature, the pipeline
+exits 1, and `jq` prints nothing:
+
+```sh
+set -o pipefail
+cosign verify \
+  --certificate-identity 'https://github.com/abd-ulbasit/bookstore-kubernetes-guide/.github/workflows/bookstore-pipeline.yml@refs/heads/feature-x' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  ghcr.io/abd-ulbasit/bookstore-catalog@sha256:eaa26ada0a2e1575026a5e71e74572ed0bfdde80f50012e91a7be28f0de16ced \
+  | jq -r '.[0].critical | .identity["docker-reference"], .image["docker-manifest-digest"], .type'
+echo "exit=$?"
+```
+
+<!-- gate: output -->
+```text
+Error: no matching attestations: failed to verify certificate identity: no matching CertificateIdentity found, last error: expected SAN value "https://github.com/abd-ulbasit/bookstore-kubernetes-guide/.github/workflows/bookstore-pipeline.yml@refs/heads/feature-x", got "https://github.com/abd-ulbasit/bookstore-kubernetes-guide/.github/workflows/bookstore-pipeline.yml@refs/heads/main"
+# ...
+exit=1
+```
+
+The identity names the release workflow on `main`, so only a signature made on
+that ref passes. Both checks need only the registry, so they run before any
+cluster change.
 
 ```sh
 # Namespace first: the labelled manifest, so the restricted level is in place
 kubectl apply -f examples/bookstore/raw-manifests/00-namespace.yaml
 kubectl apply -f examples/bookstore/raw-manifests/05-serviceaccounts-rbac.yaml
 kubectl apply -f examples/bookstore/raw-manifests/15-catalog-config.yaml
-kubectl apply -f examples/bookstore/raw-manifests/16-db-credentials.yaml  # kind only
+# kind only: db-credentials, generated here and never committed
+kubectl -n bookstore create secret generic db-credentials \
+  --from-literal=POSTGRES_USER=bookstore \
+  --from-literal=POSTGRES_PASSWORD="$(openssl rand -hex 16)" \
+  --from-literal=POSTGRES_DB=bookstore
 kubectl apply -f examples/bookstore/raw-manifests/35-priorityclasses.yaml
 
 # A self-signed certificate stands in for the one cert-manager issues in prod
@@ -565,7 +650,9 @@ job.batch/db-migrate condition met
 A migration Job that starts before Postgres accepts connections can use up its
 `backoffLimit` and report `Failed`. The lab hit this once. Delete the Job with
 `kubectl delete job db-migrate -n bookstore`, then apply the overlay again. The
-Job is the only object that changes.
+Job is recreated. The other objects may report `configured` with no change: the
+lab run showed that for two PriorityClasses, the Deployments, the StatefulSet
+and three PodDisruptionBudgets.
 
 <!-- gate: output -->
 ```text
@@ -587,32 +674,11 @@ pod/storefront-76cbb89847-9z2ws        1/1     Running     0               15m
 pod/storefront-76cbb89847-hdp24        1/1     Running     0               15m
 ```
 
-**Verify the pinned digest.** Catalog's prod pin is a digest in `ghcr.io`.
-[07.03](../07-delivery/03-cicd-pipeline.md) signs each release image without a
-long-lived key, bound to the release workflow's identity. Verifying the
-signature checks who built the digest, not only that the digest exists:
-
-```sh
-cosign verify \
-  --certificate-identity 'https://github.com/abd-ulbasit/bookstore-kubernetes-guide/.github/workflows/bookstore-pipeline.yml@refs/heads/main' \
-  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
-  ghcr.io/abd-ulbasit/bookstore-catalog@sha256:eaa26ada0a2e1575026a5e71e74572ed0bfdde80f50012e91a7be28f0de16ced \
-  2>/dev/null | jq -r '.[0].critical | .identity["docker-reference"], .image["docker-manifest-digest"], .type'
-```
-
-<!-- gate: output -->
-```text
-ghcr.io/abd-ulbasit/bookstore-catalog@sha256:eaa26ada0a2e1575026a5e71e74572ed0bfdde80f50012e91a7be28f0de16ced
-sha256:eaa26ada0a2e1575026a5e71e74572ed0bfdde80f50012e91a7be28f0de16ced
-https://sigstore.dev/cosign/sign/v1
-```
-
-The identity names the release workflow on `main`. A signature made on any
-other ref fails the match. The lab ran this check against the registry and
-kept the kind image override for the apply, so the two were separate steps.
-
 **Revert the local override.** The overlay goes back to the registry pins. The
-Traefik component stays, because the Ingress needs the rewrite:
+Traefik component stays, because the Ingress needs the rewrite. The revert
+changes the working tree only. The running Deployments keep the `:dev` images
+until a sync applies the registry pins, so the kind cluster keeps them until
+then:
 
 ```sh
 git checkout -- examples/bookstore/kustomize/overlays/prod/images/kustomization.yaml
@@ -667,7 +733,7 @@ spec:
       type: RuntimeDefault
   containers:
     - name: client
-      image: curlimages/curl@sha256:d9b4541e214bcd85196d6e92e2753ac6d0ea699f0af5741f8c6cccbfcf00ef4b
+      image: curlimages/curl@sha256:d9b4541e214bcd85196d6e92e2753ac6d0ea699f0af5741f8c6cccbfcf00ef4b  # curlimages/curl:8.10.1
       command:
         - sh
         - -c
@@ -715,7 +781,8 @@ loaded no books.
 **The refusal.** The data tier admits only the tiers that use it. A Pod in the
 bookstore namespace that matches no allow rule has no path to Postgres. DNS
 still resolves, because `allow-dns-egress` admits it, so the Pod fails at the
-TCP connect:
+TCP connect. This is a deliberate action: the Pod is built to be refused, and
+its `|| echo` lets it exit cleanly, so the wait and the log can read the result:
 
 ```yaml
 apiVersion: v1
@@ -734,7 +801,7 @@ spec:
       type: RuntimeDefault
   containers:
     - name: client
-      image: curlimages/curl@sha256:d9b4541e214bcd85196d6e92e2753ac6d0ea699f0af5741f8c6cccbfcf00ef4b
+      image: curlimages/curl@sha256:d9b4541e214bcd85196d6e92e2753ac6d0ea699f0af5741f8c6cccbfcf00ef4b  # curlimages/curl:8.10.1
       command:
         - sh
         - -c
@@ -806,16 +873,17 @@ worker nodes, and the lab has one, so none of these ran here.
 
 ### (h) Verify security posture
 
-Three checks ([Part 05](../05-security/02-pod-security.md)): restricted
-admission refuses a privileged Pod, the ServiceAccounts are least-privilege,
-and the policy engine reports on the workloads, which
-[05.07](../05-security/02-pod-security.md) cites as link-later.
+Two checks ([Part 05](../05-security/02-pod-security.md)) ran in the lab:
+restricted admission refuses a privileged Pod, and the catalog ServiceAccount
+holds only the rights it needs. The policy engine's report on the workloads
+belongs to <!-- link-later: 05.07 -->05.07 and is not run here.
 
 **Admission refuses a privileged Pod.** This is a deliberate action. The Pod
 asks for `privileged: true` in a restricted namespace. A server-side dry run
 sends the request through admission and creates nothing:
 
 ```sh
+# busybox:1.36, pinned by digest as 08.03 does
 kubectl run psa-bad -n bookstore --restart=Never --dry-run=server \
   --image=busybox@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662 \
   --overrides='{"spec":{"containers":[{"name":"psa-bad","image":"busybox@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662","securityContext":{"privileged":true}}]}}'
@@ -826,29 +894,30 @@ kubectl run psa-bad -n bookstore --restart=Never --dry-run=server \
 Error from server (Forbidden): pods "psa-bad" is forbidden: violates PodSecurity "restricted:latest": privileged (container "psa-bad" must not set securityContext.privileged=true), allowPrivilegeEscalation != false (container "psa-bad" must set securityContext.allowPrivilegeEscalation=false), unrestricted capabilities (container "psa-bad" must set securityContext.capabilities.drop=["ALL"]), runAsNonRoot != true (pod or container "psa-bad" must set securityContext.runAsNonRoot=true), seccompProfile (pod or container "psa-bad" must set securityContext.seccompProfile.type to "RuntimeDefault" or "Localhost")
 ```
 
-**The ServiceAccount is least-privilege.** The first rows of the list are the
-discovery rules every authenticated identity has. Drop `| head -12` to see the
-rest, and check that no verb in it is one the catalog does not need:
+**The catalog ServiceAccount is least-privilege.** Its own grant is one Role:
+`get` on the ConfigMap `catalog-config`, by name. The list starts with the
+discovery rules every authenticated identity has, so the check reads the rows
+below them. The named ConfigMap has its own row, and a Secret read is refused:
 
 ```sh
-kubectl auth can-i --list --as=system:serviceaccount:bookstore:catalog-sa -n bookstore | head -12
+kubectl auth can-i --list --as=system:serviceaccount:bookstore:catalog-sa -n bookstore \
+  | grep -E '^(Resources|configmaps)'
+kubectl auth can-i get secrets --as=system:serviceaccount:bookstore:catalog-sa -n bookstore
 ```
 
 <!-- gate: output -->
 ```text
 Resources                                       Non-Resource URLs                      Resource Names     Verbs
-selfsubjectreviews.authentication.k8s.io        []                                     []                 [create]
-selfsubjectaccessreviews.authorization.k8s.io   []                                     []                 [create]
-selfsubjectrulesreviews.authorization.k8s.io    []                                     []                 [create]
-clustertrustbundles.certificates.k8s.io         []                                     []                 [get list watch]
-                                                [/.well-known/openid-configuration/]   []                 [get]
-                                                [/.well-known/openid-configuration]    []                 [get]
-                                                [/api/*]                               []                 [get]
-                                                [/api]                                 []                 [get]
-                                                [/apis/*]                              []                 [get]
-                                                [/apis]                                []                 [get]
-                                                [/healthz]                             []                 [get]
+configmaps                                      []                                     [catalog-config]   [get]
 ```
+
+<!-- gate: output -->
+```text
+no
+```
+
+The second command prints `no` and exits with status 1. The Role comes from
+`raw-manifests/05-serviceaccounts-rbac.yaml`.
 
 ### (i) Progressive delivery (cited, not run)
 
@@ -864,62 +933,71 @@ run did not install Argo Rollouts (see (c)).
 The Rollout owns `.spec.replicas`. Do not apply the `82-` HPA next to it: the
 HPA targets a Deployment the Rollout replaces, which orphans the autoscaler.
 
-### (j) Backup & DR drill: scheduled backup, then a PVC-loss restore
+### (j) Backup & DR drill: a marker row, then a scratch-namespace restore
 
-Velero is installed as step (c) says, from
-[08.02](../08-day-2-operations/02-backup-and-dr.md), with a bucket behind it.
-The lab had no object store, so this drill is cited, not run. Apply the
-**scheduled** backup
-([`operators/velero-schedule.yaml`](../examples/bookstore/operators/velero-schedule.yaml)),
+**Cited, not run.** The drill needs a bucket and a snapshot-capable CSI driver,
+and the lab had neither. Velero is installed in step (c) from
+[08.02](../08-day-2-operations/02-backup-and-dr.md), which owns the install and
+the drill. The schedule is
+[`operators/velero-schedule.yaml`](../examples/bookstore/operators/velero-schedule.yaml),
 a recurring, PV-inclusive `bookstore` backup with a pre-backup Postgres
-CHECKPOINT consistency hook ([Part 08
-ch.02](../08-day-2-operations/02-backup-and-dr.md)), then run **DR Scenario
-2** from the runbook
-([`operators/DR-RUNBOOK.md`](../examples/bookstore/operators/DR-RUNBOOK.md)):
-the Postgres PVC is lost; declarative state is fine; only a data backup
-recovers it.
+CHECKPOINT consistency hook ([Part 08 ch.02](../08-day-2-operations/02-backup-and-dr.md)).
+After the marker row is written, the restore lands in a scratch namespace, so
+the live database is only read.
+
+The backup takes CSI volume snapshots. The cluster needs a CSI driver with
+snapshot support, the snapshot CRDs and controller, and a `VolumeSnapshotClass`
+labelled `velero.io/csi-volumesnapshot-class=true`. kind's default
+`rancher.io/local-path` class cannot snapshot, so a backup on a stock kind
+cluster holds no volume data, and the marker check below would fail there.
+[08.02](../08-day-2-operations/02-backup-and-dr.md) has the check.
+
+**1) A marker row, written before the backup:**
+
+```sh
+kubectl exec -n bookstore postgres-0 -- \
+  psql -U bookstore -d bookstore -c \
+  "CREATE TABLE IF NOT EXISTS dr_demo(note text); INSERT INTO dr_demo VALUES ('before-backup');"
+```
+
+**2) The scheduled backup, triggered now instead of at the next cron time:**
 
 ```sh
 kubectl apply -f examples/bookstore/operators/velero-schedule.yaml
 velero schedule describe bookstore-daily
-# Trigger one now instead of waiting for the cron (drill):
-velero backup create bookstore-drill --from-schedule bookstore-daily
-velero backup describe bookstore-drill --details        # Phase: Completed
+velero backup create bookstore-marker --from-schedule bookstore-daily
+velero backup describe bookstore-marker --details        # Phase: Completed
+```
 
-# --- DR Scenario 2: Postgres PVC lost/corrupted (the real DR case) ---
-# 1) Stop writers, then stop Postgres (RWO PVC must be unmounted to restore):
-kubectl scale deploy/catalog deploy/orders deploy/payments-worker \
-  -n bookstore --replicas=0
-kubectl scale statefulset/postgres -n bookstore --replicas=0
-kubectl wait --for=delete pod/postgres-0 -n bookstore --timeout=120s
-# (simulate the loss: delete the PVC so the restore must recreate it)
-kubectl delete pvc data-postgres-0 -n bookstore
+**3) Restore into a scratch namespace.** Apply the drill from
+[08.02, step 4](../08-day-2-operations/02-backup-and-dr.md) with `backupName`
+set to `bookstore-marker`. It creates the restricted, default-deny namespace
+`bookstore-drill` and a `Restore` that maps `bookstore` onto it:
 
-# 2) Restore ONLY the data (declarative objects come back via GitOps, NOT the
-#    backup). Scope by ns + resource kind: NOT --selector app=postgres: the
-#    StatefulSet controller does not copy pod labels onto the volumeClaim PVC,
-#    so a label-selected restore silently skips it (the runbook's key warning):
-velero backup get
-velero restore create bookstore-pgrestore \
-  --from-backup bookstore-drill \
-  --include-namespaces bookstore \
-  --include-resources persistentvolumeclaims,persistentvolumes
-velero restore describe bookstore-pgrestore --details   # Phase: Completed
+```sh
+kubectl apply -f drill.yaml
+kubectl -n velero get restore bookstore-drill -o jsonpath='{.status.phase}{"\n"}'   # Completed
+kubectl exec -n bookstore-drill postgres-0 -- \
+  psql -U bookstore -d bookstore -c 'SELECT * FROM dr_demo;'                          # before-backup
+```
 
-# 3) Bring Postgres back on the restored PVC, then writers:
-kubectl scale statefulset/postgres -n bookstore --replicas=1
-kubectl rollout status statefulset/postgres -n bookstore --timeout=120s
-kubectl scale deploy/catalog deploy/orders deploy/payments-worker \
-  -n bookstore --replicas=2
+**4) Check the row, not the Pod.** A Ready Postgres shows only that the server
+started. The marker row shows that the data came back. A green Pod with an
+empty database is not a recovery, so a query that returns no row fails the drill.
 
-# 4) Validate the DATA is actually back (postgres image has a shell: it is
-#    NOT distroless; this is the documented exception to the debug rule):
-kubectl exec -n bookstore postgres-0 -- \
-  psql -U bookstore -d bookstore -c '\dt'
-kubectl exec -n bookstore postgres-0 -- \
-  psql -U bookstore -d bookstore -c 'SELECT count(*) FROM books;'
-#   → tables present, rows back. A green pod with an empty DB is NOT recovered
-#     (the runbook's post-incident rule: verify data, not just readiness).
+**5) Promote only after the drill passes.** If the live data is lost, follow DR
+Scenario 2 in the [runbook](../examples/bookstore/operators/DR-RUNBOOK.md): stop
+the writers, delete the Postgres controller while keeping its PVC and PV, then
+restore with the controller included and check the rows again. Scaling the
+controller to zero is not enough, because it ends the restored Pod that carries
+Velero's restore-wait init container, so the data is not restored. Never delete
+the live PVC to make room for a restore.
+
+**6) Clean up the drill:**
+
+```sh
+kubectl delete namespace bookstore-drill
+kubectl -n velero delete restore bookstore-drill
 ```
 
 ### (k) Day-2 sampler: diagnose one symptom
@@ -933,17 +1011,21 @@ catalog sees:
 
 ```sh
 POD=$(kubectl get pods -n bookstore -l app=catalog -o jsonpath='{.items[0].metadata.name}')
+# gcr.io/distroless/static:debug-nonroot, pinned by the digest below
 kubectl debug -n bookstore pod/$POD --target=catalog --profile=restricted \
   --image=gcr.io/distroless/static@sha256:c7b8faacc4439b8f5c41ca7ce4a3f8ff3e8520cb0c3444fae7292f687b00d0dd \
   --container=debugger -i --quiet -- /busybox/sh -c \
   'id -u; nc -z -w 3 postgres.bookstore.svc.cluster.local 5432 && echo PG-REACHABLE'
 ```
 
-The `restricted` profile sets `runAsNonRoot`, so the debug image must declare a
-numeric non-root user. This one declares 65532. `--target` makes the
-container share catalog's namespaces, so the probe leaves from catalog's
-identity and its NetworkPolicy path. The ephemeral container goes away with the
-Pod, and the Deployment is never touched.
+The debug container runs as 65532 without declaring a user of its own. The
+catalog Pod sets `runAsUser: 65532` at pod level, and a container that sets no
+UID inherits it, so the image's own user does not decide the result.
+[08.03](../08-day-2-operations/03-troubleshooting-playbook.md) explains the same
+rule for busybox. The `:debug-nonroot` tag carries the busybox shell that the
+probe runs. `--target` makes the container share catalog's namespaces, so the
+probe leaves from catalog's identity and its NetworkPolicy path. The ephemeral
+container goes away with the Pod, and the Deployment is never touched.
 
 <!-- gate: output -->
 ```text
@@ -979,8 +1061,6 @@ kubectl get ingressclass traefik
 <!-- gate: output -->
 ```text
 release "traefik" uninstalled
-# ...
-Error from server (NotFound): namespaces "p09-01-bookstore" not found
 # ...
 No resources found
 ```
@@ -1037,50 +1117,50 @@ for data. Conflating them is the classic "I snapshotted etcd, I'm safe" outage
 
 ## Production notes
 
-> **In production:** what is different from this lab, at real scale, 
+> **In production:** what is different from this lab, at real scale.
 >
-> - **Control plane & etcd are managed.** EKS/GKE/AKS run (and back up) the
-> API server and etcd; you cannot `etcdctl` them and don't need to ([Part 08
-> ch.01](../08-day-2-operations/01-cluster-lifecycle.md)). The capstone's kind
-> control-plane is the laptop substitute. - **A real object store.** Velero
-> writes to actual S3/GCS/Azure Blob with lifecycle policies and cross-region
-> replication, not a single in-cluster pod. The lab had none. - **A real Git
-> remote + identity.** Argo CD pulls from a hosted repo over a deploy key/app
-> token; humans authenticate via SSO/OIDC; prod often points at a protected
-> branch/separate config repo the app repo cannot push to ([Part 07
-> ch.04](../07-delivery/04-gitops-argocd.md)). The placeholder `your-org` repo
-> is the lab approximation. - **Multi-cluster delivery.** One `Application`
-> per env on one cluster becomes **ApplicationSets** generating Applications
-> across many clusters (ch.04). The App-of-Apps here is the single-cluster
-> form. - **Mesh for exact canary traffic.** The replica-ratio canary (step
-> (i), shared Service) becomes precise percentage traffic-shifting via a
-> service mesh / Gateway API + Argo Rollouts `trafficRouting` ([Part 07
-> ch.05](../07-delivery/05-progressive-delivery.md)). The lab stays mesh-free
-> deliberately. - **External secrets.** The prod overlay `$patch:delete`s the
-> demo Secret; the real `db-credentials` comes from External Secrets Operator
-> / Sealed Secrets / Vault ([Part 05
-> ch.04](../05-security/04-secrets-and-cluster-hardening.md)). Never ship a
-> real password in Git. - **HA everything + a real DB operator.**
-> Multi-replica, zone-spread, anti-affinity'd control plane and workloads (the
-> spread is *demoed* here on synthetic zones); Postgres via **CloudNativePG**
-> with WAL/PITR, not the teaching StatefulSet ([Part 08
-> ch.05](../08-day-2-operations/05-operators-and-crds.md)). - **Capacity &
-> cost.** Real clusters add requests/limits tuning, VPA recommendations, and a
-> node autoscaler (Cluster Autoscaler/Karpenter) so nodes track pod demand
-> ([Part 06 ch.06](../06-production-readiness/06-capacity-and-cost.md)).
+> - **Control plane and etcd are managed.** EKS, GKE and AKS run and back up
+>   the API server and etcd. You cannot `etcdctl` them and do not need to
+>   ([Part 08 ch.01](../08-day-2-operations/01-cluster-lifecycle.md)). The kind
+>   control plane is the laptop substitute.
+> - **A real object store.** Velero writes to S3, GCS or Azure Blob with
+>   lifecycle policies and cross-region replication, not to a single in-cluster
+>   pod. The lab had none.
+> - **A real Git remote and identity.** Argo CD pulls from a hosted repo over a
+>   deploy key or app token. Humans authenticate through SSO or OIDC. Prod often
+>   points at a protected branch or a separate config repo that the app repo
+>   cannot push to ([Part 07 ch.04](../07-delivery/04-gitops-argocd.md)). The
+>   placeholder `your-org` repo is the lab approximation.
+> - **Multi-cluster delivery.** One `Application` per environment on one
+>   cluster becomes **ApplicationSets** that generate Applications across many
+>   clusters (ch.04). The App-of-Apps here is the single-cluster form.
+> - **Mesh for exact canary traffic.** The replica-ratio canary in step (i),
+>   which uses a shared Service, becomes precise percentage traffic shifting
+>   through a service mesh or Gateway API with Argo Rollouts `trafficRouting`
+>   ([Part 07 ch.05](../07-delivery/05-progressive-delivery.md)). The lab stays
+>   mesh-free on purpose.
+> - **External secrets.** The prod overlay `$patch: delete`s the demo Secret. The
+>   real `db-credentials` comes from External Secrets Operator, Sealed Secrets or
+>   Vault ([Part 05 ch.04](../05-security/04-secrets-and-cluster-hardening.md)).
+>   Never ship a real password in Git.
+> - **HA everything and a real DB operator.** Multi-replica, zone-spread,
+>   anti-affinity workloads and control plane. The spread is demonstrated here
+>   on synthetic zones only. Postgres runs under **CloudNativePG** with WAL and
+>   PITR, not the teaching StatefulSet ([Part 08 ch.05](../08-day-2-operations/05-operators-and-crds.md)).
+> - **Capacity and cost.** Real clusters tune requests and limits with VPA
+>   recommendations, and run a node autoscaler (Cluster Autoscaler or Karpenter)
+>   so nodes track pod demand ([Part 06 ch.06](../06-production-readiness/06-capacity-and-cost.md)).
 >
 > **Honest recap of every lab approximation used here** (each an established
 > precedent, never hidden): (1) kind fakes the machines, not the API
 > ([Part 00 ch.07](../00-foundations/07-local-cluster-setup.md)); (2) the Git
 > remote is a placeholder URL, and the run used the direct path; (3) the object
-> store is absent on the lab, so the backup drill is cited; (4) the prod
-> overlay is applied with a kind-only image override and the demo Secret, both
-> reverted or scoped to kind; (5) the canary is replica-ratio, not
-> mesh-percentage, and is cited; (6) zones are synthetic node labels on a
-> multi-node config, and the lab has one node, so spread and drain are cited;
-> (7) the captured run used a lab cluster with a different name and namespaces
-> carrying a prefix. None of these change the Kubernetes mechanics being
-> demonstrated.
+> store is absent on the lab, so the backup drill is cited; (4) the prod overlay
+> is applied with a kind-only image override and a hand-made database Secret,
+> both scoped to kind; (5) the canary is replica-ratio, not mesh-percentage, and
+> is cited; (6) zones are synthetic node labels on a multi-node config, and the
+> lab has one node, so spread and drain are cited. None of these change the
+> Kubernetes mechanics being demonstrated.
 
 ## Quick Reference
 
@@ -1100,21 +1180,34 @@ for s in catalog orders payments-worker storefront; do kind load docker-image bo
 kubectl apply -f traefik-namespace.yaml
 helm install traefik traefik/traefik --version "$TRAEFIK_CHART_VERSION" -n traefik -f traefik-values.yaml --wait
 # + kube-prometheus-stack (06.01), Argo CD (07.04), Argo Rollouts (07.05), KEDA (06.04),
-#   Kyverno (05.07), Velero (08.02): each labelled first, each at its pinned version
+#   Kyverno (see (c)5), Velero (08.02): each labelled first, each at its pinned version
 
-# (d) DELIVER: direct path; kind-only override and demo Secret, reverted after -----
+# (d) DELIVER: direct path. Verify the pin, then apply. The kind-only edits
+#     (newTag: dev for the four bookstore/* images in images/kustomization.yaml,
+#     and ../../components/traefik-rewrite under components:) are in (d.2).
+set -o pipefail
+cosign verify --certificate-identity 'https://github.com/abd-ulbasit/bookstore-kubernetes-guide/.github/workflows/bookstore-pipeline.yml@refs/heads/main' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  ghcr.io/abd-ulbasit/bookstore-catalog@sha256:eaa26ada0a2e1575026a5e71e74572ed0bfdde80f50012e91a7be28f0de16ced \
+  | jq -r '.[0].critical.identity["docker-reference"]'   # 07.03
 kubectl apply -f examples/bookstore/raw-manifests/00-namespace.yaml
 kubectl apply -f examples/bookstore/raw-manifests/05-serviceaccounts-rbac.yaml
 kubectl apply -f examples/bookstore/raw-manifests/15-catalog-config.yaml
-kubectl apply -f examples/bookstore/raw-manifests/16-db-credentials.yaml   # kind only
+# kind only: db-credentials, created by hand with a generated password (d.2)
+kubectl -n bookstore create secret generic db-credentials \
+  --from-literal=POSTGRES_USER=bookstore \
+  --from-literal=POSTGRES_PASSWORD="$(openssl rand -hex 16)" \
+  --from-literal=POSTGRES_DB=bookstore
 kubectl apply -f examples/bookstore/raw-manifests/35-priorityclasses.yaml
+openssl req -x509 -newkey rsa:2048 -nodes -days 30 \
+  -subj "/CN=bookstore.example.com" -keyout tls.key -out tls.crt
 kubectl -n bookstore create secret tls bookstore-tls --cert=tls.crt --key=tls.key
 kubectl apply -k examples/bookstore/kustomize/overlays/prod
 kubectl wait --for=condition=complete job/db-migrate -n bookstore --timeout=180s
 kubectl wait --for=condition=available deploy --all -n bookstore --timeout=300s
-cosign verify --certificate-identity '<release workflow identity, branch included>' \
-  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
-  ghcr.io/abd-ulbasit/bookstore-catalog@sha256:eaa26ada...   # 07.03
+# Revert the kind-only image edit in the working tree. Running Deployments keep the
+# :dev images until a sync applies the registry pins.
+git checkout -- examples/bookstore/kustomize/overlays/prod/images/kustomization.yaml
 
 # (e) NET: the edge answers 200; the NetworkPolicy refuses (see (e)) ----------------
 # (f) OBS and (g) SCALE + PDB: cited to 06.01, 06.04 and 06.05
@@ -1210,16 +1303,18 @@ kind delete cluster --name bookstore
    minus, the prod minus, and what does this teach about packaging?**
    <details><summary>Show answer</summary>
 
-   Dev (45): omits CRD-backed extras that need operators (no ServiceMonitor,
-   no KEDA ScaledObject, sometimes no PDB), components opt-OUT for lightweight
-   local dev. Staging (49): full set, mirror of prod, for realistic pre-prod
-   testing. Prod (48): full set **minus the demo Secret**
-   (`16-db-credentials.yaml`) because in production credentials come from
-   External Secrets / Vault, not Git. The lesson: packaging is the same app
+   Dev (45) is the base minus the HPA (1) and the three PodDisruptionBudgets
+   (3). A single-node kind cluster has no use for autoscaling or disruption
+   budgets, and the dev overlay says so in its comments. Staging (49) keeps the
+   whole base, including the demo Secret, the HPA and the PDBs, with smaller
+   resource ceilings. Prod (48) is the base minus **the demo Secret**
+   (`16-db-credentials.yaml`), because in production the credentials come from
+   External Secrets, Sealed Secrets or Vault, not Git. `kubectl kustomize`
+   renders 45, 49 and 48 objects. The lesson: packaging is the same app
    rendered differently per environment via *small, declarative overlays*
-   (Kustomize), the **delta is visible** in version control, not hidden in
+   (Kustomize), and the **delta is visible** in version control, not hidden in
    chart conditionals. The raw manifests prove the base is real, applyable
-   YAML, no templating language required to understand it.
+   YAML, with no templating language needed to read it.
 
    </details>
 
@@ -1311,12 +1406,13 @@ kind delete cluster --name bookstore
    Before the label is acceptable, the namespace needs one entry in
    `security/namespace-exceptions.yaml`. The entry names the level, the reason,
    the upstream document, the chapter and an expiry no more than 12 months out.
-   The privilege must be needed only by the component that asks for it, so the
-   rest of the namespace stays at `restricted` where the chart allows, with the
-   label applied before the install and not after. The exception covers only the
-   namespace it names. The gate refuses an entry registered twice, a block that
-   reaches another namespace, and a workload that breaks the registered level.
-   The bookstore namespace has no entry, so it stays `restricted`. The
+   Pod Security labels apply to the whole namespace, so the enforce level rises
+   for every Pod in it. Only audit and warn stay at `restricted`, as the velero
+   entry says, and the Velero controller itself still runs under `restricted`.
+   The label goes on before the install, not after. The exception covers only
+   the namespace it names. The gate refuses an entry registered twice, a block
+   that reaches another namespace, and a workload that breaks the registered
+   level. The bookstore namespace has no entry, so it stays `restricted`. The
    node-agent exception itself is owned by
    [08.02](../08-day-2-operations/02-backup-and-dr.md).
 
