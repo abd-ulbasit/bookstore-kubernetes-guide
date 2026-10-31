@@ -127,10 +127,16 @@ spec:
         - name: mlflow
           image: bookstore/mlflow-auth:dev   # built from ./Dockerfile; pin by digest in production
           command: ["/bin/sh", "-c"]
+          # --gunicorn-opts selects the WSGI server. Without a server option,
+          # MLflow 3.3.2 starts uvicorn, which calls the Flask basic-auth app as
+          # ASGI, and every request returns 500 (mlflow issue 17324). The value
+          # may be empty; --timeout 60 is a plain gunicorn option.
           args:
             - >-
               exec mlflow server --host 0.0.0.0 --port 5000
               --app-name basic-auth
+              --workers 2
+              --gunicorn-opts "--timeout 60 --access-logfile -"
               --backend-store-uri "$(cat /etc/mlflow-auth/backend-store-uri)"
               --artifacts-destination "$ARTIFACT_ROOT"
           env:
