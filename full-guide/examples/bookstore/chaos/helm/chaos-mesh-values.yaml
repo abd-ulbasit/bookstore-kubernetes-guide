@@ -1,0 +1,49 @@
+# Chaos Mesh values for Part 11 ch.07, for chart chaos-mesh/chaos-mesh 2.8.7.
+# Install with:
+#   helm install chaos-mesh chaos-mesh/chaos-mesh -n chaos-mesh \
+#     --version 2.8.7 -f examples/bookstore/chaos/helm/chaos-mesh-values.yaml --wait
+#
+# Each key below that differs from the chart default says why in its comment.
+# Images are pinned by digest, with the tag kept in front of it for reading.
+
+# Namespace-scoped mode. The controller gets its pod-delete rights only as a
+# RoleBinding in controllerManager.targetNamespace, not cluster-wide. The
+# chart default is true.
+clusterScoped: false
+
+controllerManager:
+  targetNamespace: bookstore      # the one namespace this chapter attacks
+  replicaCount: 1                 # one replica is enough for a lab; default 3
+  image:
+    tag: "v2.8.7@sha256:b617afa786a654eb6ba3a947a40d9e20db2bae8f17ded71947d5744dceea2ae4"
+  # The chart exposes only a pod-level securityContext here. Container-level
+  # fields (allowPrivilegeEscalation, capabilities) have no value to set.
+  securityContext:
+    seccompProfile:
+      type: RuntimeDefault
+
+chaosDaemon:
+  image:
+    tag: "v2.8.7@sha256:87d5d2091bc134b857dba1e391b4bd3148a670e05243fe75b2e944cda166a92e"
+  # The daemon needs the node's container runtime socket. kind nodes run
+  # containerd, so the chart's docker default is replaced.
+  runtime: containerd
+  socketPath: /run/containerd/containerd.sock
+  # Kept on, deliberately: the daemon enters target Pods' namespaces to inject
+  # network and stress faults. This namespace is the only one that admits it.
+  privileged: true
+
+dashboard:
+  image:
+    tag: "v2.8.7@sha256:7dfce19003e4f72e9cd48b453312c515b17262f18c08cdf0f67cfcaa1e2ac2fa"
+  securityMode: true              # the dashboard asks for a token; default true
+  securityContext:
+    seccompProfile:
+      type: RuntimeDefault
+
+# DNSChaos is not used in this chapter, so its DNS server is not installed.
+dnsServer:
+  create: false
+
+# pprof endpoints on the controller and the privileged daemon. Off here.
+enableProfiling: false

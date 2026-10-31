@@ -17,21 +17,10 @@
 # day if the real error budget burns — Part 06 ch.05). Nothing here mutates
 # the Bookstore Pods; all children are restricted-safe (as 10-/20-/30-).
 #
-# !!! CRD-INTRINSIC DRY-RUN (identical precedent to 18-/51-/70-/83-/argocd) !!!
-#   `Workflow` is a Chaos Mesh CRD (chaos-mesh.org/v1alpha1). WITHOUT Chaos
-#   Mesh installed a client dry-run prints:
+# Dry run before Chaos Mesh is installed: a client dry run prints
 #     no matches for kind "Workflow" in version "chaos-mesh.org/v1alpha1"
-#   EXPECTED, schema-correct — Chaos Mesh CRDs/controller must be installed
-#   first. Whole-dir dry-run prints this for CRD-backed files only and
-#   continues. Schema verified against Chaos Mesh chaos-mesh.org/v1alpha1
-#   Workflow (serial entry; embedded *Chaos templates).
-#
-# Requires: Chaos Mesh installed (own ns); the Bookstore running with PDB
-#   (84-), HPA (82-), metrics/SLO (80-/81-) so each step is observable.
-# Apply (the whole game day, then watch it in the Chaos Dashboard):
-#   kubectl apply -f examples/bookstore/chaos/40-workflow-gameday.yaml
-#   kubectl get workflow,workflownode -n bookstore
-#   kubectl delete -f examples/bookstore/chaos/40-workflow-gameday.yaml   # abort
+# That is expected until the chart is installed (chapter Hands-on). The
+# field names were checked against the chaos-mesh 2.8.7 CRDs.
 apiVersion: chaos-mesh.org/v1alpha1
 kind: Workflow
 metadata:

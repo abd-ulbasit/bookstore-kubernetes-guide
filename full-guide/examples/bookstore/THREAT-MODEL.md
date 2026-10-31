@@ -139,6 +139,7 @@ guide yet). Part 00 ch.08 names the enforcer of each baseline field.
 | E5 | An unpatched runtime lets a container escape, as with CVE-2024-21626 | A patched containerd and runc on every node | cluster | 05.06 <!-- link-later: 05.06 --> |
 | E6 | An RBAC grant lets a workload create a privileged Pod | Narrow RBAC, and `restricted` on the namespace | cluster | 05.01; 05.02 |
 | E7 | A mutation adds privilege the Pod did not ask for | A mutating webhook sets only restrictive fields, and only when absent; a validating check runs after it | review | 11.01, `#mental-model` |
+| E9 | The chaos daemon runs privileged on every node, so a compromised daemon reaches the node. The controller can also delete Pods outside the workload under test | The daemon alone is privileged, in its own namespace enforced at `privileged` with audit and warn at `restricted`, and registered; the controller is namespace-scoped (`clusterScoped: false`); optional features are off | review | 11.07, `#threats-and-controls` |
 | E10 | The provider's ServiceAccount holds more rights than the recipe needs, so a compromised provider, or a bad change to the recipe, reaches objects in every namespace | RBAC named to the kinds the recipe writes; the `bind` verb on the built-in `view` ClusterRole only; no `cluster-admin` binding; a requester Role limited to the request namespace | cluster | 11.10, `#threats-and-controls` |
 
 ## Attacker goals
@@ -178,3 +179,4 @@ guide uses it as a map of goals, not as a checklist of techniques.
 
 - D2: no edge rate limiting in the baseline.
 - RP1: audit records wait for 05.08.
+- E9: the chart exposes no container-level security fields for the Chaos Mesh controller and dashboard in 2.8.7, so `allowPrivilegeEscalation`, dropped capabilities and `runAsNonRoot` are not set (11.07).

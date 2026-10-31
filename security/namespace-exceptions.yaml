@@ -151,3 +151,29 @@ exceptions:
     upstream: https://kubernetes.io/docs/concepts/security/pod-security-standards/#baseline
     chapter: 11-advanced-production-patterns/10-platform-engineering.md
     expires: 2027-06-30
+
+  - namespace: chaos-mesh
+    level: privileged
+    reason: >-
+      The Chaos Mesh chaos-daemon DaemonSet sets hostPID, mounts the node's
+      container runtime socket, /sys and /lib/modules through hostPath, and runs
+      a privileged container, so it can enter a target Pod's namespaces to inject
+      network and stress faults. Baseline forbids hostPID, hostPath and privileged
+      containers, and the capability list that replaces privileged would add
+      SYS_ADMIN and NET_ADMIN, which baseline also forbids. The namespace holds the
+      daemon, the controller and the dashboard. Audit and warn stay at restricted,
+      so the controller and dashboard warnings stay visible.
+    upstream: https://github.com/chaos-mesh/chaos-mesh/blob/v2.8.7/helm/chaos-mesh/values.yaml
+    chapter: 11-advanced-production-patterns/07-chaos-engineering.md
+    expires: 2027-06-30
+
+  - namespace: p11-07-chaos
+    level: privileged
+    reason: >-
+      The lab run of Part 11 ch.07 labelled its chaos namespace under the lab's
+      name, in place of chaos-mesh, so the transcript's label needs an entry. The
+      namespace has the same privileged daemon and the same reason as chaos-mesh
+      above. The lab deleted it after the run.
+    upstream: https://github.com/chaos-mesh/chaos-mesh/blob/v2.8.7/helm/chaos-mesh/values.yaml
+    chapter: 11-advanced-production-patterns/07-chaos-engineering.md
+    expires: 2027-06-30

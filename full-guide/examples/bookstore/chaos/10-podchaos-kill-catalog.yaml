@@ -1,6 +1,6 @@
 # Bookstore — Part 11 ch.07 "Chaos engineering": EXPERIMENT 1 — kill ONE
 # catalog Pod and verify the steady-state hypothesis holds (the storefront
-# stays up; the catalog PDB paces recovery; no SLO breach).
+# stays up; catalog keeps its PDB floor of two Ready Pods; no SLO breach).
 #
 # THE HYPOTHESIS THIS TESTS
 #   "Killing one of catalog's 3 replicas (raw-manifests/10-catalog-deploy.yaml)
@@ -13,9 +13,10 @@
 #
 # SELECTOR matches the REAL Bookstore label (verified against 10-catalog-
 # deploy.yaml pod template: app=catalog, namespace bookstore). `mode: one`
-# kills exactly ONE matching Pod — the smallest blast radius. The Deployment
-# (Part 01 ch.04) reschedules it; the PDB (Part 06 ch.05) guarantees ≥2 stay
-# Ready THROUGH the experiment.
+# kills exactly ONE matching Pod, the smallest blast radius. The Deployment
+# (Part 01 ch.04) reschedules it. Three replicas minus one leave two Ready
+# Pods throughout. The PDB (Part 06 ch.05) gates evictions, not a direct
+# delete like this one.
 #
 # RESTRICTED-SAFE & REVERSIBLE: Chaos Mesh injects NOTHING into the target
 # Pod for a pod-kill — it calls the Kubernetes API to delete the Pod (the
@@ -23,23 +24,10 @@
 # Bookstore Pods are unmodified; the experiment is undone by the Deployment
 # self-healing (and `kubectl delete -f` this object stops further action).
 #
-# !!! CRD-INTRINSIC DRY-RUN (identical precedent to 18-/51-/70-/83-/argocd) !!!
-#   `PodChaos` is a Chaos Mesh CRD (chaos-mesh.org/v1alpha1). WITHOUT Chaos
-#   Mesh installed a client dry-run prints:
+# Dry run before Chaos Mesh is installed: a client dry run prints
 #     no matches for kind "PodChaos" in version "chaos-mesh.org/v1alpha1"
-#   EXPECTED, schema-correct — the Chaos Mesh CRDs/controller must be
-#   installed first (chapter Hands-on, pinned Helm `chaos-mesh`, own ns). A
-#   whole-dir dry-run prints this for CRD-backed files only and continues.
-#   Schema verified against Chaos Mesh chaos-mesh.org/v1alpha1 PodChaos
-#   (action: pod-kill).
-#
-# Requires: Chaos Mesh installed (own ns); the Bookstore running (catalog
-#   Deployment + 84-pdb.yaml applied so the hypothesis is meaningful).
-# Apply:
-#   kubectl apply -f examples/bookstore/chaos/10-podchaos-kill-catalog.yaml
-#   kubectl get podchaos -n bookstore
-#   # observe (another shell): kubectl get pdb catalog -n bookstore -w
-#   kubectl delete -f examples/bookstore/chaos/10-podchaos-kill-catalog.yaml   # stop
+# That is expected until the chart is installed (chapter Hands-on). The
+# field names were checked against the chaos-mesh 2.8.7 CRDs.
 apiVersion: chaos-mesh.org/v1alpha1
 kind: PodChaos
 metadata:
@@ -56,5 +44,5 @@ spec:
     labelSelectors:
       app: catalog                # the REAL catalog pod label (10-)
   # No `duration` for pod-kill (it is a one-shot delete); for repeated kills
-  # add `scheduler.cron`. The PDB (84-) + Deployment (10-) are what make this
-  # safe — the hypothesis is that they hold.
+  # add `scheduler.cron`. The Deployment (10-) and the replica count make this
+  # safe. The PDB (84-) guards evictions, which this delete does not use.
