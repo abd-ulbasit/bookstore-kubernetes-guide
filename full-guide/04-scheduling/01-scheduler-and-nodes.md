@@ -8,7 +8,7 @@
 > `schedulingGates` / scheduling readiness — diagnosed on a real Bookstore Pod.
 
 **Estimated time:** ~30 min read · ~30 min hands-on
-**Prerequisites:** [Part 00 ch.04](../00-foundations/04-control-plane-deep-dive.md) — where the scheduler sits · [Part 01 ch.03](../01-core-workloads/03-resources-and-qos.md) — requests drive scheduling decisions
+**Prerequisites:** [Part 00 ch.04](../00-foundations/04-control-plane-deep-dive.md) — where the scheduler sits · [Part 01 ch.03](../01-core-workloads/03-resources-and-qos.md) — requests drive scheduling decisions · [Part 01 ch.01](../01-core-workloads/01-pods.md) (the baseline every manifest here carries)
 **You'll know after this:** • trace the scheduling queue (active / backoff / unschedulable) · • distinguish the scheduling cycle from the binding cycle (Filter → Score → Reserve → Permit → Bind) · • read scheduler-framework plugin extension points · • differentiate node capacity from allocatable and account for system/kube-reserved · • diagnose a `Pending` Pod from its Events on a real cluster
 
 <!-- tags: scheduling, scheduler, allocatable, scheduling-gates, troubleshooting -->
@@ -58,6 +58,24 @@ and only then — separately — writes the booking.**
 Hold that and `Pending` stops being mysterious: a Pod is `Pending` because
 either the queue hasn't gotten to it, or **every node failed a filter**, or the
 **binding cycle is blocked** (typically an unbound volume).
+
+## Threats and controls
+
+Scheduling decides where a Pod runs. It does not decide who may create one,
+so it is not a security boundary. A taint keeps ordinary Pods off a node. It
+does nothing about a Pod that someone allowed to create Pods has placed there
+on purpose, and the steps below show two ways that happens.
+
+| Threat | Control taught here | Deeper |
+|---|---|---|
+| A Pod sets `spec.nodeName`, which skips the scheduler's taint and affinity filters | A ValidatingAdmissionPolicy refuses `nodeName` in namespaces labelled `tier: sensitive` | [05.01](../05-security/01-authn-authz-rbac.md) for RBAC; <!-- link-later: 05.07 --> 05.07 for policy engines |
+| A kubelet labels its own Node into a dedicated pool | NodeRestriction refuses the `node-restriction.kubernetes.io/` prefix, so only an administrator sets a pool label | [02](02-affinity-taints-topology.md), the pool itself |
+
+The policy holds only while RBAC keeps users from editing the policy, its
+binding or the labels on the namespace. NodeRestriction is limited to the
+prefixes upstream names. The upstream text is silent on unprefixed labels, and
+step 7 shows a kubelet identity setting one. A pool key therefore carries the
+prefix, and an administrator sets it.
 
 ## Diagrams
 
@@ -142,81 +160,196 @@ ALL NODES ─┐
 
 ## Hands-on with the Bookstore
 
-**Assumed working directory: the guide repo root (`full-guide/`).** A cluster
-exists from [Part 00 ch.07](../00-foundations/07-local-cluster-setup.md)
-(`kind create cluster --name bookstore`). This chapter is diagnostic — no
-manifest changes here; the scheduling *fields* are added to the Bookstore in
+**Assumed working directory: the guide repo root (`full-guide/`).** This
+chapter needs three nodes, one control plane and two workers. The taint steps
+need two workers, one tainted and one clean, which the single-node cluster from
+[Part 00 ch.07](../00-foundations/07-local-cluster-setup.md) cannot show.
+Create the three-node cluster from the config beside the security labs:
+
+```sh
+kind create cluster --config examples/security-lab/kind/cluster-multinode.yaml
+```
+
+The config names the cluster `sched-lab`, so its nodes are
+`sched-lab-control-plane`, `sched-lab-worker` and `sched-lab-worker2`. Create
+the `bookstore` namespace with the Pod Security labels from
+[01.01 step 1](../01-core-workloads/01-pods.md#restricted-namespace). The
+captured output in this chapter came from a lab cluster whose nodes are named
+`sf-sched-control-plane`, `sf-sched-worker` and `sf-sched-worker2`. Those names
+appear verbatim in the output blocks. Your commands use your own node names.
+
+This chapter changes no Bookstore manifest. The scheduling fields arrive in
 [ch.02](02-affinity-taints-topology.md) and
-[ch.03](03-priority-and-preemption.md). Here you will deliberately make a Pod
-unschedulable and read the system telling you exactly why.
+[ch.03](03-priority-and-preemption.md). Here you make Pods unschedulable on
+purpose, bypass the scheduler, and read what stops each one.
 
 ### 1. See node capacity vs. allocatable
 
 ```sh
 # The number the scheduler actually packs into is Allocatable, not Capacity.
 kubectl get nodes -o custom-columns=\
-'NODE:.metadata.name,CPU_CAP:.status.capacity.cpu,CPU_ALLOC:.status.allocatable.cpu,MEM_ALLOC:.status.allocatable.memory'
+'NAME:.metadata.name,CAP_CPU:.status.capacity.cpu,ALLOC_CPU:.status.allocatable.cpu,ALLOC_MEM:.status.allocatable.memory'
 
 # Where current requests vs. allocatable stand on a node:
 kubectl describe node | sed -n '/Allocated resources/,/Events/p'
 ```
 
-`Allocatable` is `Capacity` minus `kube-reserved` + `system-reserved` +
-eviction threshold. On a default single-node kind cluster the allocatable CPU
-is roughly the host's core count — note that number; the next step over-requests
-past it on purpose.
+`Allocatable` is `Capacity` minus `kube-reserved`, `system-reserved` and the
+eviction threshold. The lab cluster's workers each report four CPUs of
+allocatable, as the output below shows. Note your workers' number: the next
+step asks for more.
+
+<!-- gate: output -->
+```text
+NAME                     CAP_CPU   ALLOC_CPU   ALLOC_MEM
+sf-sched-control-plane   4         4           7480448Ki
+sf-sched-worker          4         4           7480448Ki
+sf-sched-worker2         4         4           7480448Ki
+```
 
 ### 2. Make a Bookstore Pod `Pending` by over-requesting CPU
 
-The cleanest, fully reversible way to produce an *unschedulable* Pod is to ask
-for more CPU than any node's **allocatable**. We use a throwaway overlay of
-`catalog` so nothing in the saved manifests changes, and a request like `100`
-cores that no kind node can satisfy:
+The cleanest reversible way to get an unschedulable Pod is to ask for more CPU
+than any node's allocatable. This Deployment asks for 100 CPU. The Pod carries
+the [baseline](../01-core-workloads/01-pods.md#baseline) and its own
+ServiceAccount. It runs `registry.k8s.io/pause` in place of the distroless
+catalog image. The pause image only waits, so a Pod that stays `Pending` is a
+scheduling result, not an image pull failure. It runs as UID 65535, which
+`runAsNonRoot` accepts. It is pinned by digest, with its tag in the comment, as
+the [digest rule](../01-core-workloads/01-pods.md#baseline-image-digest) asks.
 
-```sh
-# A one-off Deployment that cannot possibly be scheduled (100 CPU requested).
-# registry.k8s.io/pause is a tiny PUBLIC image so the lesson is "Pending due to
-# scheduling", never "ImagePull" — note this is NOT the distroless catalog
-# image (that one isn't loaded yet here, and a pull failure would mask the
-# scheduling lesson). Same shape, isolated name so it touches no saved file.
-kubectl -n bookstore create deployment sched-demo \
-  --image=registry.k8s.io/pause:3.9
-kubectl -n bookstore set resources deployment/sched-demo \
-  --requests=cpu=100,memory=64Mi
-
-kubectl -n bookstore get pods -l app=sched-demo -o wide   # STATUS: Pending
+```yaml
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: sched-demo
+  namespace: bookstore
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sched-demo
+  namespace: bookstore
+  labels:
+    app: sched-demo
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: sched-demo
+  template:
+    metadata:
+      labels:
+        app: sched-demo
+    spec:
+      serviceAccountName: sched-demo
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65535
+        runAsGroup: 65535
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: pause
+          image: registry.k8s.io/pause@sha256:7031c1b283388d2c2e09b57badb803c05ebed362dc88d84b480cc47f72a21097 # registry.k8s.io/pause:3.9
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests: { cpu: "100", memory: 64Mi }
+            limits: { memory: 128Mi }
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
 ```
 
-### 3. Read *why* — Events are the answer
+Save it as `sched-demo.yaml`, apply it, and wait for the scheduler's first
+attempt:
 
 ```sh
-POD=$(kubectl -n bookstore get pod -l app=sched-demo \
-  -o jsonpath='{.items[0].metadata.name}')
-
-# The scheduler writes its verdict into the Pod's Events:
-kubectl -n bookstore describe pod "$POD" | sed -n '/Events:/,$p'
-#   Warning  FailedScheduling  ... 0/N nodes are available:
-#       N Insufficient cpu. preemption: 0/N nodes are available:
-#       N No preemption victims found for incoming pod.
-
-# Cluster-wide, newest events last — the habitual first command for "stuck Pod":
-kubectl -n bookstore get events --sort-by=.metadata.creationTimestamp | tail -n 15
+kubectl apply -f sched-demo.yaml
+kubectl -n bookstore wait --for=condition=PodScheduled=false pod -l app=sched-demo --timeout=90s
+kubectl -n bookstore get pods -l app=sched-demo -o wide
 ```
 
-Read that message literally: **`Insufficient cpu`** means the
-`NodeResourcesFit` *filter* rejected every node because `Σ requests + 100 CPU > allocatable`.
-**`No preemption victims`** means `PostFilter` (preemption,
-[ch.03](03-priority-and-preemption.md)) also couldn't help — there is no
-lower-priority Pod whose eviction would free 100 CPU (nothing can). The Pod sits
-in the **unschedulableQ** and will be retried only when a relevant cluster event
-occurs (a node is added, requests change). Now fix it and watch it drain:
+<!-- gate: output -->
+```text
+serviceaccount/sched-demo created
+deployment.apps/sched-demo created
+```
+
+<!-- gate: output -->
+```text
+NAME                          READY   STATUS    RESTARTS   AGE   IP       NODE     NOMINATED NODE   READINESS GATES
+sched-demo-7b7d4d7b68-bqhct   0/1     Pending   0          0s    <none>   <none>   <none>           <none>
+```
+
+The scheduler writes its verdict into the Pod's events:
 
 ```sh
-kubectl -n bookstore set resources deployment/sched-demo \
-  --requests=cpu=50m,memory=64Mi      # now fits allocatable
-kubectl -n bookstore get pods -l app=sched-demo -o wide   # → Running
-kubectl -n bookstore delete deployment sched-demo          # clean up the demo
+kubectl -n bookstore describe pods -l app=sched-demo | sed -n '/Events:/,$p'
 ```
+
+<!-- gate: output -->
+```text
+Events:
+  Type     Reason            Age   From               Message
+  ----     ------            ----  ----               -------
+  Warning  FailedScheduling  0s    default-scheduler  0/3 nodes are available: 1 node(s) had untolerated taint(s), 2 Insufficient cpu. preemption: 0/3 nodes are available: 3 Preemption is not helpful for scheduling.
+```
+
+Read that message literally. `2 Insufficient cpu` is the `NodeResourcesFit`
+filter: on two workers, the requests already placed there plus 100 CPU exceed
+allocatable. `1 node(s) had untolerated taint(s)` is the `TaintToleration`
+filter on the control-plane node, which carries a `NoSchedule` taint by
+default. `Preemption is not helpful` is `PostFilter`: evicting lower-priority
+Pods would not free 100 CPU. The Pod waits in the unschedulable queue, and the
+scheduler retries it only when a cluster event could change the answer, such
+as a node being added or a Pod being deleted. The `Pending` phase alone says
+none of this, which is why the Events matter.
+
+### 3. Lower the request and let the Deployment replace the Pod
+
+The Pending Pod keeps its request. The Deployment does not edit it: it creates
+a new Pod from an edited template and removes the Pending one once the
+replacement is available. Change `cpu: "100"` in `sched-demo.yaml` to
+`cpu: 50m`, then apply the file again:
+
+```sh
+kubectl apply -f sched-demo.yaml
+kubectl -n bookstore rollout status deployment/sched-demo --timeout=180s
+kubectl -n bookstore get pods -l app=sched-demo -o wide
+```
+
+<!-- gate: output -->
+```text
+serviceaccount/sched-demo unchanged
+deployment.apps/sched-demo configured
+```
+
+<!-- gate: output -->
+```text
+Waiting for deployment "sched-demo" rollout to finish: 1 old replicas are pending termination...
+Waiting for deployment "sched-demo" rollout to finish: 1 old replicas are pending termination...
+Waiting for deployment "sched-demo" rollout to finish: 1 old replicas are pending termination...
+deployment "sched-demo" successfully rolled out
+```
+
+<!-- gate: output -->
+```text
+NAME                          READY   STATUS    RESTARTS   AGE   IP           NODE               NOMINATED NODE   READINESS GATES
+sched-demo-66b54dfc97-qd2ng   1/1     Running   0          71s   10.244.2.3   sf-sched-worker2   <none>           <none>
+```
+
+The replacement fits, so the scheduler binds it. The Pod that was `Pending`
+never reached a node. The replacement is a new Pod, so the scheduler evaluates
+it from the start, with no memory of the failed attempt.
 
 ### 4. The other common `Pending`: an unbound PVC
 
@@ -243,25 +376,337 @@ failure**; **`waiting for first consumer` / `unbound PersistentVolumeClaim` /
 phase, different half of the pipeline — and `describe pod` Events tell you
 which every time.
 
-### 5. `nodeName` bypasses the scheduler entirely (and why not to)
+### 5. `nodeName` skips the scheduler's taint check
+
+A Pod with `spec.nodeName` already set counts as scheduled, so the scheduler
+never filters it, and its taint and affinity checks do not run. The kubelet on
+the named node still runs its own admission. It refuses a Pod that does not fit
+or whose selector does not match, but it does not check taints. Steps 5b and 5c
+show both refusals. This step is deliberate: it shows the bypass working.
+
+First, put a `NoSchedule` taint on the second worker. The key is the pool key
+that [ch.02](02-affinity-taints-topology.md) builds on:
 
 ```sh
-# Pick any Ready node name:
-NODE=$(kubectl get nodes -o jsonpath='{.items[0].metadata.name}')
-
-# Setting spec.nodeName directly = "skip the scheduler, kubelet just runs it
-# here". No Filter, no Score, no resource check, no taint check.
-kubectl -n bookstore run pin-demo --image=registry.k8s.io/pause:3.9 \
-  --overrides="{\"spec\":{\"nodeName\":\"$NODE\"}}"
-kubectl -n bookstore get pod pin-demo -o wide   # already on $NODE, never Pending
-kubectl -n bookstore delete pod pin-demo
+kubectl taint nodes sched-lab-worker2 node-restriction.kubernetes.io/pool=database:NoSchedule
 ```
 
-`nodeName` is a blunt instrument: it ignores capacity (you can overcommit a
-node into eviction), taints, and affinity. Real workloads steer placement with
-`nodeSelector` / affinity ([ch.02](02-affinity-taints-topology.md)) so the
-scheduler still does its feasibility and scoring job. `nodeName` is for the rare
-static-Pod / bootstrap case, not for application manifests.
+<!-- gate: output -->
+```text
+node/sf-sched-worker2 tainted
+```
+
+The Pod below is valid under the baseline. Its `nodeName` line is the only
+thing that bypasses the scheduler:
+
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pin-demo
+  namespace: bookstore
+spec:
+  nodeName: sched-lab-worker2   # skips the scheduler; deliberate in this step
+  serviceAccountName: sched-demo
+  automountServiceAccountToken: false
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 65535
+    runAsGroup: 65535
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: pause
+      image: registry.k8s.io/pause@sha256:7031c1b283388d2c2e09b57badb803c05ebed362dc88d84b480cc47f72a21097 # registry.k8s.io/pause:3.9
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop: ["ALL"]
+      resources:
+        requests: { cpu: 50m, memory: 64Mi }
+        limits: { memory: 128Mi }
+      volumeMounts:
+        - name: tmp
+          mountPath: /tmp
+  volumes:
+    - name: tmp
+      emptyDir: {}
+```
+
+```sh
+kubectl apply -f pin-demo.yaml
+kubectl -n bookstore wait --for=condition=Ready pod/pin-demo --timeout=120s
+kubectl -n bookstore get pod pin-demo -o wide
+```
+
+<!-- gate: output -->
+```text
+NAME       READY   STATUS    RESTARTS   AGE   IP           NODE               NOMINATED NODE   READINESS GATES
+pin-demo   1/1     Running   0          29s   10.244.2.4   sf-sched-worker2   <none>           <none>
+```
+
+The Pod runs on the tainted worker. Pod Security admission does not look at
+`nodeName`, so the baseline does not catch the bypass either. For the
+scheduler's answer, change the `nodeName` line to this fragment, rename the Pod
+`selector-demo`, and apply it:
+
+```yaml
+nodeSelector:
+  kubernetes.io/hostname: sched-lab-worker2
+```
+
+```sh
+kubectl -n bookstore describe pod selector-demo | sed -n '/Events:/,$p'
+kubectl -n bookstore delete pod selector-demo
+```
+
+<!-- gate: output -->
+```text
+Events:
+  Type     Reason            Age   From               Message
+  ----     ------            ----  ----               -------
+  Warning  FailedScheduling  0s    default-scheduler  0/3 nodes are available: 1 node(s) didn't match Pod's node affinity/selector, 2 node(s) had untolerated taint(s). preemption: 0/3 nodes are available: 3 Preemption is not helpful for scheduling.
+```
+
+<!-- gate: output -->
+```text
+pod "selector-demo" deleted from bookstore namespace
+```
+
+The scheduler refuses the tainted worker, because the Pod does not tolerate its
+taint. The `nodeName` line removed that check, and nothing else in the Pod
+changed. A taint steers ordinary Pods away; it does not stop a user who can
+create Pods from naming the node. Step 6 refuses the bypass where it matters.
+
+**5b. The kubelet refuses a Pod that does not fit.** Save a copy of `pin-demo`
+as `pin-big`, with `nodeName: sched-lab-worker` and the request set to
+`cpu: "100"`, then apply it. The kubelet on that worker refuses it:
+
+```sh
+kubectl -n bookstore get pod pin-big -o wide
+kubectl -n bookstore describe pod pin-big | awk '/^Status:/{f=1} /^Containers:/{f=0} f'
+```
+
+<!-- gate: output -->
+```text
+NAME      READY   STATUS     RESTARTS   AGE   IP       NODE              NOMINATED NODE   READINESS GATES
+pin-big   0/1     OutOfcpu   0          0s    <none>   sf-sched-worker   <none>           <none>
+```
+
+<!-- gate: output -->
+```text
+Status:           Failed
+Reason:           OutOfcpu
+Message:          Pod was rejected: Node didn't have enough resource: cpu, requested: 100000, used: 3110, capacity: 4000
+SeccompProfile:   RuntimeDefault
+IP:               
+IPs:              <none>
+```
+
+**5c. The kubelet refuses a selector it cannot match.** Save a copy of
+`pin-big` as `pin-selector`, with `cpu: 50m` and this fragment added under
+`spec`:
+
+```yaml
+nodeSelector:
+  disktype: ssd
+```
+
+No node has that label, so the kubelet refuses the Pod with `NodeAffinity`:
+
+```sh
+kubectl -n bookstore describe pod pin-selector | awk '/^Status:/{f=1} /^Containers:/{f=0} f'
+kubectl -n bookstore delete pod pin-demo pin-big pin-selector
+```
+
+<!-- gate: output -->
+```text
+Status:           Failed
+Reason:           NodeAffinity
+Message:          Pod was rejected: Predicate NodeAffinity failed: node(s) didn't match Pod's node affinity/selector
+SeccompProfile:   RuntimeDefault
+IP:               
+IPs:              <none>
+```
+
+<!-- gate: output -->
+```text
+pod "pin-demo" deleted from bookstore namespace
+pod "pin-big" deleted from bookstore namespace
+pod "pin-selector" deleted from bookstore namespace
+```
+
+### 6. Refuse `nodeName` in a sensitive namespace
+
+A ValidatingAdmissionPolicy is built into the API server, so it needs no
+install. This one refuses Pod creation that sets `nodeName` in any namespace
+labelled `tier: sensitive`. This guide treats the whole `bookstore` namespace as
+sensitive, so the rule covers all of it. The policy is cluster-scoped, so it is
+a manifest of its own, holding the policy and its binding:
+
+```yaml
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: deny-nodename-in-sensitive
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE"]
+        resources: ["pods"]
+  validations:
+    - expression: '!has(object.spec.nodeName) || object.spec.nodeName == ""'
+      message: "spec.nodeName skips the scheduler: use nodeSelector or required node affinity"
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: deny-nodename-in-sensitive
+spec:
+  policyName: deny-nodename-in-sensitive
+  validationActions: ["Deny"]
+  matchResources:
+    namespaceSelector:
+      matchLabels:
+        tier: sensitive
+```
+
+Save it as `vap.yaml`, apply it, and label the namespace:
+
+```sh
+kubectl apply -f vap.yaml
+kubectl label namespace bookstore tier=sensitive
+```
+
+<!-- gate: output -->
+```text
+validatingadmissionpolicy.admissionregistration.k8s.io/deny-nodename-in-sensitive created
+validatingadmissionpolicybinding.admissionregistration.k8s.io/deny-nodename-in-sensitive created
+```
+
+<!-- gate: output -->
+```text
+namespace/bookstore labeled
+```
+
+This step is deliberate. The Pod from step 5 is applied again, now that its
+namespace is sensitive, and the policy refuses it:
+
+```sh
+kubectl apply -f pin-demo.yaml
+kubectl -n bookstore get pods -l app=sched-demo -o wide
+```
+
+<!-- gate: output -->
+```text
+The pods "pin-demo" is invalid: : ValidatingAdmissionPolicy 'deny-nodename-in-sensitive' with binding 'deny-nodename-in-sensitive' denied request: spec.nodeName skips the scheduler: use nodeSelector or required node affinity
+```
+
+<!-- gate: output -->
+```text
+NAME                          READY   STATUS    RESTARTS   AGE     IP           NODE               NOMINATED NODE   READINESS GATES
+sched-demo-66b54dfc97-qd2ng   1/1     Running   0          2m15s   10.244.2.3   sf-sched-worker2   <none>           <none>
+```
+
+The policy checks a Pod when it is created. It does not evict the Pod that
+already runs. The denial names the policy and the binding, so it can be traced.
+The policy holds only while RBAC keeps users from editing the policy, its
+binding or the namespace labels. Check those verbs with `kubectl auth can-i`
+for every user who can create Pods.
+
+### 7. A kubelet cannot label its node into the pool
+
+The scheduler reads the pool from a node label, through required node affinity
+([ch.02](02-affinity-taints-topology.md)). A node that sets its own label can
+claim any pool. NodeRestriction stops a kubelet from changing labels under
+`node-restriction.kubernetes.io/`, which upstream reserves for administrators
+to isolate workloads, and under `node-role.kubernetes.io/`. Upstream describes
+its label rules for the `kubernetes.io/` and `k8s.io/` prefixes, and says
+nothing else about labels.
+
+The check below uses the kubelet's identity. The kubelet authenticates as
+`system:node:<name>` in the group `system:nodes`. `--as` with `--as-group`
+sends that user and group to the API server, so admission sees the same
+identity. Impersonation needs the `impersonate` verb, which the cluster-admin
+credentials of a kind cluster have. The kubelet's certificate is neither used nor read.
+
+```sh
+kubectl --as=system:node:sched-lab-worker --as-group=system:nodes \
+  label node sched-lab-worker node-restriction.kubernetes.io/pool=database
+```
+
+<!-- gate: output -->
+```text
+Error from server (Forbidden): nodes "sf-sched-worker" is forbidden: is not allowed to modify labels: node-restriction.kubernetes.io/pool
+```
+
+The prefix is refused. An unprefixed label from the same identity is accepted:
+
+```sh
+kubectl --as=system:node:sched-lab-worker --as-group=system:nodes \
+  label node sched-lab-worker dedicated=database
+kubectl label node sched-lab-worker dedicated-
+```
+
+<!-- gate: output -->
+```text
+node/sf-sched-worker labeled
+```
+
+<!-- gate: output -->
+```text
+node/sf-sched-worker unlabeled
+```
+
+A node can therefore label itself into any pool whose key lacks the prefix.
+Upstream does not document this, and the lab shows it on this cluster. The pool
+label is set by an administrator, with the prefix:
+
+```sh
+kubectl label node sched-lab-worker2 node-restriction.kubernetes.io/pool=database
+kubectl get nodes -l node-restriction.kubernetes.io/pool=database -o name
+```
+
+<!-- gate: output -->
+```text
+node/sf-sched-worker2
+```
+
+Set the label after the node joins. The kubelet's `--node-labels` flag accepts
+a `kubernetes.io`-namespace label only with an allowed prefix or from an allowed
+set, and `node-restriction.kubernetes.io/` is neither, so the join cannot set the
+pool label. The [kubelet reference](https://kubernetes.io/docs/reference/command-line-tools-reference/kubelet/)
+gives the rule.
+
+Later in the run the same selector still matches the worker. Clean up the taint
+and the label on the second worker. The policy and the namespace label stay,
+because the rest of the guide's bookstore namespace is sensitive:
+
+```sh
+kubectl get nodes -l node-restriction.kubernetes.io/pool=database -o name
+kubectl taint nodes sched-lab-worker2 node-restriction.kubernetes.io/pool=database:NoSchedule-
+kubectl label node sched-lab-worker2 node-restriction.kubernetes.io/pool-
+kubectl -n bookstore delete -f sched-demo.yaml
+```
+
+<!-- gate: output -->
+```text
+node/sf-sched-worker2
+```
+
+<!-- gate: output -->
+```text
+node/sf-sched-worker2 untainted
+```
+
+<!-- gate: output -->
+```text
+node/sf-sched-worker2 unlabeled
+```
 
 ## How it works under the hood
 
@@ -324,10 +769,12 @@ static-Pod / bootstrap case, not for application manifests.
   (unschedulableQ). Pod scheduling readiness **graduated to GA in v1.30**
   (well below the guide's v1.37 target) and is enabled by default.
 - **`nodeName` is the scheduler bypass.** A Pod created with `spec.nodeName`
-  already set is, by definition, "already scheduled" — the scheduler skips it
-  entirely; the kubelet on that node just runs it. No Filter (so no resource,
-  taint, or affinity check) applies. Static Pods (kubelet-managed, e.g.
-  control-plane components on kubeadm) work this way.
+  already set counts as scheduled, so no scheduler Filter or Score runs for it.
+  The kubelet on that node still checks node resources, node selector and
+  affinity, and refuses the Pod with `OutOfcpu` or `NodeAffinity` when they
+  fail (steps 5b and 5c). It does not check taints, so a `NoSchedule` taint does
+  not keep a `nodeName` Pod off a node (step 5). Static Pods (kubelet-managed,
+  e.g. control-plane components on kubeadm) are created this way.
 
 ## Production notes
 
@@ -357,10 +804,12 @@ static-Pod / bootstrap case, not for application manifests.
 > fit locally can be Pending in the cloud — always compare against
 > `status.allocatable`, never the instance's advertised vCPU/RAM.
 
-> **In production:** prefer a **separate scheduler profile or a dedicated
-> scheduler** over `spec.nodeName`. `nodeName` defeats capacity, taint, and
-> affinity checks and is a frequent cause of overcommitted, OOM-prone nodes.
-> Reserve it for static/bootstrap Pods only — never application manifests.
+> **In production:** steer placement with `nodeSelector`, required node
+> affinity or a scheduler profile, never `spec.nodeName`. `nodeName` skips the
+> scheduler's taint and affinity filters and its spreading, so only the
+> kubelet's own resource and selector checks remain. Reserve it for static and
+> bootstrap Pods, and deny it in sensitive namespaces with an admission policy,
+> as step 6 does.
 
 > **In production:** use **`schedulingGates`** when a Pod must not be placed
 > until an external precondition holds (quota granted, dependency provisioned,
@@ -395,9 +844,16 @@ Minimal skeletons (placement-relevant fields only):
 spec:
   nodeSelector: { disktype: ssd }
 
-# 2) Bypass the scheduler entirely (static/bootstrap ONLY — avoid for apps):
+# 2) Required node affinity to the pool label (an administrator sets the label):
 spec:
-  nodeName: node-1            # no Filter/Score/resource/taint check at all
+  affinity:
+    nodeAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        nodeSelectorTerms:
+          - matchExpressions:
+              - key: node-restriction.kubernetes.io/pool
+                operator: In
+                values: ["database"]
 
 # 3) "Don't schedule me until a controller clears this":
 spec:
@@ -411,6 +867,8 @@ Checklist:
 - [ ] For a Pending Pod, the **Events predicate name** has been read literally
 - [ ] Distinguished Filter-failure (`Insufficient …`) vs. binding-failure (`unbound PVC`)
 - [ ] No application manifest uses `spec.nodeName` (use `nodeSelector`/affinity)
+- [ ] Sensitive namespaces refuse `spec.nodeName` with an admission policy
+- [ ] Pool labels use the `node-restriction.kubernetes.io/` prefix, and an administrator sets them
 - [ ] Requests compared against node **allocatable**, not raw capacity
 - [ ] `schedulingGates` used (not init-container hacks) for external preconditions
 
@@ -432,10 +890,10 @@ Checklist:
 
    </details>
 
-3. **A teammate sets `spec.nodeName: node-1` on an application Pod to "make sure it runs there". List two things this bypasses, and what they should use instead.**
+3. **A teammate sets `spec.nodeName: sched-lab-worker2` on an application Pod in `bookstore`, "to make sure it runs there". List what the scheduler skips, what the kubelet still checks, and what stops this in a sensitive namespace.**
    <details><summary>Show answer</summary>
 
-   `nodeName` skips the entire scheduler — no Filter and no Score. So it bypasses: (1) `NodeResourcesFit` (no capacity check; you can overcommit a node into eviction). (2) `TaintToleration` (taints are ignored; you can land on dedicated/control-plane nodes meant to repel workloads). Also affinity, ports, volume zone. They should use `nodeSelector` or `nodeAffinity` — declarative steering that the scheduler still validates (see §5. `nodeName` bypasses the scheduler).
+   The scheduler skips its Filter and Score for the Pod, so taints, required affinity and spreading do not apply. The kubelet still refuses a Pod whose requests do not fit the node's allocatable (`OutOfcpu`) or whose selector or affinity does not match (`NodeAffinity`). It does not check taints. In a namespace labelled `tier: sensitive`, a ValidatingAdmissionPolicy refuses the Pod at creation (step 6). That policy holds only while RBAC keeps users from editing the policy, its binding or the namespace labels. The fix for the teammate is `nodeSelector` or required node affinity, which the scheduler still checks.
 
    </details>
 
@@ -446,10 +904,17 @@ Checklist:
 
    </details>
 
-5. **Hands-on extension: create a Deployment requesting `cpu: 100` on a single-node kind cluster. Run `kubectl describe pod` and read the exact predicate name in Events. Now lower requests to fit allocatable. What does the requeue mechanism do, and what cluster event triggered the rescheduling?**
+5. **Hands-on extension: edit the `cpu` request in `sched-demo.yaml` until no node can fit it, and read the Events. Then lower the request. What happens to the Pending Pod, and what makes the scheduler place its replacement?**
    <details><summary>What you should see</summary>
 
-   The Pod is rejected by `NodeResourcesFit` filter with `Insufficient cpu`, parked in `unschedulableQ` — *not* retried on a timer. Lowering requests via `kubectl set resources` updates the Pod spec; that update is the cluster event that signals "this could plausibly change the outcome", so the scheduler moves the Pod back to `activeQ` and tries again. Now it fits, and binding proceeds. This is event-driven requeue in action (see §How it works under the hood, queue sub-queues).
+   The Pending Pod keeps its original request, so it stays in the unschedulable queue and is not retried on a timer. When the Deployment template changes, the Deployment creates a new Pod from it and removes the Pending one. The new Pod enters the scheduling queue as a new Pod, so the scheduler evaluates it from the start and binds it to a node with room (step 3 shows the result).
+
+   </details>
+
+6. **Why does the NodeRestriction admission plugin stop a kubelet from labelling its own Node `node-restriction.kubernetes.io/pool=database`, and what does it leave open?**
+   <details><summary>Show answer</summary>
+
+   NodeRestriction refuses a kubelet's changes to labels under `node-restriction.kubernetes.io/` and `node-role.kubernetes.io/`. Upstream reserves the first prefix for administrators to isolate workloads, so only an administrator can place a node in that pool. It leaves open the keys upstream does not name: the lab accepted a kubelet identity setting an unprefixed `dedicated=database`. Use the prefix for any placement that matters (step 7).
 
    </details>
 
@@ -467,3 +932,8 @@ Checklist:
   <https://kubernetes.io/docs/concepts/scheduling-eviction/scheduling-framework/>,
   and Pod scheduling readiness
   <https://kubernetes.io/docs/concepts/scheduling-eviction/pod-scheduling-readiness/>.
+- Upstream, for the claims in this chapter: the NodeRestriction rules in the
+  [admission controllers reference](https://kubernetes.io/docs/reference/access-authn-authz/admission-controllers/#noderestriction),
+  the [node authorization page](https://kubernetes.io/docs/reference/access-authn-authz/node/),
+  and the `--node-labels` rule in the
+  [kubelet reference](https://kubernetes.io/docs/reference/command-line-tools-reference/kubelet/).

@@ -1,0 +1,168 @@
+# Transcript for 04-scheduling/01-scheduler-and-nodes.md, hands-on steps.
+# Tier A: kind, a cluster with one control plane and two workers on a Linux
+# host the author controls. Node image kindest/node:v1.37.0, pinned by digest
+# in examples/security-lab/kind/cluster-multinode.yaml. kubectl v1.37.2.
+# Recorded by running the chapter's commands in order, with one exception: the
+# step 5 scheduler comparison (selector-demo) ran before the bypass Pod
+# (pin-demo). The chapter shows the bypass first. The lab cluster was
+# shared with other runs, so the namespace, policy and label names it created
+# carry a p04-01- prefix while running. The substitutions below were applied to
+# this transcript afterwards, so the chapter's names read as the reader sees
+# them. Node names are the lab cluster's and appear verbatim: sf-sched-control-
+# plane, sf-sched-worker and sf-sched-worker2. The chapter's own examples use
+# sched-lab-*.
+# Substitutions:
+#   node-restriction.kubernetes.io/p04-01-pool -> node-restriction.kubernetes.io/pool
+#   p04-01-bookstore                           -> bookstore
+#   p04-01-deny-nodename                       -> deny-nodename-in-sensitive
+#   p04-01-dedicated                           -> dedicated
+# The step 3 command was recorded against sched-demo-fixed.yaml, a copy of
+# sched-demo.yaml with cpu set to 50m; the chapter names the edited file.
+# The first run was this run. Its only failures are the denials and refusals
+# the steps set out to show. The taint on sf-sched-worker in the step 7 listing
+# was set by another run on the shared cluster, not by this one.
+## setup
+$ kubectl config current-context
+kind-sf-sched
+$ kubectl get nodes
+NAME                     STATUS   ROLES           AGE   VERSION
+sf-sched-control-plane   Ready    control-plane   20m   v1.37.0
+sf-sched-worker          Ready    <none>          20m   v1.37.0
+sf-sched-worker2         Ready    <none>          20m   v1.37.0
+$ kubectl apply -f ns.yaml
+namespace/bookstore created
+$ kubectl get namespace bookstore --show-labels
+NAME               STATUS   AGE   LABELS
+bookstore   Active   0s    kubernetes.io/metadata.name=bookstore,pod-security.kubernetes.io/audit=restricted,pod-security.kubernetes.io/enforce=restricted,pod-security.kubernetes.io/warn=restricted
+## step 1: capacity and allocatable
+$ kubectl get nodes -o custom-columns=NAME:.metadata.name,CAP_CPU:.status.capacity.cpu,ALLOC_CPU:.status.allocatable.cpu,ALLOC_MEM:.status.allocatable.memory
+NAME                     CAP_CPU   ALLOC_CPU   ALLOC_MEM
+sf-sched-control-plane   4         4           7480448Ki
+sf-sched-worker          4         4           7480448Ki
+sf-sched-worker2         4         4           7480448Ki
+## step 2: request more CPU than any node has
+$ kubectl apply -f sched-demo.yaml
+serviceaccount/sched-demo created
+deployment.apps/sched-demo created
+$ kubectl -n bookstore wait --for=condition=PodScheduled=false pod -l app=sched-demo --timeout=90s
+pod/sched-demo-7b7d4d7b68-bqhct condition met
+$ kubectl -n bookstore get pods -l app=sched-demo -o wide
+NAME                          READY   STATUS    RESTARTS   AGE   IP       NODE     NOMINATED NODE   READINESS GATES
+sched-demo-7b7d4d7b68-bqhct   0/1     Pending   0          0s    <none>   <none>   <none>           <none>
+$ kubectl -n bookstore describe pods -l app=sched-demo | awk '/Events:/{f=1} f'
+Events:
+  Type     Reason            Age   From               Message
+  ----     ------            ----  ----               -------
+  Warning  FailedScheduling  0s    default-scheduler  0/3 nodes are available: 1 node(s) had untolerated taint(s), 2 Insufficient cpu. preemption: 0/3 nodes are available: 3 Preemption is not helpful for scheduling.
+$ kubectl -n bookstore get events --sort-by=.metadata.creationTimestamp | tail -n 15
+LAST SEEN   TYPE      REASON              OBJECT                             MESSAGE
+0s          Warning   FailedScheduling    pod/sched-demo-7b7d4d7b68-bqhct    0/3 nodes are available: 1 node(s) had untolerated taint(s), 2 Insufficient cpu. preemption: 0/3 nodes are available: 3 Preemption is not helpful for scheduling.
+0s          Normal    SuccessfulCreate    replicaset/sched-demo-7b7d4d7b68   Created pod: sched-demo-7b7d4d7b68-bqhct
+0s          Normal    ScalingReplicaSet   deployment/sched-demo              Scaled up replica set sched-demo-7b7d4d7b68 from 0 to 1
+## step 3: lower the request and let the Deployment replace the Pod
+$ kubectl apply -f sched-demo-fixed.yaml
+serviceaccount/sched-demo unchanged
+deployment.apps/sched-demo configured
+$ kubectl -n bookstore rollout status deployment/sched-demo --timeout=180s
+Waiting for deployment "sched-demo" rollout to finish: 1 old replicas are pending termination...
+Waiting for deployment "sched-demo" rollout to finish: 1 old replicas are pending termination...
+Waiting for deployment "sched-demo" rollout to finish: 1 old replicas are pending termination...
+deployment "sched-demo" successfully rolled out
+$ kubectl -n bookstore get pods -l app=sched-demo -o wide
+NAME                          READY   STATUS    RESTARTS   AGE   IP           NODE               NOMINATED NODE   READINESS GATES
+sched-demo-66b54dfc97-qd2ng   1/1     Running   0          71s   10.244.2.3   sf-sched-worker2   <none>           <none>
+## step 4: nodeName skips the scheduler's taint check
+$ kubectl taint nodes sf-sched-worker2 node-restriction.kubernetes.io/pool=database:NoSchedule
+node/sf-sched-worker2 tainted
+$ kubectl apply -f selector-demo.yaml
+pod/selector-demo created
+$ kubectl -n bookstore wait --for=condition=PodScheduled=false pod/selector-demo --timeout=90s
+pod/selector-demo condition met
+$ kubectl -n bookstore describe pod selector-demo | awk '/Events:/{f=1} f'
+Events:
+  Type     Reason            Age   From               Message
+  ----     ------            ----  ----               -------
+  Warning  FailedScheduling  0s    default-scheduler  0/3 nodes are available: 1 node(s) didn't match Pod's node affinity/selector, 2 node(s) had untolerated taint(s). preemption: 0/3 nodes are available: 3 Preemption is not helpful for scheduling.
+$ kubectl -n bookstore delete pod selector-demo
+pod "selector-demo" deleted from bookstore namespace
+$ kubectl apply -f pin-demo.yaml
+pod/pin-demo created
+$ kubectl -n bookstore wait --for=condition=Ready pod/pin-demo --timeout=120s
+pod/pin-demo condition met
+$ kubectl -n bookstore get pod pin-demo -o wide
+NAME       READY   STATUS    RESTARTS   AGE   IP           NODE               NOMINATED NODE   READINESS GATES
+pin-demo   1/1     Running   0          29s   10.244.2.4   sf-sched-worker2   <none>           <none>
+## step 4b: the kubelet still refuses a nodeName Pod that does not fit
+$ kubectl apply -f pin-big.yaml
+pod/pin-big created
+$ kubectl -n bookstore wait --for=jsonpath={.status.phase}=Failed pod/pin-big --timeout=90s
+pod/pin-big condition met
+$ kubectl -n bookstore get pod pin-big -o wide
+NAME      READY   STATUS     RESTARTS   AGE   IP       NODE              NOMINATED NODE   READINESS GATES
+pin-big   0/1     OutOfcpu   0          0s    <none>   sf-sched-worker   <none>           <none>
+$ kubectl -n bookstore describe pod pin-big | awk '/^Status:/{f=1} /^Containers:/{f=0} f'
+Status:           Failed
+Reason:           OutOfcpu
+Message:          Pod was rejected: Node didn't have enough resource: cpu, requested: 100000, used: 3110, capacity: 4000
+SeccompProfile:   RuntimeDefault
+IP:               
+IPs:              <none>
+## step 4c: the kubelet still refuses a nodeSelector it cannot match
+$ kubectl apply -f pin-selector.yaml
+pod/pin-selector created
+$ kubectl -n bookstore wait --for=jsonpath={.status.phase}=Failed pod/pin-selector --timeout=90s
+pod/pin-selector condition met
+$ kubectl -n bookstore describe pod pin-selector | awk '/^Status:/{f=1} /^Containers:/{f=0} f'
+Status:           Failed
+Reason:           NodeAffinity
+Message:          Pod was rejected: Predicate NodeAffinity failed: node(s) didn't match Pod's node affinity/selector
+SeccompProfile:   RuntimeDefault
+IP:               
+IPs:              <none>
+$ kubectl -n bookstore delete pod pin-demo pin-big pin-selector
+pod "pin-demo" deleted from bookstore namespace
+pod "pin-big" deleted from bookstore namespace
+pod "pin-selector" deleted from bookstore namespace
+## step 5: a policy refuses nodeName in a sensitive namespace (deliberate denial)
+$ kubectl apply -f vap.yaml
+validatingadmissionpolicy.admissionregistration.k8s.io/deny-nodename-in-sensitive created
+validatingadmissionpolicybinding.admissionregistration.k8s.io/deny-nodename-in-sensitive created
+$ kubectl label namespace bookstore tier=sensitive
+namespace/bookstore labeled
+$ kubectl apply -f pin-demo.yaml
+The pods "pin-demo" is invalid: : ValidatingAdmissionPolicy 'deny-nodename-in-sensitive' with binding 'deny-nodename-in-sensitive' denied request: spec.nodeName skips the scheduler: use nodeSelector or required node affinity
+$ kubectl -n bookstore get pods -l app=sched-demo -o wide
+NAME                          READY   STATUS    RESTARTS   AGE     IP           NODE               NOMINATED NODE   READINESS GATES
+sched-demo-66b54dfc97-qd2ng   1/1     Running   0          2m15s   10.244.2.3   sf-sched-worker2   <none>           <none>
+## step 6: a kubelet identity cannot set the node-restriction prefix
+$ kubectl --as=system:node:sf-sched-worker --as-group=system:nodes label node sf-sched-worker node-restriction.kubernetes.io/pool=database
+Error from server (Forbidden): nodes "sf-sched-worker" is forbidden: is not allowed to modify labels: node-restriction.kubernetes.io/pool
+$ kubectl --as=system:node:sf-sched-worker --as-group=system:nodes label node sf-sched-worker dedicated=database
+node/sf-sched-worker labeled
+$ kubectl label node sf-sched-worker dedicated-
+node/sf-sched-worker unlabeled
+$ kubectl label node sf-sched-worker2 node-restriction.kubernetes.io/pool=database
+node/sf-sched-worker2 labeled
+$ kubectl get nodes -l node-restriction.kubernetes.io/pool=database -o name
+node/sf-sched-worker2
+## step 7: cleanup
+$ kubectl get nodes -l node-restriction.kubernetes.io/pool=database -o name
+node/sf-sched-worker2
+$ kubectl taint nodes sf-sched-worker2 node-restriction.kubernetes.io/pool=database:NoSchedule-
+node/sf-sched-worker2 untainted
+$ kubectl label node sf-sched-worker2 node-restriction.kubernetes.io/pool-
+node/sf-sched-worker2 unlabeled
+$ kubectl delete -f vap.yaml
+validatingadmissionpolicy.admissionregistration.k8s.io "deny-nodename-in-sensitive" deleted
+validatingadmissionpolicybinding.admissionregistration.k8s.io "deny-nodename-in-sensitive" deleted
+$ kubectl delete namespace bookstore --timeout=120s
+namespace "bookstore" deleted
+$ kubectl get nodes -o custom-columns=NAME:.metadata.name,TAINTS:.spec.taints
+NAME                     TAINTS
+sf-sched-control-plane   [map[effect:NoSchedule key:node-role.kubernetes.io/control-plane]]
+sf-sched-worker          [map[effect:NoSchedule key:p04-02-dedicated value:database]]
+sf-sched-worker2         <none>
+$ kubectl get validatingadmissionpolicies,validatingadmissionpolicybindings
+No resources found
+$ kubectl get namespace bookstore
+Error from server (NotFound): namespaces "bookstore" not found
