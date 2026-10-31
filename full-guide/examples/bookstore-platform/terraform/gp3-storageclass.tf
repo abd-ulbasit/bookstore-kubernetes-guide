@@ -7,14 +7,80 @@
 # no reason to use gp2 on a new cluster.
 #
 # Strategy:
-#   1. Create gp3-encrypted with is-default-class=true.
-#   2. PATCH the existing gp2 to flip is-default-class=false. (Kubernetes
-#      requires exactly one default; having two is a "multiple defaults" error
-#      from kubectl describe pvc when you don't specify a class explicitly.)
+#   1. Create a customer-managed KMS key for EBS. The EBS-CSI controller role
+#      gets the volume-use actions on it.
+#   2. Create gp3-encrypted with is-default-class=true, encrypted with that key,
+#      and reclaimPolicy Retain, so a deleted claim keeps its volume.
+#   3. PATCH the existing gp2 to flip is-default-class=false. Kubernetes
+#      documents keeping one default StorageClass, so gp2 must lose the
+#      annotation.
 #
-# Both manifests depend_on the EBS-CSI addon since gp3 needs the
+# Both StorageClasses depend on the EBS-CSI addon since gp3 needs the
 # ebs.csi.aws.com provisioner present on the cluster.
 ################################################################################
+
+# Customer-managed key for EBS volumes and snapshots. The AWS-managed aws/ebs
+# key cannot be used to share snapshots, and AWS rotates it on its own schedule.
+# A customer-managed key gives us the key policy, yearly rotation and a switch
+# to disable it. The account root keeps administrative control of the key.
+# The EBS-CSI controller role gets the volume-use actions, and no other role
+# is named.
+data "aws_iam_policy_document" "ebs_key" {
+  statement {
+    sid       = "AccountKeyAdministration"
+    effect    = "Allow"
+    actions   = ["kms:*"]
+    resources = ["*"]
+
+    principals {
+      type        = "AWS"
+      identifiers = ["arn:${data.aws_partition.current.partition}:iam::${data.aws_caller_identity.current.account_id}:root"]
+    }
+  }
+
+  statement {
+    sid       = "EbsCsiControllerUse"
+    effect    = "Allow"
+    actions   = ["kms:Encrypt", "kms:Decrypt", "kms:ReEncrypt*", "kms:GenerateDataKey*", "kms:DescribeKey"]
+    resources = ["*"]
+
+    principals {
+      type        = "AWS"
+      identifiers = [aws_iam_role.ebs_csi.arn]
+    }
+  }
+
+  statement {
+    sid       = "EbsCsiControllerGrants"
+    effect    = "Allow"
+    actions   = ["kms:CreateGrant", "kms:ListGrants", "kms:RevokeGrant"]
+    resources = ["*"]
+
+    principals {
+      type        = "AWS"
+      identifiers = [aws_iam_role.ebs_csi.arn]
+    }
+
+    condition {
+      test     = "Bool"
+      variable = "kms:GrantIsForAWSResource"
+      values   = ["true"]
+    }
+  }
+}
+
+resource "aws_kms_key" "ebs" {
+  description             = "${local.name_prefix} EBS volumes and snapshots"
+  enable_key_rotation     = true
+  deletion_window_in_days = 30
+  policy                  = data.aws_iam_policy_document.ebs_key.json
+  tags                    = local.common_tags
+}
+
+resource "aws_kms_alias" "ebs" {
+  name          = "alias/${local.name_prefix}-ebs"
+  target_key_id = aws_kms_key.ebs.key_id
+}
 
 resource "kubectl_manifest" "gp3_default_storage_class" {
   yaml_body = yamlencode({
@@ -31,6 +97,7 @@ resource "kubectl_manifest" "gp3_default_storage_class" {
     parameters = {
       type       = "gp3"
       encrypted  = "true"
+      kmsKeyId   = aws_kms_key.ebs.arn
       iops       = "3000"
       throughput = "125"
       # fsType empty → defaults to ext4 at provision time. Override per-PVC
@@ -38,7 +105,9 @@ resource "kubectl_manifest" "gp3_default_storage_class" {
     }
     volumeBindingMode    = "WaitForFirstConsumer"
     allowVolumeExpansion = true
-    reclaimPolicy        = "Delete"
+    # Retain keeps the volume after its claim is deleted. Kubernetes uses
+    # Delete when this field is omitted.
+    reclaimPolicy = "Retain"
   })
 
   depends_on = [
