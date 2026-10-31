@@ -1,3 +1,5 @@
 # Parts land in parallel during the security-first rewrite, each appending here.
 .github/security-gates-enforced.txt merge=union
 CHANGELOG.md merge=union
+.github/scripts/gates/not-evaluated.allow merge=union
+security/namespace-exceptions.yaml merge=union
