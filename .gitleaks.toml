@@ -113,3 +113,16 @@ paths = [
 ]
 regexTarget = "line"
 regexes = ['''password: ZGVtby1vbmx5LXZhbHVl''']
+
+[[allowlists]]
+description = """08.02 dumps a Secret to show that a backup holds readable values. \
+These are random values the lab generated for that one run and deleted with its \
+namespace, so they authenticate nothing."""
+targetRules = ["generic-api-key"]
+condition = "AND"
+paths = [
+  '''^full-guide/08-day-2-operations/02-backup-and-dr\.md$''',
+  '''^full-guide/examples/security-lab/evidence/08-02\.txt$''',
+]
+regexTarget = "line"
+regexes = ['''password":"(7730ffa41f0d708a84e727c70bd6c031|NzczMGZmYTQxZjBkNzA4YTg0ZTcyN2M3MGJkNmMwMzE=|YmI5YWIzNDhhM2FkMTVlZDRiNjcwMjE1YWZmY2U0NWY=|bb9ab348a3ad15ed4b670215affce45f)"''']
