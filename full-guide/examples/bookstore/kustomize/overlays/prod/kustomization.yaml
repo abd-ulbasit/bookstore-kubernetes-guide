@@ -21,88 +21,29 @@ kind: Kustomization
 # Namespace stays `bookstore` in prod too — see ../README.md "Namespace
 # decision" (cross-resource DNS / NetworkPolicy coherence).
 resources:
-  - ../../base
+- ../../base
 
 labels:
-  - pairs:
-      app.kubernetes.io/environment: prod
-    includeSelectors: false
-    includeTemplates: false
+- pairs:
+    app.kubernetes.io/environment: prod
 
 replicas:
-  - name: catalog
-    count: 4
-  - name: storefront
-    count: 3
-  - name: orders
-    count: 3
+- count: 4
+  name: catalog
+- count: 3
+  name: storefront
+- count: 3
+  name: orders
 
-patches:
   # Tuned catalog resources for prod load.
-  - target:
-      group: apps
-      version: v1
-      kind: Deployment
-      name: catalog
-    patch: |
-      apiVersion: apps/v1
-      kind: Deployment
-      metadata:
-        name: catalog
-      spec:
-        template:
-          spec:
-            containers:
-              - name: catalog
-                resources:
-                  requests:
-                    cpu: 100m
-                    memory: 128Mi
-                  limits:
-                    cpu: 500m
-                    memory: 256Mi
 
   # Larger postgres resources for prod (helm values-prod.yaml). Only the
   # container resources change; the StatefulSet's volumeClaimTemplate,
   # securityContext, scheduling (priorityClassName bookstore-data,
   # tolerations, nodeAffinity) are all inherited from base 20- untouched.
-  - target:
-      group: apps
-      version: v1
-      kind: StatefulSet
-      name: postgres
-    patch: |
-      apiVersion: apps/v1
-      kind: StatefulSet
-      metadata:
-        name: postgres
-      spec:
-        template:
-          spec:
-            containers:
-              - name: postgres
-                resources:
-                  requests:
-                    cpu: 250m
-                    memory: 512Mi
-                  limits:
-                    cpu: "1"
-                    memory: 1Gi
 
   # Prod HPA bounds (helm: minReplicas 4 / maxReplicas 12). JSON6902 patches
   # only the bounds; metrics + behavior inherited from base 82-.
-  - target:
-      group: autoscaling
-      version: v2
-      kind: HorizontalPodAutoscaler
-      name: catalog
-    patch: |
-      - op: replace
-        path: /spec/minReplicas
-        value: 4
-      - op: replace
-        path: /spec/maxReplicas
-        value: 12
 
   # catalog runs at 4 replicas in prod; base PDB minAvailable:2 (≤2 down) is
   # already correct (minAvailable < replicas). storefront/orders run at 3 with
@@ -110,46 +51,6 @@ patches:
   # contrast to dev) and left at the base values; no patch needed.
 
   # Prod ingress host + TLS (cert-manager/ACME-provisioned bookstore-tls).
-  - target:
-      group: networking.k8s.io
-      version: v1
-      kind: Ingress
-      name: bookstore
-    patch: |
-      apiVersion: networking.k8s.io/v1
-      kind: Ingress
-      metadata:
-        name: bookstore
-      spec:
-        tls:
-          - hosts:
-              - bookstore.example.com
-            secretName: bookstore-tls
-        rules:
-          - host: bookstore.example.com
-            http:
-              paths:
-                - path: /api/books(/|$)(.*)
-                  pathType: ImplementationSpecific
-                  backend:
-                    service:
-                      name: catalog
-                      port:
-                        number: 80
-                - path: /api/orders(/|$)(.*)
-                  pathType: ImplementationSpecific
-                  backend:
-                    service:
-                      name: orders
-                      port:
-                        number: 80
-                - path: /
-                  pathType: Prefix
-                  backend:
-                    service:
-                      name: storefront
-                      port:
-                        number: 80
 
   # NAMESPACE QUOTA. The base ResourceQuota (requests 2 CPU and 2Gi, limits 4
   # CPU and 4Gi, 30 Pods) is sized for the single-replica dev shape. This
@@ -159,22 +60,6 @@ patches:
   # db-migrate Job fail with "exceeded quota". The ceilings below are about
   # twice that steady state, so a rolling update can surge and the batch Jobs
   # still fit. Strategic-merge: only the five hard limits change.
-  - target:
-      version: v1
-      kind: ResourceQuota
-      name: bookstore-quota
-    patch: |
-      apiVersion: v1
-      kind: ResourceQuota
-      metadata:
-        name: bookstore-quota
-      spec:
-        hard:
-          requests.cpu: "4"
-          requests.memory: 4Gi
-          limits.cpu: "10"
-          limits.memory: 8Gi
-          pods: "60"
 
   # PRODUCTION SECRET HANDLING. The in-repo demo Secret `db-credentials`
   # (16-, base64 != encryption, demo-only) is DELETED from the prod render.
@@ -186,30 +71,143 @@ patches:
   # Secret. (The catalog/orders DB_DSN is built in the Deployment env from
   # POSTGRES_* — unchanged and still byte-identical; only the SOURCE of those
   # values moves out of Git.)
-  - target:
-      version: v1
-      kind: Secret
+patches:
+- patch: |
+    apiVersion: apps/v1
+    kind: Deployment
+    metadata:
+      name: catalog
+    spec:
+      template:
+        spec:
+          containers:
+            - name: catalog
+              resources:
+                requests:
+                  cpu: 100m
+                  memory: 128Mi
+                limits:
+                  cpu: 500m
+                  memory: 256Mi
+  target:
+    group: apps
+    kind: Deployment
+    name: catalog
+    version: v1
+- patch: |
+    apiVersion: apps/v1
+    kind: StatefulSet
+    metadata:
+      name: postgres
+    spec:
+      template:
+        spec:
+          containers:
+            - name: postgres
+              resources:
+                requests:
+                  cpu: 250m
+                  memory: 512Mi
+                limits:
+                  cpu: "1"
+                  memory: 1Gi
+  target:
+    group: apps
+    kind: StatefulSet
+    name: postgres
+    version: v1
+- patch: |
+    - op: replace
+      path: /spec/minReplicas
+      value: 4
+    - op: replace
+      path: /spec/maxReplicas
+      value: 12
+  target:
+    group: autoscaling
+    kind: HorizontalPodAutoscaler
+    name: catalog
+    version: v2
+- patch: |
+    apiVersion: networking.k8s.io/v1
+    kind: Ingress
+    metadata:
+      name: bookstore
+    spec:
+      tls:
+        - hosts:
+            - bookstore.example.com
+          secretName: bookstore-tls
+      rules:
+        - host: bookstore.example.com
+          http:
+            paths:
+              - path: /api/books(/|$)(.*)
+                pathType: ImplementationSpecific
+                backend:
+                  service:
+                    name: catalog
+                    port:
+                      number: 80
+              - path: /api/orders(/|$)(.*)
+                pathType: ImplementationSpecific
+                backend:
+                  service:
+                    name: orders
+                    port:
+                      number: 80
+              - path: /
+                pathType: Prefix
+                backend:
+                  service:
+                    name: storefront
+                    port:
+                      number: 80
+  target:
+    group: networking.k8s.io
+    kind: Ingress
+    name: bookstore
+    version: v1
+- patch: |
+    apiVersion: v1
+    kind: ResourceQuota
+    metadata:
+      name: bookstore-quota
+    spec:
+      hard:
+        requests.cpu: "4"
+        requests.memory: 4Gi
+        limits.cpu: "10"
+        limits.memory: 8Gi
+        pods: "60"
+  target:
+    kind: ResourceQuota
+    name: bookstore-quota
+    version: v1
+- patch: |
+    $patch: delete
+    apiVersion: v1
+    kind: Secret
+    metadata:
       name: db-credentials
-    patch: |
-      $patch: delete
-      apiVersion: v1
-      kind: Secret
-      metadata:
-        name: db-credentials
+  target:
+    kind: Secret
+    name: db-credentials
+    version: v1
 
 # Pull real, immutably-tagged images from the registry (replace the registry
 # host for your environment). `images:` rewrites BOTH the name and the tag —
 # no Deployment YAML is hand-edited. In prod prefer name@sha256:<digest>.
 images:
-  - name: bookstore/catalog
-    newName: registry.example.com/bookstore/catalog
-    newTag: "1.0.0"
-  - name: bookstore/storefront
-    newName: registry.example.com/bookstore/storefront
-    newTag: "1.0.0"
-  - name: bookstore/orders
-    newName: registry.example.com/bookstore/orders
-    newTag: "1.0.0"
-  - name: bookstore/payments-worker
-    newName: registry.example.com/bookstore/payments-worker
-    newTag: "1.0.0"
+- digest: sha256:92269214639191ea775751bf4a3679528a67dd98521d568090d21090ed7f0389
+  name: bookstore/catalog
+  newName: ghcr.io/abd-ulbasit/bookstore-catalog
+- name: bookstore/orders
+  newName: registry.example.com/bookstore/orders
+  newTag: 1.0.0
+- name: bookstore/payments-worker
+  newName: registry.example.com/bookstore/payments-worker
+  newTag: 1.0.0
+- name: bookstore/storefront
+  newName: registry.example.com/bookstore/storefront
+  newTag: 1.0.0
