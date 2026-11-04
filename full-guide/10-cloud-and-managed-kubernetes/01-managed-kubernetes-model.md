@@ -50,10 +50,13 @@ that side is yours, and confusing them is the production incident". The
 reference is *Production Kubernetes* (Deployment Models / A Path to
 Production).
 
-> **Nothing in this Part runs on a cloud.** A managed control plane cannot run
-> in a kind cluster, and no AWS, GCP or Azure cluster was created for this
-> Part. Provider behaviour is therefore **cited, not run**: each claim links to
-> the provider's own documentation, checked on 2026-10-31. Cloud commands are
+> **Almost nothing in this Part runs on a cloud.** A managed control plane
+> cannot run in a kind cluster. A few GKE checks were run on a live cluster
+> (GKE 1.37.1-gke.1552000, 2026-11-04): read-only kubectl and gcloud commands,
+> and an audit-log probe that used a throwaway namespace and Secret, deleted
+> afterwards. No EKS or AKS cluster was created for this Part, and the rest of
+> the provider behaviour is **cited, not run**: each claim links to the
+> provider's own documentation, checked on 2026-10-31. Cloud commands are
 > **illustrative** and are for clusters you own. Wherever a piece can still be
 > shown locally (the boundary reasoning, the Bookstore manifests that are
 > unchanged on cloud, a client dry-run) it is. No output is ever faked.
@@ -121,7 +124,7 @@ babysit etcd.
 | Threat | Control this chapter teaches | Goes deeper |
 |---|---|---|
 | Misreading who secures a layer, so a gap has no owner | The split per provider in [Who secures what](#who-secures-what) | RBAC: [Part 05 ch.01](../05-security/01-authn-authz-rbac.md) |
-| An API endpoint open to the internet by default | Check the endpoint access setting on day one, since EKS starts public | [10.04](04-cloud-networking-and-load-balancing.md) |
+| An API endpoint open to the internet by default | Check the endpoint access setting on day one, since EKS starts public, and a GKE cluster with a public endpoint and no authorised networks is the same trap | [10.04](04-cloud-networking-and-load-balancing.md) |
 | Secrets read with no record of who read them | Know what the provider encrypts, and turn on the logs that are yours | KMS: [Part 05 ch.04](../05-security/04-secrets-and-cluster-hardening.md); audit: [Part 05 ch.08](../05-security/08-audit-detection-and-incident-response.md) |
 | An out-of-support minor that the provider upgrades for you | Track each end-of-support date and upgrade on your own schedule | [Part 08 ch.01](../08-day-2-operations/01-cluster-lifecycle.md) |
 
@@ -129,17 +132,17 @@ babysit etcd.
 
 Each provider draws the line in its own documentation. The matrix gives the
 default for each area, and the notes under it name the provider page behind
-each row. Checked 2026-10-31.
+each row. Checked 2026-10-31, and the GKE audit-logging cell 2026-11-04.
 
 ```
- AREA                     EKS            GKE            AKS
- Control plane and etcd   provider       provider       provider
- Audit logs               you, opt in    on by default  shared
- Node OS and patching     you            shared         shared
- Kubernetes upgrades      shared         shared         shared
- RBAC and IAM mapping     you            you            you
- Workload security        you            you            you
- Secrets management       you            you            you
+ AREA                     EKS            GKE                     AKS
+ Control plane and etcd   provider       provider                provider
+ Audit logs               you, opt in    writes only by default  shared
+ Node OS and patching     you            shared                  shared
+ Kubernetes upgrades      shared         shared                  shared
+ RBAC and IAM mapping     you            you                     you
+ Workload security        you            you                     you
+ Secrets management       you            you                     you
 ```
 
 - **Control plane.** EKS runs and secures the control plane, including its
@@ -147,15 +150,21 @@ each row. Checked 2026-10-31.
   of its Kubernetes components, etcd included.
 - **Audit logs.** EKS sends control plane logs to CloudWatch only for the log
   types you enable, and they are off by default. GKE's Admin Activity logs for
-  the API server are always on; its Data Access logs stay off until you enable
-  them. AKS shares platform monitoring with you: you enable the diagnostic
+  the API server are always on, and they record the changes you make to
+  Kubernetes resources. Reads are not recorded by default, so a Secret `get`
+  leaves no entry, because Data Access logs are off until you enable them. See
+  the *Enable audit logging* section of
+  <https://docs.cloud.google.com/kubernetes-engine/docs/how-to/audit-logging>.
+  AKS shares platform monitoring with you: you enable the diagnostic
   settings.
 - **Control-plane trust.** The provider can see your objects, so know what it
   can reach. EKS says no person can access the plaintext keys that protect
   etcd. GKE audit-logs the SSH sessions of its Site Reliability Engineers.
-  AKS support cannot sign in to your agent nodes without your permission, and
-  its cluster role is granted only under an active ticket, with just-in-time
-  access.
+  Those logs sit in Google's internal audit infrastructure, available for
+  forensics and security response, and the docs do not say customers can read
+  them. AKS support cannot sign in to your agent nodes without your
+  permission, and its cluster role is granted only under an active ticket,
+  with just-in-time access.
 - **Node OS.** On EKS managed node groups AWS builds patched AMIs and you
   deploy them. Self-managed nodes are entirely yours. GKE hardens and patches
   the node OS and expects Standard node pools to stay on automatic upgrades.
@@ -165,8 +174,10 @@ each row. Checked 2026-10-31.
   [How it works](#how-it-works-under-the-hood)).
 - **Secrets.** EKS encrypts all Kubernetes API data with envelope encryption
   by default from 1.28, under an AWS-owned key unless you bring your own. GKE
-  encrypts cluster state at the file-system layer by default. On AKS, secrets
-  management is yours.
+  encrypts cluster state at the file-system layer by default. Application-layer
+  secrets encryption is opt-in on GKE: you turn it on with a Cloud KMS key
+  through `--database-encryption-key`, and which objects it covers depends on
+  the cluster's key-value store. On AKS, secrets management is yours.
 - **Workload security.** Yours on every provider. AKS lists RBAC, Pod security
   and secrets management as customer areas. GKE leaves RBAC and IAM policy,
   container images and data with you. EKS leaves node and container
@@ -336,11 +347,12 @@ and Layers 2 (Git) + 3 (the Postgres PVC, via Velero/CSI snapshot) stay
   endpoint that is public by default on new clusters (private access and
   public CIDR limits are options); nodes are EC2 via *self-managed*,
   *managed node groups*, or *Fargate* (serverless Pods). **Google GKE** has
-  two modes: **Standard** (you manage node pools; per-cluster management fee)
-  and **Autopilot** (Google manages nodes too — you only declare Pods, billed
-  per Pod resource; the boundary shifts further toward the provider but the
-  *app SLO is still yours*). **Azure AKS** runs a managed control plane (free
-  tier or an SLA-backed paid tier); nodes are VM Scale Sets. In all three the
+  two modes: **Standard** (you manage node pools) and **Autopilot** (Google
+  manages nodes too: you only declare Pods, billed per Pod resource; the
+  boundary shifts further toward the provider but the *app SLO is still
+  yours*). Both modes pay the same per-cluster management fee. **Azure AKS**
+  runs a managed control plane (free tier or an SLA-backed paid tier); nodes
+  are VM Scale Sets. In all three the
   **control plane is the provider's and the API server is the seam** — the
   differences (node modes, fee model, default CNI) are *below* the seam and
   are the subject of [ch.02](02-provisioning-and-iac.md)–[ch.06](06-node-autoscaling-cost-multicloud.md).
@@ -364,7 +376,8 @@ and Layers 2 (Git) + 3 (the Postgres PVC, via Velero/CSI snapshot) stay
   **node pool** — a *surge or rolling* replacement (new-version nodes added,
   old ones cordoned/drained honoring **PDBs** — [Part 06
   ch.05](../06-production-readiness/05-reliability-and-disruptions.md) — then
-  deleted). GKE **release channels** (rapid/regular/stable) and AKS
+  deleted). GKE **release channels** (rapid/regular/stable/extended; Extended
+  takes only newer patches within the minor during standard support) and AKS
   auto-upgrade channels can upgrade the control plane *and* nodes
   automatically. EKS managed node groups are not upgraded when the control
   plane is, so the node step stays yours. Opt in deliberately, and keep
@@ -383,7 +396,15 @@ and Layers 2 (Git) + 3 (the Postgres PVC, via Velero/CSI snapshot) stay
   cited). It
   notifies you first, but that upgrade ignores your maintenance window, does
   not stop for deprecated APIs, and can override a PDB that blocks a node
-  drain. A cluster you "never touch" can therefore *still* move, which is why
+  drain. GKE has forced upgrades too. A cluster outside the Extended channel
+  is eventually upgraded to the next supported minor before standard support
+  ends, though not while it uses deprecated APIs, and a maintenance exclusion
+  can defer it. At the end of standard support GKE upgrades the cluster
+  anyway, and only an emergency exclusion can delay that, by up to 90 days.
+  GKE also gradually auto-upgrades nodes on a version past end of support,
+  whether or not auto-upgrade is enabled.
+  [GKE versioning](https://docs.cloud.google.com/kubernetes-engine/versioning).
+  A cluster you "never touch" can therefore *still* move, which is why
   the
   [Part 08 ch.01](../08-day-2-operations/01-cluster-lifecycle.md) deprecated-API
   audit (`pluto`/`kubent`, `apiserver_requested_deprecated_apis`) is *more*
@@ -408,8 +429,13 @@ and Layers 2 (Git) + 3 (the Postgres PVC, via Velero/CSI snapshot) stay
 - **The cost shape, mechanically.** Control-plane fee = a flat hourly charge
   per cluster. EKS publishes $0.10 per cluster-hour. AKS's **Free tier** has no
   cluster fee and no financially backed uptime SLA; the Standard and Premium
-  tiers carry the SLA, and their rates are on AKS's pricing page. GKE's
-  per-cluster fee and Autopilot's Pod billing are on its pricing page.
+  tiers carry the SLA, and their rates are on AKS's pricing page. GKE charges
+  the same $0.10 per cluster-hour management fee in Standard and Autopilot,
+  whatever the cluster size or topology, and Autopilot adds Pod-resource
+  billing on top. The GKE free tier gives $74.40 of monthly credit per billing
+  account, which equals one free Autopilot or zonal Standard cluster a month,
+  so one zonal cluster's fee can net to zero on the bill. That is the credit
+  at work, not a missing charge.
   **Nodes** = standard
   VM pricing × node count × time — the dominant, variable cost, and the one
   the cluster autoscaler/Karpenter and right-sizing
@@ -445,7 +471,9 @@ and Layers 2 (Git) + 3 (the Postgres PVC, via Velero/CSI snapshot) stay
 > than you think.** A minor leaves standard provider support in 12 to 14
 > months (later only if you pay for extended support or LTS), and a provider
 > may upgrade a cluster that stays out of support. EKS does so when its window
-> closes, on its own schedule; AKS does so from 1 June 2027. Run the
+> closes, on its own schedule; AKS does so from 1 June 2027; GKE upgrades a
+> cluster outside the Extended channel before standard support ends, and nodes
+> on an unsupported version. Run the
 > [Part 08 ch.01](../08-day-2-operations/01-cluster-lifecycle.md) deprecated-API
 > audit on a schedule, keep manifests/charts/GitOps on GA APIs (the Bookstore
 > does), stagger control-plane then node-pool upgrades within a maintenance
@@ -486,8 +514,14 @@ and Layers 2 (Git) + 3 (the Postgres PVC, via Velero/CSI snapshot) stay
 # What am I connected to? (works on ANY cluster incl. managed)
 kubectl cluster-info                               # the API endpoint
 kubectl version                                    # Server = the managed apiserver minor
+# A skew warning means kubectl is more than one minor from the server; install
+# a kubectl within +/-1 of the cluster minor.
 kubectl get nodes -o wide                          # YOUR nodes (kubelet ver, AZ via label)
 kubectl get nodes -L topology.kubernetes.io/zone   # node AZ spread (yours to ensure)
+
+# Lab values for the commands below. GKE_VERSION is picked from the
+# get-server-config output, which lists the versions GKE offers.
+export CLUSTER_NAME=bookstore-lab LOCATION=asia-south1-a
 
 # Provider control-plane ops you TRIGGER (provider performs CP; you roll nodes):
 # One minor per step (Part 08 ch.01); here 1.36 -> 1.37. eksctl only plans
@@ -499,6 +533,10 @@ gcloud container clusters upgrade $CLUSTER_NAME --master \
   --cluster-version $GKE_VERSION --location $LOCATION  # Google GKE (CP)
 az aks upgrade -g $RG -n $CLUSTER_NAME --kubernetes-version 1.37  # Azure AKS
 # then upgrade each NODE POOL (surge/rolling, honors PDBs) — provider-specific (ch.02)
+
+# GKE API endpoint: null or false means no authorised networks are set
+gcloud container clusters describe $CLUSTER_NAME --location $LOCATION \
+  --format=json | jq .masterAuthorizedNetworksConfig.enabled
 
 # The audit that is STILL yours on managed (Part 08 ch.01):
 kubectl api-versions | sort
@@ -531,10 +569,14 @@ Checklist:
 - [ ] DR is **Git (declarative) + Velero (data)** — etcd is the provider's
       ([Part 08 ch.02](../08-day-2-operations/02-backup-and-dr.md))
 - [ ] Control-plane audit logs are on and readable by you (EKS: opt in per log
-      type; GKE: Admin Activity is always on, Data Access is off; AKS: enable
-      diagnostic settings)
+      type; GKE: Admin Activity is always on and records writes, Data Access is
+      off so Secret reads are not logged; AKS: enable diagnostic settings)
 - [ ] API endpoint reviewed: EKS clusters start public, so restrict it (private
-      endpoint or public CIDR limits; [10.04](04-cloud-networking-and-load-balancing.md))
+      endpoint or public CIDR limits;
+      [10.04](04-cloud-networking-and-load-balancing.md)). On GKE, run the
+      authorised-networks check in Quick Reference and, if it prints null or
+      false on a public endpoint, restrict the endpoint with master authorised
+      networks or a private endpoint.
 - [ ] Cost owned at the **node** layer (not the CP fee); spend allocated per
       workload ([ch.06](06-node-autoscaling-cost-multicloud.md))
 - [ ] Lock-in is deliberate: portable layer kept portable, non-portable layer
@@ -592,7 +634,21 @@ Checklist:
 6. **A teammate says: "The provider encrypts etcd, so our Secrets are safe in the cluster." What is true, and what stays yours?**
    <details><summary>Show answer</summary>
 
-   Partly true. By default the provider encrypts the cluster's data at rest: EKS envelope-encrypts all Kubernetes API data from 1.28 with an AWS-owned key unless you bring your own, and GKE encrypts etcd at the file-system layer. That protects the storage. It does not limit who can read through the API. Anyone your RBAC lets `get` a Secret reads its plaintext, so scoping RBAC ([Part 05 ch.01](../05-security/01-authn-authz-rbac.md)) is yours. Choosing a customer-managed key and its policy is yours too ([Part 05 ch.04](../05-security/04-secrets-and-cluster-hardening.md)). Whether you can later show who read a Secret depends on audit logs, and the defaults differ: EKS control plane logs are off until you enable them, GKE Admin Activity logs are always on, and AKS needs diagnostic settings.
+   Partly true. By default the provider encrypts the cluster's data at rest:
+   EKS envelope-encrypts all Kubernetes API data from 1.28 with an AWS-owned
+   key unless you bring your own, and GKE encrypts etcd at the file-system
+   layer. That protects the storage. It does not limit who can read through the
+   API. Anyone your RBAC lets `get` a Secret reads its plaintext, so scoping
+   RBAC ([Part 05 ch.01](../05-security/01-authn-authz-rbac.md)) is yours.
+   Choosing a customer-managed key and its policy is yours too. On GKE, that is
+   application-layer secrets encryption with a Cloud KMS key, set with
+   `--database-encryption-key`
+   ([Part 05 ch.04](../05-security/04-secrets-and-cluster-hardening.md)).
+   Whether you can later show who read a Secret depends on audit logs, and the
+   defaults differ: EKS control plane logs are off until you enable them, GKE
+   Admin Activity logs are always on but do not record reads, so GKE does not
+   log Secret reads unless Data Access logs are enabled, and AKS needs
+   diagnostic settings.
 
    </details>
 
@@ -626,6 +682,8 @@ Checklist:
     <https://docs.cloud.google.com/kubernetes-engine/docs/concepts/control-plane-security>;
     audit logging
     <https://docs.cloud.google.com/kubernetes-engine/docs/how-to/audit-logging>;
+    application-layer secrets encryption
+    <https://docs.cloud.google.com/kubernetes-engine/docs/how-to/encrypting-secrets>;
     regional clusters
     <https://docs.cloud.google.com/kubernetes-engine/docs/concepts/regional-clusters>;
     versioning <https://docs.cloud.google.com/kubernetes-engine/versioning>;

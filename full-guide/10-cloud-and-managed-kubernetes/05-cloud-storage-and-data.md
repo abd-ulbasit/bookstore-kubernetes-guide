@@ -58,15 +58,18 @@ makes the zonal-disk consequence concrete for the Bookstore Postgres, and
 hands the backup half back to [Part 08 ch.02](../08-day-2-operations/02-backup-and-dr.md).
 The reference is *Production Kubernetes* (Container Storage).
 
-> **Nothing in this chapter ran on a cloud.** Cloud CSI drivers, disks and
+> **Some steps ran on a cloud.** Cloud CSI drivers, disks and
 > snapshots act on provider APIs, and kind's `local-path` has no zones, no
 > snapshots and no CSI ([Part 03 ch.04](../03-config-and-storage/04-persistent-storage.md)
 > said so). Each cloud behaviour here is cited to its provider's
-> documentation, checked 2026-10-31, and is **cited, not run**. The
-> Kubernetes parts ran on a kind cluster: the StatefulSet and StorageClass
-> dry-runs, and the snapshot RBAC check. That captured output came from a lab
-> cluster with a different name, in a lab namespace where this chapter prints
-> `bookstore`. The transcript records both substitutions.
+> documentation, checked 2026-10-31 (or the later date beside a citation),
+> and is **cited, not run**, unless its step is marked **Run on GKE
+> 1.37.1-gke.1552000 (2026-11-04)**. The Kubernetes parts ran on a kind
+> cluster: the StatefulSet and StorageClass dry-runs, and the snapshot RBAC
+> check. That captured output came from a lab cluster with a different name,
+> in a lab namespace where this chapter prints `bookstore`. The transcript
+> records both substitutions. A marked GKE run that touched a namespace used
+> a lab namespace in place of `bookstore`, as that step says.
 
 ## Mental model
 
@@ -82,9 +85,9 @@ data survives an AZ failure.**
   (EFS / Filestore / Azure Files) is **`ReadWriteMany`**. Many nodes and Pods
   mount it, and it is a network filesystem (slower, different consistency; for
   shared assets, not a Postgres data dir). Its failure domain depends on the
-  tier: Filestore's Basic and Zonal tiers are zonal, and its Regional tier is
-  regional ([Filestore service tiers](https://docs.cloud.google.com/filestore/docs/service-tiers),
-  checked 2026-10-31).
+  tier: Filestore's Basic and Zonal tiers are zonal, and its Regional and
+  Enterprise tiers are regional ([Filestore service tiers][fs-tiers],
+  checked 2026-11-04).
 - **The StorageClass names a cloud CSI driver + cloud `parameters`.** Same
   object as [Part 03 ch.04](../03-config-and-storage/04-persistent-storage.md);
   `provisioner` is now `ebs.csi.aws.com` / `pd.csi.storage.gke.io` /
@@ -183,8 +186,9 @@ flowchart TB
   ─────────────────────────────────────────────────────────────────────────
   RULE (from Part 03 ch.04, cloud-concrete):
    • RWX on a BLOCK disk -> PVC stays Pending (block is RWO-only). Need FILE.
-   • FILE is zonal or regional BY TIER (Filestore Basic and Zonal are zonal;
-     Regional is regional). Check the tier before assuming there is no AZ pin.
+   • FILE is zonal or regional BY TIER (Filestore Basic and Zonal are
+     zonal; Regional and Enterprise are regional). Check the tier before
+     assuming there is no AZ pin.
    • BLOCK is ZONAL -> volumeBindingMode: WaitForFirstConsumer is MANDATORY
      (else the disk strands in the wrong zone / deadlocks).
    • A zonal disk PINS its Pod's AZ -> single-replica DB is NOT AZ-HA.
@@ -230,6 +234,11 @@ eksctl create addon --cluster $CLUSTER_NAME --name aws-ebs-csi-driver \
 kubectl get csidrivers          # ebs.csi.aws.com / pd.csi.storage.gke.io / disk.csi.azure.com
 ```
 
+**Run on GKE 1.37.1-gke.1552000 (2026-11-04)**: `kubectl get csidrivers`
+listed `pd.csi.storage.gke.io`, `filestore.csi.storage.gke.io` and
+`podcertificate.gke.io`. A read-only `gcloud` describe showed
+`gcePersistentDiskCsiDriverConfig` enabled.
+
 The EBS add-on installs into `kube-system`, the namespace the cluster's own
 components use. This guide sets no Pod Security label on `kube-system`, so the
 driver is admitted there at whatever level the cluster gives that namespace.
@@ -253,8 +262,9 @@ shown as an *illustrative overlay* — the canonical file is **not edited**:
 
 ```yaml
 # illustrative cloud StorageClass for the Bookstore Postgres (AWS shown;
-# GKE/AKS differ only in provisioner+parameters). NOT applied to the canonical
-# tree — a prod overlay/Helm value sets storageClassName on the StatefulSet.
+# GKE and AKS differ in provisioner+parameters; GKE is shown below. NOT
+# applied to the canonical tree: a prod overlay/Helm value sets
+# storageClassName on the StatefulSet.
 apiVersion: storage.k8s.io/v1
 kind: StorageClass
 metadata:
@@ -286,12 +296,41 @@ Disk CSI driver reads `disk-encryption-kms-key` on a `pd.csi.storage.gke.io`
 class, set to the key's full resource name
 (`projects/.../locations/.../keyRings/.../cryptoKeys/...`)
 ([GKE customer-managed encryption keys](https://docs.cloud.google.com/kubernetes-engine/docs/how-to/using-cmek),
-checked 2026-10-31). On AKS, the Azure Disk CSI driver reads
+checked 2026-11-04). The Compute Engine service agent needs
+`roles/cloudkms.cryptoKeyEncrypterDecrypter` on the key. The key ring location
+must match the cluster location (a zonal cluster can use a key in its
+region), and `global` is not supported. On AKS, the Azure Disk CSI driver reads
 `diskEncryptionSetID` on a `disk.csi.azure.com` class. AKS documents that the
 disk encryption set on the class applies only to new PVCs, so existing
 volumes need a detach and a separate Azure Disks update first
 ([AKS customer-managed keys](https://learn.microsoft.com/en-us/azure/aks/azure-disk-customer-managed-keys),
 checked 2026-10-31).
+
+The GKE class keeps the binding mode, reclaim policy and expansion settings,
+and swaps in the Persistent Disk driver and its parameters. Its name matches
+the AWS class, so the one-line change below applies to it too. GKE does not
+use the AWS parameter names `encrypted`, `kmsKeyId`, `iops` and `throughput`
+in a StorageClass, so the class leaves them out. For Hyperdisk, Google lists
+`iops` and `throughput` under a VolumeAttributesClass instead
+([GKE Persistent Disk CSI driver][gke-pd-csi], checked 2026-11-04):
+
+```yaml
+# illustrative GKE variant (Persistent Disk CSI driver). NOT applied to the
+# canonical tree. P, L, R and K are placeholders for the project, the key
+# location, the key ring and the key.
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: bookstore-cloud
+  labels: { app.kubernetes.io/part-of: bookstore }
+provisioner: pd.csi.storage.gke.io         # the GKE CSI driver
+parameters:
+  type: pd-balanced                        # or pd-ssd
+  disk-encryption-kms-key: "projects/P/locations/L/keyRings/R/cryptoKeys/K"
+volumeBindingMode: WaitForFirstConsumer    # MANDATORY for zonal disks
+reclaimPolicy: Retain                      # keep the disk on PVC delete
+allowVolumeExpansion: true                 # grow, don't migrate
+```
 
 The Bookstore Postgres uses it with **one line** — the StatefulSet's
 `volumeClaimTemplates` gains `storageClassName: bookstore-cloud` (today it
@@ -306,6 +345,15 @@ ch.04](../03-config-and-storage/04-persistent-storage.md)). That one line is a
 # Everything else in 20- (the restricted securityContext, the headless Service,
 # probes, the PVC size) is BYTE-IDENTICAL on cloud. The app does not change.
 ```
+
+**Run on GKE 1.37.1-gke.1552000 (2026-11-04)**: a PVC with no
+`storageClassName` took `standard-rwo` and stayed Pending with no Pod, which
+is what `WaitForFirstConsumer` does. The `standard` class is Immediate and
+was not the default. `kubectl get sc` showed no default marker, so check
+your own cluster the same way: create a test PVC with no `storageClassName`
+and see which class it takes. Google's Persistent Disk CSI page gives
+different defaults for Autopilot and Standard clusters
+([GKE Persistent Disk CSI driver][gke-pd-csi], checked 2026-11-04).
 
 ### 3. The zonal-disk reality for the Bookstore Postgres (the consequence)
 
@@ -328,6 +376,15 @@ kubectl get node <THAT-NODE> -L topology.kubernetes.io/zone   # = the PV's zone
 # on a zonal disk is durable, NOT AZ-highly-available.
 ```
 
+**Run on GKE 1.37.1-gke.1552000 (2026-11-04)**: the PV zone query ran as
+written and listed `asia-south1-a` for `data-postgres-0`. With the namespace
+changed, the Pod's node carries the same zone label.
+
+The drill needs nodes in at least two zones, so use a multi-zone node pool.
+On a cluster whose nodes all sit in one zone, as the GKE lab cluster's did,
+every node is in the PV's zone. Cordoning them all then cordons the whole
+cluster, and the drill cannot show the pin.
+
 The Bookstore's existing `topologySpreadConstraints`/`podAntiAffinity` on the
 *stateless* tiers ([Part 04 ch.02](../04-scheduling/02-affinity-taints-topology.md))
 spread them across AZs and they reschedule freely. The **data tier cannot** —
@@ -349,7 +406,9 @@ canonical file** (it already documents this exact substitution):
 # Snapshot CRDs + controller via the documented path (pinned, not latest/):
 #   the external-snapshotter (Part 03 ch.04 / 18-'s header names it)
 # Then 18-'s VolumeSnapshotClass driver -> ebs.csi.aws.com (overlay/value),
-# and snapshot data-postgres-0:
+# or pd.csi.storage.gke.io on GKE; the name must match kubectl get csidriver.
+# A server dry-run accepted the placeholder driver (checked 2026-11-04), so it
+# does not check the name. Then snapshot data-postgres-0:
 kubectl apply -f examples/bookstore/raw-manifests/18-postgres-snapshot.yaml   # on a snapshot-capable cloud cluster
 kubectl get volumesnapshot postgres-snap-0 -n bookstore \
   -o jsonpath='{.status.readyToUse}{"\n"}'    # true once the cloud snapshot completes
@@ -358,6 +417,12 @@ kubectl get volumesnapshot postgres-snap-0 -n bookstore \
 # restored disk can be created in ANOTHER AZ — which is how a snapshot
 # participates in AZ recovery (the restore in step 3).
 ```
+
+**Run on GKE 1.37.1-gke.1552000 (2026-11-04)**: the three snapshot CRDs were
+already present, labelled as managed add-on resources, and the
+snapshot-controller component annotation read version 1.37.5. The install
+above was not needed there. On any cluster, first check that the CRDs exist
+with `kubectl get crd volumesnapshots.snapshot.storage.k8s.io`.
 
 > **Lineage / honest scope.** The Postgres StatefulSet
 > ([`20-postgres-statefulset.yaml`](../examples/bookstore/raw-manifests/20-postgres-statefulset.yaml),
@@ -389,8 +454,8 @@ kubectl apply --dry-run=server -f examples/bookstore/raw-manifests/18-postgres-s
 
 The first command prints one line per object and creates nothing. The
 StorageClass is built-in, so it dry-runs anywhere. Its provisioner string
-matters only on a cloud cluster where the driver is installed. This is the
-captured output of that run:
+matters only on a cloud cluster where the driver is installed, and the
+dry-run does not check parameters. This is the captured output of that run:
 
 <!-- gate: output -->
 ```text
@@ -399,10 +464,17 @@ statefulset.apps/postgres created (server dry run)
 storageclass.storage.k8s.io/bookstore-cloud created (server dry run)
 ```
 
+**Run on GKE 1.37.1-gke.1552000 (2026-11-04)**: with only the namespace
+changed, the first command printed the same three lines. The server dry-run
+accepts the AWS-shaped StorageClass, so it does not test GKE parameters.
+
 The second command fails on a cluster without the snapshot CRDs, as the header
-of `18-` says. The lab cluster has no snapshot CRDs, so the command fails with
-`no matches for kind` errors, one per object. That is the expected result, not
-a defect in the file.
+of `18-` says. On such a cluster it prints one `no matches for kind` error per
+object, which is the expected result and not a defect in the file. The kind lab
+cluster has no snapshot CRDs. The GKE cluster has them, and the second command
+ran as written there. The dry-run reports the VolumeSnapshotClass as created,
+then fails with a NotFound error, because namespace `bookstore` does not exist
+yet.
 
 ### 6. Limit who can snapshot, and who can bind a snapshot
 
@@ -454,9 +526,10 @@ subjects:
     namespace: bookstore
 ```
 
-Apply it, then list what RBAC grants the identity. `auth can-i --list` prints
-every rule the identity holds in the namespace, cluster-wide rules included.
-`grep` keeps the snapshot rows:
+The namespace must exist first, so create `bookstore` from
+`00-namespace.yaml`, as step 5 says. Then apply it and list what RBAC grants
+the identity. `auth can-i --list` prints every rule the identity holds in
+the namespace, cluster-wide rules included. `grep` keeps the snapshot rows:
 
 ```sh
 kubectl apply -f snapshot-rbac.yaml
@@ -468,6 +541,10 @@ kubectl auth can-i --list -n bookstore \
 ```text
 volumesnapshots.snapshot.storage.k8s.io         []                                     []               [create get list]
 ```
+
+**Run on GKE 1.37.1-gke.1552000 (2026-11-04)**: with the namespace changed,
+the apply and the `grep` ran, and the snapshot row matched the one above. No
+`volumesnapshotcontents` row appeared.
 
 The row is the job: the identity may create, get and list snapshots in its own
 namespace. What is missing is the control. No row names
@@ -505,7 +582,9 @@ of the snapshot identity.
   set** (attach, snapshot, resize, topology) against the cloud disk API — the
   capabilities [Part 03 ch.04](../03-config-and-storage/04-persistent-storage.md)
   said `local-path` lacks. The driver authenticates to the cloud API via
-  **IRSA/Workload Identity** ([ch.03](03-cloud-identity.md)) — no static key.
+  **IRSA** on EKS ([ch.03](03-cloud-identity.md)), with no static key. For
+  GKE and AKS, see the provider's driver documentation for how it
+  authenticates.
 - **Zonal disks and `WaitForFirstConsumer` — the mechanism.** EBS/PD/Azure
   Disk are created **in a single AZ**. With **`Immediate`** binding the PV is
   provisioned the moment the PVC exists — before the scheduler knows which
@@ -551,8 +630,10 @@ of the snapshot identity.
   ch.04](../03-config-and-storage/04-persistent-storage.md)): with
   `allowVolumeExpansion: true`, editing the PVC's
   `spec.resources.requests.storage` upward grows the cloud disk **and** the
-  filesystem **with Postgres running** when the driver resizes online, which its docs state.
-  This is why
+  filesystem **with Postgres running**, when the driver resizes online.
+  **Run on GKE 1.37.1-gke.1552000 (2026-11-04)**: the Quick Reference patch,
+  with a lab namespace and 2Gi in place of 20Gi, grew a 1Gi PVC to 2Gi with
+  its Pod Running and no restarts, and `df /data` showed 1.9G. This is why
   the Part 03 ch.04 rule "size for expansion, not migration" is practical on
   cloud: a full Bookstore Postgres volume is a one-line PVC patch, not an
   outage-laden data migration.
@@ -585,8 +666,11 @@ of the snapshot identity.
   never sees it. Scope the share with the provider's controls. On EFS, the
   security groups on each mount target filter the NFS clients, and access
   points fix the user and the root directory a mount gets ([EFS access
-  points][efs-ap]). On Filestore, export rules name the IP ranges that may
-  mount the share ([Filestore access control][fs-access]). On Azure Files, virtual
+  points][efs-ap]). On Filestore, the default client list is every internal
+  IP address in the VPC network you selected, so any of them can mount the
+  share. Restrict it with IP-based access rules
+  ([Filestore access control][fs-access], checked 2026-11-04). On Azure
+  Files, virtual
   network rules and IP rules decide which clients reach the public endpoint,
   and a private endpoint with public network access disabled keeps the share
   private ([Azure Files networking][az-files-net]). These controls are cited
@@ -643,8 +727,8 @@ of the snapshot identity.
 > **In production: `volumeBindingMode: WaitForFirstConsumer` is mandatory for
 > cloud block storage.** `Immediate` strands the zonal disk in a possibly
 > wrong/empty zone and force-pins all future Pods there. Use
-> `WaitForFirstConsumer` (cloud default classes do) so the disk is created in
-> the scheduled Pod's zone — the [Part 03
+> `WaitForFirstConsumer` (the GKE lab cluster's default class does; see step
+> 2) so the disk is created in the scheduled Pod's zone: the [Part 03
 > ch.04](../03-config-and-storage/04-persistent-storage.md) rule, now a hard
 > cloud requirement, and pair it with AZ-aware scheduling ([Part 04
 > ch.02](../04-scheduling/02-affinity-taints-topology.md)).
@@ -660,9 +744,9 @@ of the snapshot identity.
 
 > **In production: size for online expansion, not migration; monitor PV
 > usage.** Set `allowVolumeExpansion: true` and confirm the cloud CSI driver
-> resizes **online**, as its docs state. Growing the Bookstore
-> Postgres volume is then a one-line PVC patch with no downtime. Alert on PV
-> capacity **before** full ([Part 06
+> resizes **online** (the GKE run in *How it works* did). Growing the
+> Bookstore Postgres volume is then a one-line PVC patch with no downtime.
+> Alert on PV capacity **before** full ([Part 06
 > ch.01](../06-production-readiness/01-observability-metrics.md)) — a full DB
 > volume is an outage, and a migration between volumes is far worse than a
 > resize ([Part 03 ch.04](../03-config-and-storage/04-persistent-storage.md)).
@@ -737,7 +821,7 @@ allowVolumeExpansion: true                 # grow online, never migrate
 Checklist:
 
 - [ ] Cloud CSI driver installed (**managed add-on** / pinned Helm) using
-      **workload identity** ([ch.03](03-cloud-identity.md)) — no static key
+      **IRSA** on EKS ([ch.03](03-cloud-identity.md)), with no static key
 - [ ] StorageClass: `WaitForFirstConsumer` (zonal — **mandatory**), `Retain`
       for the DB disk, `encrypted: "true"` with a customer-managed key,
       `allowVolumeExpansion: true`
@@ -813,13 +897,13 @@ Checklist:
   modes — the model the cloud CSI driver implements).
 - Official: Amazon EBS CSI driver
   <https://docs.aws.amazon.com/eks/latest/userguide/ebs-csi.html>, GKE
-  persistent volumes / PD CSI
-  <https://cloud.google.com/kubernetes-engine/docs/concepts/persistent-volumes>,
+  [persistent volumes / PD CSI][gke-pv],
   Azure Disk/Files CSI
   <https://learn.microsoft.com/en-us/azure/aks/csi-storage-drivers>, and the
   Kubernetes VolumeSnapshot docs
   <https://kubernetes.io/docs/concepts/storage/volume-snapshots/>.
-- Cited in this chapter, all checked 2026-10-31: EBS CSI driver parameters
+- Cited in this chapter, checked 2026-10-31 except the GKE encryption-key and
+  Filestore tier pages (2026-11-04): EBS CSI driver parameters
   <https://github.com/kubernetes-sigs/aws-ebs-csi-driver/blob/master/docs/parameters.md>;
   AWS EBS encryption
   <https://docs.aws.amazon.com/ebs/latest/userguide/ebs-encryption.html>; AWS
@@ -841,3 +925,6 @@ Checklist:
 [efs-ap]: https://docs.aws.amazon.com/efs/latest/ug/efs-access-points.html
 [fs-access]: https://docs.cloud.google.com/filestore/docs/access-control
 [az-files-net]: https://learn.microsoft.com/en-us/azure/storage/files/storage-files-networking-overview
+[fs-tiers]: https://docs.cloud.google.com/filestore/docs/service-tiers
+[gke-pv]: https://docs.cloud.google.com/kubernetes-engine/docs/concepts/persistent-volumes
+[gke-pd-csi]: https://docs.cloud.google.com/kubernetes-engine/docs/how-to/persistent-volumes/gce-pd-csi-driver

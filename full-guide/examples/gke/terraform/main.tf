@@ -54,10 +54,11 @@ resource "google_compute_subnetwork" "lab" {
 # without Workload Identity, acts as this account. The Compute Engine
 # default SA usually holds roles/editor on the whole project, so a node on
 # it is one container escape away from project-wide write. This account
-# gets the minimum a GKE node needs (logs, metrics, metadata:
-# roles/container.defaultNodeServiceAccount) plus read-only image pulls
-# from Artifact Registry in this project. Workloads that need more get it
-# through Workload Identity, never through the node.
+# gets the minimum a GKE node needs (write logs and metrics, list metric
+# descriptors and time series: roles/container.defaultNodeServiceAccount)
+# plus read-only image pulls from Artifact Registry in this project.
+# Workloads that need more get it through Workload Identity, never through
+# the node.
 resource "google_service_account" "nodes" {
   account_id   = "${var.cluster_name}-nodes"
   display_name = "GKE nodes for ${var.cluster_name} (least privilege)"
@@ -91,6 +92,12 @@ resource "google_container_cluster" "lab" {
 
   network    = google_compute_network.lab.id
   subnetwork = google_compute_subnetwork.lab.id
+
+  # Dataplane V2 (Cilium-based). Without it GKE runs kube-proxy with no
+  # NetworkPolicy enforcement: policies apply cleanly and block nothing, so
+  # every policy from Part 05 would be decoration. It can only be set when the
+  # cluster is created.
+  datapath_provider = "ADVANCED_DATAPATH"
 
   networking_mode = "VPC_NATIVE"
   ip_allocation_policy {
@@ -131,11 +138,78 @@ resource "google_container_cluster" "lab" {
   # workload simply goes Pending rather than silently provisioning nodes.
   # Left off deliberately for a lab; turn it on in the autoscaling chapter.
 
+  # Who can reach the PUBLIC control plane endpoint. The default is the whole
+  # internet (health checks answer anonymously, everything else wants
+  # credentials) plus every Google Cloud public IP. Nodes and pods reach the
+  # control plane over internal addresses, so this does not cut them off.
+  # The cost is that you must list your own address in authorized_cidrs.
+  master_authorized_networks_config {
+    gcp_public_cidrs_access_enabled = false
+
+    dynamic "cidr_blocks" {
+      for_each = var.authorized_cidrs
+      content {
+        cidr_block   = cidr_blocks.value
+        display_name = "admin-${cidr_blocks.key}"
+      }
+    }
+  }
+
+  # Refuse NEW RBAC bindings whose subject is system:authenticated (which on
+  # GKE includes anyone with a Google account), system:unauthenticated or
+  # system:anonymous. GKE's own default bindings to those groups stay.
+  # Existing non-default bindings are not removed by turning this on.
+  rbac_binding_config {
+    enable_insecure_binding_system_authenticated   = false
+    enable_insecure_binding_system_unauthenticated = false
+  }
+
+  # Private nodes (no public IP) are opt-in: they need Cloud NAT, which bills.
+  # Dynamic, so with private_nodes = false the config is exactly what it was
+  # before this variable existed.
+  dynamic "private_cluster_config" {
+    for_each = var.private_nodes ? [1] : []
+    content {
+      enable_private_nodes = true
+    }
+  }
+
+  # Application-layer encryption of Secrets with your own Cloud KMS key.
+  # Opt-in: it needs a key you create, the KMS API, and an IAM grant.
+  dynamic "database_encryption" {
+    for_each = var.secrets_kms_key == "" ? [] : [var.secrets_kms_key]
+    content {
+      state    = "ENCRYPTED"
+      key_name = database_encryption.value
+    }
+  }
+
+  # Binary Authorization is billed per cluster per hour and does nothing
+  # until a policy exists, so it is opt-in. See variables.tf.
+  dynamic "binary_authorization" {
+    for_each = var.enable_binauthz ? [1] : []
+    content {
+      evaluation_mode = "PROJECT_SINGLETON_POLICY_ENFORCE"
+    }
+  }
+
   resource_labels = local.labels
 
   lifecycle {
     ignore_changes = [initial_node_count]
   }
+
+  # Fail before the spend starts. Twice a first apply created this cluster
+  # and then failed on something that should have come first: the budget on
+  # 2026-09-03, and the node role grants on 2026-11-04 (Cloud Resource
+  # Manager API disabled). Both left a billable cluster behind. The NAT is
+  # here too: with private_nodes the throwaway default pool has no public IP
+  # either, so it needs the NAT as much as the real pool does.
+  depends_on = [
+    google_project_iam_member.nodes,
+    google_billing_budget.lab,
+    google_compute_router_nat.nat,
+  ]
 }
 
 resource "google_container_node_pool" "primary" {
@@ -144,6 +218,14 @@ resource "google_container_node_pool" "primary" {
   location = var.zone
 
   node_count = var.node_count
+
+  # No public IP on the nodes when private_nodes is set (see nat.tf).
+  dynamic "network_config" {
+    for_each = var.private_nodes ? [1] : []
+    content {
+      enable_private_nodes = true
+    }
+  }
 
   node_config {
     machine_type = var.machine_type
@@ -168,6 +250,15 @@ resource "google_container_node_pool" "primary" {
       mode = "GKE_METADATA"
     }
 
+    # Shielded nodes are on by default; Secure Boot is not. It checks the
+    # signatures of the boot components (bootloader, kernel) at boot. On
+    # Container-Optimized OS it does not change kernel module loading, which
+    # that image controls separately.
+    shielded_instance_config {
+      enable_secure_boot          = true
+      enable_integrity_monitoring = true
+    }
+
     labels = local.labels
 
     metadata = {
@@ -180,6 +271,10 @@ resource "google_container_node_pool" "primary" {
     auto_upgrade = true
   }
 
-  # Nodes must not boot before their account can write logs and pull images.
-  depends_on = [google_project_iam_member.nodes]
+  # Nodes must not boot before their account can write logs and pull images,
+  # nor, with private_nodes, before the NAT that lets them pull anything.
+  depends_on = [
+    google_project_iam_member.nodes,
+    google_compute_router_nat.nat,
+  ]
 }

@@ -57,12 +57,13 @@ Gateway/NetworkPolicy objects (**unchanged** — that is the point), wired into
 the cloud's VPC, CNI, and load balancers. The reference is *Production
 Kubernetes* (Pod Networking / Service Routing).
 
-> **Nothing in this chapter runs on a cloud.** Load balancer, DNS and CNI
-> behaviour is cited from each provider's documentation (checked 2026-10-31,
-> links under Further reading), not run. What runs is on the kind lab cluster:
-> the dry-runs that show the Bookstore objects are unchanged, and one Service
-> that shows what a cloud controller is asked to build. Placeholders only: no
-> account IDs, certificate ARNs or public addresses.
+> **Nothing in this chapter runs on AWS or AKS.** Their load balancer, DNS and
+> CNI behaviour is cited from each provider's documentation (checked
+> 2026-10-31, links under Further reading), not run. The GKE notes say what was
+> run on GKE 1.37.1-gke.1552000 (2026-11-04). What also runs is on the kind lab
+> cluster: the dry-runs that show the Bookstore objects are unchanged, and one
+> Service that shows what a cloud controller is asked to build. Placeholders
+> only: no account IDs, certificate ARNs or public addresses.
 
 ## Mental model
 
@@ -180,13 +181,15 @@ flowchart TB
   ─────────────────────────────────────────────────────────────────────────
   KEY ANNOTATIONS (provider-specific = lock-in; Gateway API = portable):
    internal      :  AWS  aws-load-balancer-scheme: "internal" (also the default)
-                    GKE  spec.loadBalancerClass: networking.gke.io/l4-regional-internal
                     AKS  service.beta.kubernetes.io/azure-load-balancer-internal:"true"
    direct-to-Pod :  AWS  alb.ingress.kubernetes.io/target-type: ip (Ingress)
                     AWS  aws-load-balancer-nlb-target-type: ip (Service)
                     GKE  NEG (container-native) | AKS  cloud-provider-azure annotations
    TLS cert      :  AWS ACM ARN | GKE ManagedCertificate | AKS Key Vault/AGIC
    DNS name      :  external-dns.alpha.kubernetes.io/hostname (ExternalDNS, all)
+  KEY SPEC FIELD (a Service spec field, not an annotation):
+   internal      :  GKE  spec.loadBalancerClass:
+                         networking.gke.io/l4-regional-internal
 
   RULE: type=LoadBalancer = ONE cloud LB + bill PER Service. Front many
         Services with ONE Ingress/Gateway (Part 02 ch.04/05) to share an LB,
@@ -202,7 +205,7 @@ chapter edits **none** of
 [`51-gateway.yaml`](../examples/bookstore/raw-manifests/51-gateway.yaml), or
 [`60-networkpolicy.yaml`](../examples/bookstore/raw-manifests/60-networkpolicy.yaml).
 Cloud settings go in overlays. The overlays are **illustrative** and need a
-cloud account to run, so only the kind steps were run.
+cloud account to run. Only the kind steps and the GKE notes were run.
 
 The manifests here are Services, Ingress and NetworkPolicy objects with no pod
 template, so the workload baseline
@@ -324,11 +327,16 @@ flags and keeps ch.03's hop limit of 1, so the node stays closed. Pass
 `vpcTags` in place of `vpcId` if your VPC is found by tags; the chart lists the
 two as alternatives.
 
-GKE/AKS equivalents: GKE's Ingress/Gateway controllers are built in (no
-controller to install; annotate the object); AKS uses the **App Gateway
-Ingress Controller (AGIC)** add-on or an in-cluster controller such as
-Traefik; ExternalDNS installs the same way with `provider=google` or
-`provider=azure`.
+GKE/AKS equivalents: GKE's Ingress and Gateway controllers are built in (no
+controller to install; annotate the object, and enable the Gateway API as
+step 4 shows); AKS uses the **App Gateway Ingress Controller (AGIC)** add-on
+or an in-cluster controller such as Traefik. ExternalDNS takes
+`provider=google` or `provider=azure`, but the auth differs on GKE. The IRSA
+annotation above does not carry over. On GKE, grant `roles/dns.admin` to the
+`principal://` Workload Identity member for the ExternalDNS Kubernetes service
+account, or use static credentials
+([ExternalDNS GKE tutorial][external-dns-gke], checked 2026-11-04). The GKE
+path is cited, not run, because it needs a Cloud DNS zone.
 
 ### 3. The Bookstore objects, unedited, with cloud overlays
 
@@ -393,9 +401,9 @@ For a pure L4 exposure of just `storefront` (no L7 routing), the Service
 `type: LoadBalancer` form is the alternative. It gets one cloud load balancer
 and one bill per Service, which is why the Bookstore prefers the shared
 Ingress above. The manifest below is complete, and it is the one manifest in
-this chapter that you apply. It is internal on purpose. A public NLB is one
-changed annotation away, and that change is a decision you make, not a default.
-Save it as `storefront-lb.yaml`.
+this chapter that you apply. On AWS it is internal on purpose. A public NLB
+is one changed annotation away, and that change is a decision you make, not a
+default. Save it as `storefront-lb.yaml`.
 
 ```yaml
 apiVersion: v1
@@ -429,6 +437,18 @@ spec:
   defaults to internal too, so the line records the decision. Internet-facing
   would expose every port in `spec.ports` to the internet, filtered only by the
   source ranges.
+- GKE ignores the `aws-*` annotations. Without `spec.loadBalancerClass` or a
+  GKE internal annotation, the Service gets a public EXTERNAL-IP, so the
+  `internal` wording in this section is AWS-only. Observed on GKE
+  1.37.1-gke.1552000 (2026-11-04): the manifest above had an EXTERNAL-IP by
+  the check at 67 seconds after apply, behind a regional external forwarding
+  rule. For an internal load balancer on GKE, set `spec.loadBalancerClass` to
+  `networking.gke.io/l4-regional-internal`. A separate test Service with that
+  class got an internal address and an internal forwarding rule. Google
+  documents that class for GKE 1.33.1-gke.1779000 and later with subsetting
+  on, which GKE 1.36 and later enables, and a
+  `networking.gke.io/load-balancer-type: "Internal"` annotation for all
+  versions ([GKE Service parameters][gke-lb-params], checked 2026-11-04).
 - `loadBalancerSourceRanges` is the Kubernetes field for the client CIDRs
   allowed through, and the AWS annotation sets the same control. The AWS
   Service annotations page says that annotation "will be ignored in case
@@ -439,7 +459,10 @@ spec:
   addresses inside the VPC, and the NetworkPolicy overlay below admits them. The
   range is enforced by the controller on AWS, which is cited here and not run.
   On AKS the check runs before traffic is rewritten, so the rule sees the client
-  address ([AKS network policies][aks-netpol]).
+  address ([AKS network policies][aks-netpol]). On GKE the range is a firewall
+  rule. The run on GKE 1.37.1-gke.1552000 (2026-11-04) showed a request from
+  outside the range getting no response. The `10.0.0.0/16` in this manifest is
+  an AWS placeholder, so replace it with your real client range.
 - `allocateLoadBalancerNodePorts: false` stops Kubernetes from opening a
   NodePort on every node for each Service port. By default it does. Turn it
   off only when the load balancer sends traffic straight to Pods, as
@@ -469,10 +492,16 @@ storefront-lb   LoadBalancer   10.96.163.11   <pending>     80/TCP    3s    app=
 false
 ```
 
-The load balancer's traffic reaches the Pods from VPC addresses, not from the
-`traefik` namespace. Without an overlay, the canonical policy drops it
-once the CNI enforces policy, and the targets fail their health checks. The
-fragment below replaces `spec.ingress` of `allow-ingress-to-http-tiers` in
+Run on GKE 1.37.1-gke.1552000 (2026-11-04): the jsonpath output matched the
+block above and the Service had no NodePort. Its EXTERNAL-IP was still
+`<pending>` at 7 seconds and set by the check at 67 seconds, where kind leaves
+it `<pending>`.
+
+On AWS, with IP targets, the load balancer's traffic reaches the Pods from VPC
+addresses, not from the `traefik` namespace. Without an overlay, the canonical
+policy drops it once the CNI enforces policy, and the targets fail their health
+checks. The fragment below replaces `spec.ingress` of
+`allow-ingress-to-http-tiers` in
 [`60-networkpolicy.yaml`](../examples/bookstore/raw-manifests/60-networkpolicy.yaml).
 That policy has one ingress rule, so the fragment supplies the whole list and
 repeats the `traefik` entry. The ALB in IP mode needs the same `ipBlock`.
@@ -495,6 +524,22 @@ spec:
         - { protocol: TCP, port: 8080 }
 ```
 
+On GKE, with the default `externalTrafficPolicy: Cluster`, the health checks of
+the load balancer that this Service creates probe port 10256 on the nodes from
+Google probe ranges, so Pod NetworkPolicy does not gate them. Observed on GKE
+1.37.1-gke.1552000 (2026-11-04): both backends were HEALTHY before any
+NetworkPolicy existed, and they stayed HEALTHY with this overlay applied.
+
+On GKE, `10.0.0.0/16` is an AWS placeholder. With the default
+`externalTrafficPolicy: Cluster`, a Pod sees the node that first received the
+traffic as the source, so substitute the real node subnet. With `Local`, the
+Pod sees the client address ([GKE network policy][gke-netpol], checked
+2026-11-04). The Pod and Service ranges are separate from the node subnet.
+Observed on GKE 1.37.1-gke.1552000 (2026-11-04): that CIDR matched none of the
+test cluster's node, Pod or Service ranges. Run on GKE 1.37.1-gke.1552000
+(2026-11-04): a client Pod was refused by this overlay alone (the request timed
+out), and it was served once an explicit allow for that Pod was added.
+
 ### 4. Prove the Bookstore objects are unchanged (RUNNABLE on kind now)
 
 The deliverable of the whole guide — the network objects are portable; only
@@ -513,6 +558,23 @@ kubectl apply --dry-run=client -f examples/bookstore/raw-manifests/60-networkpol
 #  Gateway API CRDs are installed: the intrinsic behaviour Part 02 ch.05
 #  already documents; the schema is correct.)
 ```
+
+Run on GKE 1.37.1-gke.1552000 (2026-11-04), the 40, 50 and 60 dry-runs printed
+6, 1 and 11 `created (dry run)` lines, with no errors.
+
+`51-gateway.yaml` needs the Gateway API on GKE. It was off on the test
+cluster: `kubectl get gatewayclass` returned `the server doesn't have a
+resource type "gatewayclass"`. Turn it on with the command below. The command
+changes cluster state, so put it in your IaC rather than running it by hand.
+
+```sh
+gcloud container clusters update CLUSTER --gateway-api=standard
+```
+
+Observed on GKE 1.37.1-gke.1552000 (2026-11-04): after that update the
+`gke-l7-*` GatewayClasses appeared on a later check, not within the first
+minute. A dry run of `51-gateway.yaml` then printed `created (dry run)` for the
+`gatewayclass`, `gateway` and `httproute` objects.
 
 > **Lineage / honest scope.** `storefront` is exposed via the **existing**
 > [`50-ingress.yaml`](../examples/bookstore/raw-manifests/50-ingress.yaml) (or
@@ -731,6 +793,10 @@ kubectl get nodes -L topology.kubernetes.io/zone   # LB targets AZ-spread?
 # Is an enforcer running? A running agent is not proof: prove a denied
 # connection instead (Part 02 ch.06).
 kubectl get pods -n kube-system | grep -Ei 'aws-node|calico|cilium|azure-cni'
+# GKE Dataplane V2: the grep above prints nothing there. Its enforcer is the
+# anetd DaemonSet, which this selector lists. Observed on GKE
+# 1.37.1-gke.1552000 (2026-11-04).
+kubectl get pods -n kube-system -l k8s-app=cilium
 
 # Prove the Bookstore network objects are UNCHANGED (RUNNABLE on kind):
 kubectl apply --dry-run=client -f examples/bookstore/raw-manifests/50-ingress.yaml
@@ -756,9 +822,9 @@ Checklist:
 
 - [ ] API server **private**, or public with **authorised networks**; nodes
       private with NAT egress (Hands-on step 1)
-- [ ] Load balancers **internal by default**; internet-facing and source
-      ranges set on purpose; `allocateLoadBalancerNodePorts: false` where the
-      LB targets Pods
+- [ ] Load balancers **internal by default** on AWS (on GKE, set
+      `spec.loadBalancerClass`); internet-facing and source ranges set on
+      purpose; `allocateLoadBalancerNodePorts: false` where the LB targets Pods
 - [ ] Edge is a **shared Ingress/Gateway**, not N `type: LoadBalancer`
       Services; the LB is **deleted before the cluster** (no orphan bill)
 - [ ] LB controller + ExternalDNS installed via **pinned Helm**, using
@@ -766,7 +832,8 @@ Checklist:
 - [ ] **VPC CIDRs / Pod density planned** (prefix delegation; subnet sizing) —
       no `Pending`-for-no-IP at scale
 - [ ] **Load balancer traffic admitted:** a `60-` overlay `ipBlock` for the LB
-      subnets, because LB traffic matches no namespace selector
+      subnets (on GKE, the node subnet), because LB traffic matches no
+      namespace selector
 - [ ] Managed CNI **actually enforces** `60-networkpolicy.yaml` (VPC CNI
       1.21.0 or later, Dataplane V2, or an AKS `--network-policy` engine),
       proven by a refused connection in CI
@@ -860,12 +927,17 @@ Checklist:
   [ExternalDNS flags][external-dns-flags],
   [Kubernetes Services][k8s-svc], and
   [creating an external load balancer][k8s-lb-svc].
+- Cited for the GKE notes, checked 2026-11-04:
+  [ExternalDNS GKE tutorial][external-dns-gke],
+  [GKE LoadBalancer Service parameters][gke-lb-params], and
+  [GKE network policy][gke-netpol].
 
 [eks-endpoint]: https://docs.aws.amazon.com/eks/latest/userguide/cluster-endpoint.html
 [eks-vpc-cni-netpol]: https://docs.aws.amazon.com/eks/latest/userguide/cni-network-policy.html
 [gke-private]: https://docs.cloud.google.com/kubernetes-engine/docs/how-to/private-clusters
 [gke-internal-lb]: https://docs.cloud.google.com/kubernetes-engine/docs/how-to/internal-load-balancing
 [gke-netpol]: https://docs.cloud.google.com/kubernetes-engine/docs/how-to/network-policy
+[gke-lb-params]: https://docs.cloud.google.com/kubernetes-engine/docs/concepts/service-load-balancer-parameters
 [aks-private]: https://learn.microsoft.com/en-us/azure/aks/private-clusters
 [aks-ip-ranges]: https://learn.microsoft.com/en-us/azure/aks/api-server-authorized-ip-ranges
 [aks-internal]: https://learn.microsoft.com/en-us/azure/aks/internal-lb
@@ -875,5 +947,6 @@ Checklist:
 [aws-lb-ing]: https://kubernetes-sigs.github.io/aws-load-balancer-controller/latest/guide/ingress/annotations/
 [aws-lb-install]: https://kubernetes-sigs.github.io/aws-load-balancer-controller/latest/deploy/installation/
 [external-dns-flags]: https://kubernetes-sigs.github.io/external-dns/latest/docs/flags/
+[external-dns-gke]: https://kubernetes-sigs.github.io/external-dns/latest/docs/tutorials/gke/
 [k8s-svc]: https://kubernetes.io/docs/concepts/services-networking/service/
 [k8s-lb-svc]: https://kubernetes.io/docs/tasks/access-application-cluster/create-external-load-balancer/

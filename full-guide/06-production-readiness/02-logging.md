@@ -1092,10 +1092,13 @@ kubectl -n bookstore delete secret dsn-demo --ignore-not-found
 > **In production:** the choice of store and agent changes, not the model.
 > **EKS**: a Fluent Bit DaemonSet ships to CloudWatch Logs or OpenSearch.
 > **GKE**: Cloud Logging is on by default and the node agent is managed for
-> you. **AKS**: Azure Monitor with Container Insights. All of them consume
-> stdout and stderr, so the "JSON to stdout" contract is portable. Only the
-> backend and the query language change. The access rules in steps 4 and 7
-> still apply to each backend.
+> you. A cluster created without a logging config sends system and workload
+> logs. The guide's lab Terraform (`examples/gke/terraform`) sets logging to
+> SYSTEM_COMPONENTS only, so app stdout does not reach Cloud Logging on the lab
+> cluster. **AKS**: Azure Monitor with Container Insights. All of them can
+> consume stdout and stderr, so the "JSON to stdout" contract is portable.
+> Only the backend and the query language change. The access rules in steps 4
+> and 7 still apply to each backend.
 
 > **In production:** decide retention and cost deliberately. Logs are usually
 > the largest telemetry stream. Set retention per tenant, and sample or drop

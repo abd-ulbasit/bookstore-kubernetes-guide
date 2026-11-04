@@ -220,4 +220,7 @@ spec:
         resources:
           requests:
             storage: 1Gi
-        # storageClassName omitted → default class (kind: "standard", k3d: "local-path")
+        # storageClassName omitted → default class (kind: "standard", k3d:
+        # "local-path"). On the GKE 1.37 test cluster it was "standard-rwo"
+        # (WaitForFirstConsumer), not "standard" (Immediate). kubectl get sc
+        # showed no default marker there, so test with a PVC that has no class.

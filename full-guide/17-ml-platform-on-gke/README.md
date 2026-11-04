@@ -25,8 +25,14 @@ gcloud compute regions describe asia-south1 --format="value(quotas)" | tr ';' '\
 ```
 
 ```
-NVIDIA_L4_GPUS               limit 1   usage 0
-PREEMPTIBLE_NVIDIA_L4_GPUS   limit 1   usage 0
+{'limit': 1.0, 'metric': 'NVIDIA_T4_GPUS', 'usage': 0.0}
+{'limit': 1.0, 'metric': 'NVIDIA_T4_VWS_GPUS', 'usage': 0.0}
+{'limit': 1.0, 'metric': 'PREEMPTIBLE_NVIDIA_T4_GPUS', 'usage': 0.0}
+{'limit': 1.0, 'metric': 'PREEMPTIBLE_NVIDIA_T4_VWS_GPUS', 'usage': 0.0}
+{'limit': 0.0, 'metric': 'COMMITTED_NVIDIA_T4_GPUS', 'usage': 0.0}
+{'limit': 1.0, 'metric': 'NVIDIA_L4_GPUS', 'usage': 0.0}
+{'limit': 1.0, 'metric': 'PREEMPTIBLE_NVIDIA_L4_GPUS', 'usage': 0.0}
+{'limit': 1.0, 'metric': 'COMMITTED_NVIDIA_L4_GPUS', 'usage': 0.0}
 ```
 
 **One L4 covers G1, G2, G3, G5, G6 and G7**, six of the eight labs, including
@@ -74,9 +80,9 @@ permanently and cost nothing until a GPU workload lands. Enable with
 above; raising it without raising quota produces Pending nodes, not more GPUs.
 ## The cost warning, which is different in kind from Part 16
 
-An L4 node is an order of magnitude more expensive than the `e2-standard-2`
-nodes in Part 16. The habits that were merely good practice there are
-load-bearing here:
+An L4 node (`g2-standard-4`, the Terraform default) costs roughly 8 to 9 times
+as much as the `e2-standard-2` nodes in Part 16, at Mumbai (asia-south1) list
+prices. The habits that were merely good practice there are load-bearing here:
 
 - The pool autoscales to zero. **Verify it actually scaled down** after each
   lab, with `kubectl get nodes` and `gcloud compute instances list`, not by

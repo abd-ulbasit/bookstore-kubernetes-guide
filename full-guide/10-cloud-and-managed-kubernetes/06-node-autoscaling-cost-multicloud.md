@@ -58,10 +58,12 @@ cloud cost levers, the honest portability boundary, and a checklist that maps
 every cloud concern back to its Part-10 chapter. The reference is *Production
 Kubernetes* (Autoscaling / Multitenancy) and the Karpenter docs.
 
-> **Nothing in this chapter runs on a cloud.** Node autoscaling and spot act
-> on cloud VM APIs, and this guide's lab has no cloud account, so node
-> behaviour is cited with its check date (2026-10-31) and not run. The checks
-> ran on the lab cluster, a kind cluster named `sf-pilot`. Its captured output
+> **Only the marked GKE step ran on a cloud.** Node autoscaling and spot act
+> on cloud VM APIs. The AWS and Azure behaviour is cited with its check date
+> (2026-10-31) and not run. The GKE behaviour outside the marked step is
+> cited from Google's docs (checked 2026-11-04) and not run. The marked step
+> ran on GKE 1.37.1-gke.1552000 (2026-11-04). The other checks ran on the lab
+> cluster, a kind cluster named `sf-pilot`. Its captured output
 > keeps that name, and `examples/security-lab/evidence/10-06.txt` records the
 > namespace substitution. The Karpenter objects were checked against the CRD
 > schema of the pinned chart. The controller was checked by a server dry-run
@@ -93,7 +95,8 @@ the pricing model; portability = the K8s API is, the cloud plumbing isn't.**
   waste and faster scale. Configured by `NodePool` + `EC2NodeClass` CRDs.
 - **GKE node auto-provisioning / Autopilot; AKS** — GKE NAP creates/sizes node
   pools automatically (CA-plus-shape); **GKE Autopilot** removes node
-  management entirely (you declare Pods, Google sizes/bills the nodes —
+  management entirely (you declare Pods; Google sizes the nodes and bills
+  general-purpose Pods per requested resource; the
   [ch.01](01-managed-kubernetes-model.md) boundary shifts further to the
   provider). AKS offers the cluster autoscaler and Node Autoprovision (NAP),
   which installs Karpenter on the cluster through the AKS Karpenter provider.
@@ -101,8 +104,14 @@ the pricing model; portability = the K8s API is, the cloud plumbing isn't.**
 - **Spot/preemptible is the big lever, for the *right* tier.** On AWS, Spot
   capacity is up to 90% cheaper than On-Demand, and it can be **reclaimed at
   short notice**: 2 minutes on AWS, 30 seconds on Azure (Scheduled Events,
-  best effort), and a preemption notice you configure on GCP (0 or 120
-  seconds). Correct for the **fault-tolerant stateless** Bookstore tiers
+  best effort), and on GCP a Compute Engine Spot VM gets a preemption notice
+  of 0 seconds (the default) or 120 seconds, then up to 30 seconds of
+  best-effort shutdown. On GKE the node gives Pods a 30-second graceful
+  period by default (15 seconds for your Pods, then 15 for system Pods), and
+  a Standard node pool can extend it to 120 seconds in its kubelet settings.
+  A Pod's `terminationGracePeriodSeconds` cannot go past that node period, so
+  handle SIGTERM inside it. Correct for the **fault-tolerant stateless**
+  Bookstore tiers
   (storefront/catalog/orders/payments-worker), protected by **replicas and
   spread** ([Part 04 ch.02](../04-scheduling/02-affinity-taints-topology.md))
   and graceful shutdown ([Part 01
@@ -215,7 +224,10 @@ flowchart TD
   ─────────────────────────────────────────────────────────────────────────
   scales            fixed node GROUPS     individual nodes,  node pools auto
                      (ASG/MIG/VMSS)        JIT right-sized     (NAP); Autopilot
-                                                                = no nodes at all
+                                                                = Google runs
+                                                                and sizes the
+                                                                nodes; you
+                                                                manage none
   node SHAPE        fixed by the group    chosen per pending  auto-chosen
                      (you pick up front)   Pod (broad set)
   trigger           Pending Pods ->        Pending Pods ->    Pending Pods ->
@@ -469,6 +481,39 @@ kubectl get nodes -L karpenter.sh/capacity-type -L topology.kubernetes.io/zone
 #   its tolerations allow, spot included.
 ```
 
+**Run on GKE 1.37.1-gke.1552000 (2026-11-04).** On GKE the equivalent bound
+is a node-pool setting, not a NodePool object. The test used a two-node pool
+of `e2-standard-2` machines in a zonal cluster. `CLUSTER` and `POOL` stand for
+your names:
+
+```sh
+# Bound the cluster autoscaler on one pool, between 1 and 3 nodes
+gcloud container clusters update CLUSTER --enable-autoscaling \
+  --node-pool POOL --min-nodes 1 --max-nodes 3
+# Turn the autoscaler off again
+gcloud container clusters update CLUSTER --no-enable-autoscaling \
+  --node-pool POOL
+# Put the pool back to 2 nodes
+gcloud container clusters resize CLUSTER --node-pool POOL \
+  --num-nodes 2 --quiet
+```
+
+A 210-replica Deployment whose containers request `10m` CPU and `32Mi`
+memory left 20 Pods `Pending`, and the autoscaler added a third node. The
+scheduler event was `0/2 nodes are available: 2 Too many pods.` Each
+`e2-standard-2` node had 110 allocatable Pods, so tiny requests hit the
+per-node Pod limit before CPU. For your own exercise, use enough replicas or
+larger requests to force `Pending`. The pool peaked at 3 nodes, never above
+the bound, and all 210 Pods were Ready about two minutes after the Deployment
+was created.
+
+`--max-nodes` counts nodes per zone, and the GKE test cluster was zonal, so
+3 was the pool total. On a regional cluster, the `gcloud` help names
+`--total-max-nodes` for the whole pool (not run here).
+
+NAP was not run here. The `gcloud` help for `--enable-autoprovisioning` says
+it requires `--max-cpu` and `--max-memory`.
+
 ### 4. The spot + PDB story for the stateless tiers (no app change)
 
 The Bookstore is **already built for spot** — no manifest change needed:
@@ -696,7 +741,9 @@ rather than dry-running them. The two refusals are omitted above.
   alternatives.
 - **GKE Autopilot / NAP and AKS — the boundary shifts, the SLO doesn't.** GKE
   **NAP** is CA that also *creates and sizes* node pools (shape + count);
-  **Autopilot** removes node management and bills per Pod resource — the
+  **Autopilot** removes node management and bills general-purpose Pods per
+  requested resource. Pods that request specific hardware (e.g. GPUs) are
+  billed per node plus a node-management premium. The
   [ch.01](01-managed-kubernetes-model.md) responsibility boundary moves
   further to Google, but **the app SLO, PDBs, requests, and the FinOps loop
   stay yours**. AKS offers the cluster autoscaler and NAP, which installs
@@ -729,10 +776,11 @@ rather than dry-running them. The two refusals are omitted above.
 > 06 ch.04](../06-production-readiness/04-autoscaling.md)) only deliver
 > capacity if `Pending` Pods trigger nodes. Use **Karpenter** on EKS
 > (right-sized JIT + consolidation + spot — the Bookstore file), **NAP/
-> Autopilot** on GKE, **NAP** (or the **cluster autoscaler**) on AKS. Bound it (`limits` /
-> ASG max / namespace ResourceQuota — [Part 06
+> Autopilot** on GKE, **NAP** (or the **cluster autoscaler**) on AKS. Bound it
+> (`limits` on Karpenter, ASG max, `--max-nodes` on GKE,
+> `--max-cpu --max-memory` for NAP, namespace ResourceQuota; see [Part 06
 > ch.04](../06-production-readiness/04-autoscaling.md)) so scaling can't
-> exhaust the bill.
+> exhaust the bill. The GKE commands are in section 3.
 
 > **In production: spot the fault-tolerant tiers (spread + graceful),
 > never the data tier.** Spot is up to 90% off on AWS, and it is safe for the
@@ -906,7 +954,7 @@ Cloud production-readiness checklist (each concern → its Part-10 chapter):
   Autoscaler
   <https://github.com/kubernetes/autoscaler/tree/master/cluster-autoscaler>,
   GKE node auto-provisioning
-  <https://cloud.google.com/kubernetes-engine/docs/how-to/node-auto-provisioning>,
+  <https://docs.cloud.google.com/kubernetes-engine/docs/how-to/node-auto-provisioning>,
   AKS cluster autoscaler
   <https://learn.microsoft.com/en-us/azure/aks/cluster-autoscaler>, AKS Node
   Autoprovision
@@ -927,5 +975,10 @@ Cloud production-readiness checklist (each concern → its Part-10 chapter):
   <https://docs.aws.amazon.com/IAM/latest/UserGuide/id_roles_use_passrole.html>,
   EC2 instance metadata options
   <https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/configuring-instance-metadata-options.html>,
-  Google Cloud Spot VMs <https://docs.cloud.google.com/compute/docs/instances/spot>,
   and Azure Spot VMs <https://learn.microsoft.com/en-us/azure/virtual-machines/spot-vms>.
+- Cited, not run (checked 2026-11-04): Google Cloud Spot VMs
+  <https://docs.cloud.google.com/compute/docs/instances/spot>, GKE Spot VMs
+  <https://docs.cloud.google.com/kubernetes-engine/docs/concepts/spot-vms>,
+  GKE pricing <https://docs.cloud.google.com/kubernetes-engine/pricing>, and
+  the GKE cluster autoscaler
+  <https://docs.cloud.google.com/kubernetes-engine/docs/how-to/cluster-autoscaler>.
