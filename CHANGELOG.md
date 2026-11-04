@@ -50,6 +50,20 @@ versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `BENCHMARKS.md` with k6 latency results against `catalog/`.
 
 ### Changed
+- Part 10's GKE steps ran on a live GKE 1.37.1-gke.1552000 cluster on
+  2026-11-04. What ran is labelled in each chapter, and the claims the run
+  disproved are corrected: Secret reads leave no audit entry by default
+  (10.01), the provisioning steps assume a regional cluster and a published
+  image (10.02), the Workload Identity egress rule depends on the dataplane
+  (10.03), the GKE default StorageClass and snapshot driver (10.05), and the
+  Autopilot and Spot wording (10.06). Chapters 05.00, 06.01, 06.02, 07.05,
+  11.10, 13.04 and the Part 16 and 17 READMEs get their GKE claims fixed too.
+- The GKE lab is hardened and the hardening is verified live: Dataplane V2,
+  Secure Boot, a public API endpoint limited to `authorized_cidrs`, refused
+  bindings to `system:authenticated`, and `verify.sh` running non-root in
+  `restricted` namespaces with a NetworkPolicy check (12 of 12 pass).
+  Private nodes with Cloud NAT, Secrets encryption with a KMS key and Binary
+  Authorization are opt-in variables, off by default.
 - Chapters 05.07 and 13.02 label the namespaces that relied on the old
   default, since an unlabelled namespace now refuses a privileged Pod.
 - The Bookstore broker has no `guest` account. RabbitMQ takes its login from
@@ -251,6 +265,12 @@ versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Heavy labs in Parts 05 and 06 (05.05, 05.07, 05.08, 06.01, 06.04) run for real on a three-node kind cluster, with captured output in place of the not-run labels, and the catalog, storefront and payments-worker spreads honour node taints (`nodeTaintsPolicy: Honor`).
 
 ### Fixed
+- The GKE lab budget counts spend before credits; it measured spend after
+  credits, so on a promotional credit it never alerted. Its filter uses the
+  project number, which removes a diff on every plan.
+- The GKE cluster now waits for the node role grants and the budget, so a
+  failed grant (the Cloud Resource Manager API was off on a fresh project)
+  stops the apply before anything bills.
 - Standalone EKS add-ons (kube-proxy, CoreDNS, EBS CSI) now follow
   cluster upgrades through an `aws_eks_addon_version` lookup; with
   `addon_version = null` they stayed on their create-time build.

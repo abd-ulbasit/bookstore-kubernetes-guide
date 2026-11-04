@@ -63,3 +63,57 @@ variable "billing_account_id" {
   type        = string
   default     = ""
 }
+
+variable "authorized_cidrs" {
+  description = <<-EOT
+    CIDRs allowed to reach the PUBLIC control plane endpoint, for example your
+    own address as "203.0.113.7/32". Required, with no default: the open
+    default leaves the API server reachable from the whole internet, and an
+    empty list locks you out of it. Nodes and pods can always reach the
+    control plane. Google Cloud public IPs are not allowed in addition. If
+    your address changes you are locked out until you run: gcloud container
+    clusters update <cluster_name> --zone <zone>
+    --enable-master-authorized-networks --master-authorized-networks=<ip>/32
+  EOT
+  type        = list(string)
+
+  validation {
+    condition     = length(var.authorized_cidrs) > 0
+    error_message = "Set at least one CIDR, or you lock yourself out of the API server."
+  }
+}
+
+variable "private_nodes" {
+  description = <<-EOT
+    Give the nodes no public IP address and add Cloud NAT so they can still
+    pull images (nat.tf). Off by default: NAT bills per node and per GiB,
+    and this is the Part 16 chapter 09 exercise. Set it when the cluster is
+    created: flipping it on a running lab has not been tested.
+  EOT
+  type        = bool
+  default     = false
+}
+
+variable "secrets_kms_key" {
+  description = <<-EOT
+    Optional Cloud KMS key for application-layer encryption of Kubernetes
+    Secrets, as projects/<p>/locations/<region>/keyRings/<r>/cryptoKeys/<k>.
+    Empty (the default) leaves Secrets on Google's default encryption at
+    rest. The GKE service agent needs roles/cloudkms.cryptoKeyEncrypterDecrypter
+    on the key, and the Cloud KMS API must be enabled; key versions and key
+    operations are billed.
+  EOT
+  type        = string
+  default     = ""
+}
+
+variable "enable_binauthz" {
+  description = <<-EOT
+    Turn on Binary Authorization in project-singleton enforce mode. Off by
+    default: it is billed per cluster per hour, and the default project
+    policy allows every image, so it enforces nothing until you write a
+    policy (Part 16 chapter 13).
+  EOT
+  type        = bool
+  default     = false
+}

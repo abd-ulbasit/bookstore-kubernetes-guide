@@ -11,6 +11,16 @@ node_count   = 2
 machine_type = "e2-standard-2"
 use_spot     = true
 
+# Required: who may reach the public API server. Use your own address
+# (find it with: curl -s https://checkip.amazonaws.com). If it changes later
+# you are locked out; the fix is in the README.
+authorized_cidrs = ["203.0.113.7/32"] # REPLACE with your own address
+
+# Optional, all off by default. private_nodes adds Cloud NAT, which bills.
+# private_nodes   = false
+# secrets_kms_key = ""   # a full Cloud KMS key resource name
+# enable_binauthz = false
+
 # Optional: creates a budget ALERT (not a cap). Find it with:
 #   gcloud billing accounts list
 billing_account_id = ""

@@ -44,14 +44,19 @@ chapter shows the three mainstream ways to do that for the *same* cluster, the
 trade-offs, and how the **unchanged Bookstore** then deploys onto it. The
 reference is *Production Kubernetes* (Deployment Models).
 
-> **Scope of this chapter.** No cluster here runs on a cloud. The provider and
-> IaC commands are cited to their upstream documentation, checked 2026-10-31,
-> and are stated as **cited, not run**. What ran locally is named where it
-> appears: the Terraform root module passes `terraform fmt`, `terraform init
-> -backend=false` and `terraform validate`, and Trivy config scans it. Run the
-> cloud commands only against clusters you own. Placeholders only:
-> `$CLUSTER_NAME`, `your-org`, `123456789012`, `us-east-1`,
-> `registry.example.com`.
+> **Scope of this chapter.** No cluster is created on a cloud here. The
+> provider and IaC commands are cited to their upstream documentation,
+> checked 2026-10-31, and are stated as **cited, not run**, apart from the
+> `--workload-pool` expression in step 1 and the lab-cluster checks marked
+> (checked 2026-11-04). Those ran against an existing GKE lab cluster
+> (**Run on GKE 1.37.1-gke.1552000 (2026-11-04)**). The other facts marked
+> (checked 2026-11-04) come from a Docker Hub query, the local `gcloud` help,
+> Google's docs or the repo's files, and none of them ran on a cluster. What
+> ran locally is named where it appears: the Terraform root module passes
+> `terraform fmt`, `terraform init -backend=false` and `terraform validate`,
+> and Trivy config scans it. Run the cloud commands only against clusters you
+> own. Placeholders only: `$CLUSTER_NAME`, `your-org`, `123456789012`,
+> `us-east-1`, `registry.example.com`.
 
 ## Mental model
 
@@ -176,14 +181,25 @@ flowchart TB
 **Assumed working directory: the guide repo root (`full-guide/`).** This
 chapter adds **no workload manifests**. The Bookstore is *unchanged* on a
 managed cluster, which is the point of standardising on portable Kubernetes
-APIs. The cluster-creation steps are cited, not run. The Terraform root module
-is the one part checked locally.
+APIs. The cluster-creation steps are cited, not run, apart from the
+`--workload-pool` expression in step 1. The Terraform root module is the one
+part checked locally.
 
-> **Cited, not run.** The `eksctl`, `gcloud`, `az` and `clusterctl` behaviour
-> below comes from upstream documentation, checked 2026-10-31. None of it was
-> run against a cloud. Creating a cluster costs money from the first minute,
-> so run these steps only in an account you own, with a unique cluster name
-> (`$CLUSTER_NAME`), and tear down with step 5.
+> **Run on GKE 1.37.1-gke.1552000 (2026-11-04):** the `--workload-pool`
+> expression in the `gcloud` step below, which expands to
+> `<project-id>.svc.id.goog`, the value an existing lab cluster reports as
+> its `workloadIdentityConfig.workloadPool`. Three checks marked (checked
+> 2026-11-04) also ran against that cluster: `get-credentials` for a zonal
+> cluster, the auth plugin entry in the generated kubeconfig, and the dev
+> overlay's Ingress (a server dry-run and `kubectl get ingressclass`).
+
+> **Cited, not run.** The `eksctl`, `gcloud`, `az` and `clusterctl`
+> behaviour below comes from upstream documentation, checked 2026-10-31.
+> The other facts marked (checked 2026-11-04) come from a Docker Hub query,
+> the local `gcloud` help, Google's docs or the repo's files, and none of
+> them ran on a cluster. Creating a cluster costs money from the first
+> minute, so run these steps only in an account you own, with a unique
+> cluster name (`$CLUSTER_NAME`), and tear down with step 5.
 
 ### 1. Provision the same cluster via the provider CLI
 
@@ -232,10 +248,19 @@ kubectl get nodes -L topology.kubernetes.io/zone
 **Google, `gcloud` (flag-driven, so wrap it in a script for repeatability):**
 
 ```sh
-# Regional cluster: --num-nodes is per zone, so 1 here means 3 nodes in total.
-# The regular channel is the default; the cluster is enrolled in it.
-# Private nodes and a private endpoint keep the nodes and the API off the
-# internet (the network design is 04's). Workload Identity is ch.03's.
+# The commands assume a regional cluster (--region). For a zonal cluster, use
+# --zone ZONE in place of --region (see get-credentials below).
+# --num-nodes is per zone, so 1 here means 3 nodes in total. --min-nodes and
+# --max-nodes are per zone too, so this pool scales between 3 and 9 nodes
+# across three zones (checked 2026-11-04).
+# --release-channel regular pins the cluster to the Regular channel.
+# gcloud also picks Regular when neither a channel nor a version is given
+# (checked 2026-11-04).
+# Private nodes and a private endpoint give the nodes and the API no public
+# IPs (the network design is 04's). Workload Identity is ch.03's.
+# Private nodes need outbound access to pull images (checked 2026-11-04):
+# add Cloud NAT on the cluster network (see ch.04) or mirror the images,
+# otherwise the step 4 pods stay in ImagePullBackOff.
 gcloud container clusters create $CLUSTER_NAME \
   --region us-central1 \
   --release-channel regular \
@@ -246,7 +271,16 @@ gcloud container clusters create $CLUSTER_NAME \
   --enable-private-nodes \
   --enable-private-endpoint \
   --workload-pool=$(gcloud config get-value project).svc.id.goog
+# kubectl needs the GKE auth plugin (checked 2026-11-04). Install it first
+# (on apt, `apt-get install google-cloud-cli-gke-gcloud-auth-plugin`):
+gcloud components install gke-gcloud-auth-plugin
 gcloud container clusters get-credentials $CLUSTER_NAME --region us-central1
+# Zonal cluster: use --zone asia-south1-a in place of --region
+# (checked 2026-11-04).
+# With --enable-private-endpoint, kubectl works only from inside the VPC. For
+# access from a laptop, create the cluster with --enable-dns-access and add
+# --dns-endpoint to get-credentials (checked 2026-11-04; see the GKE private
+# clusters page in Further reading).
 ```
 
 **Azure, `az aks create`:**
@@ -524,13 +558,37 @@ deploys with the *same* manifests Parts 00–09 built:
 # kubectl context now points at the MANAGED cluster (step 1, 2 or 3).
 # The prod overlay pins registry.example.com images. Push the Bookstore images
 # to your registry first, then point the overlay at them with
-# `kustomize edit set image` (see the kustomize README). For a local rehearsal,
-# use the dev overlay:
+# `kustomize edit set image` (see the kustomize README). The dev overlay
+# assumes images loaded locally (for example kind load), so it fits a local
+# rehearsal. The dev images are not on Docker Hub (checked 2026-11-04), so on
+# GKE push them to Artifact Registry and point the dev overlay at them first.
+# AR_LOCATION is a region, for example us-central1.
+gcloud services enable artifactregistry.googleapis.com
+gcloud artifacts repositories create bookstore --repository-format=docker \
+  --location=$AR_LOCATION
+gcloud auth configure-docker $AR_LOCATION-docker.pkg.dev
+AR=$AR_LOCATION-docker.pkg.dev/$(gcloud config get-value project)/bookstore
+# Build amd64 images: GKE e2 nodes are x86-64, and an Apple silicon Mac builds
+# arm64 by default.
+for s in catalog orders payments-worker storefront; do
+  docker build --platform linux/amd64 -t $AR/$s:dev examples/bookstore/app/$s
+  docker push $AR/$s:dev
+done
+(cd examples/bookstore/kustomize/overlays/dev && kustomize edit set image \
+  bookstore/catalog=$AR/catalog:dev bookstore/orders=$AR/orders:dev \
+  bookstore/payments-worker=$AR/payments-worker:dev \
+  bookstore/storefront=$AR/storefront:dev)
+# That edits the tracked overlays/dev/kustomization.yaml. Restore it after
+# teardown (git checkout -- that file) or the kind rehearsal pulls from AR.
 kubectl apply -k examples/bookstore/kustomize/overlays/dev
 kubectl get pods -n bookstore -w
 # A real cluster also needs a StorageClass for postgres (ch.05), a load balancer
 # or Ingress for storefront (ch.04), and cloud IAM for any tier that uses a
-# bucket (ch.03). The workload itself does not change.
+# bucket (ch.03). The dev Ingress sets ingressClassName: traefik, so it needs
+# a Traefik controller. Without one, the server accepts the Ingress (a server
+# dry-run, checked 2026-11-04) but nothing routes traffic for it: an Ingress
+# does nothing until a controller satisfies it. The workload itself does not
+# change.
 ```
 
 > **Scope.** The dev overlay renders the same Bookstore on any cluster, and the
@@ -548,7 +606,9 @@ that created it:
 ```sh
 # eksctl: deletes the cluster, node groups, AND the CFN-managed VPC/IAM:
 eksctl delete cluster --name $CLUSTER_NAME --region us-east-1
-# gcloud / az equivalents:
+# gcloud / az equivalents. The gcloud lines assume a regional cluster; for a
+# zonal one, use --zone ZONE in place of --region.
+gcloud container clusters list        # check the cluster is listed first
 gcloud container clusters delete $CLUSTER_NAME --region us-central1
 az aks delete -g $RG -n $CLUSTER_NAME --yes ; az group delete -n $RG --yes
 # Terraform: exact, state-driven teardown (removes EXACTLY what it created):
@@ -558,10 +618,15 @@ kubectl delete cluster bookstore        # CAPI controllers tear down the cloud i
 
 # THEN sweep the orphans IaC/CLI may NOT remove (the bill that outlives you):
 #  • LoadBalancer Services -> cloud LBs (ch.04): `kubectl delete svc` BEFORE
-#    deleting the cluster, or the LB + its EIP leak.
+#    deleting the cluster, or the LB and its public IP leak (EIP on AWS,
+#    external IP address on GCP).
 #  • Retain-policy PVs -> EBS/PD/Azure disks (ch.05) survive on purpose.
 #  • Snapshots, NAT gateways, unattached EIPs. Confirm in the cloud console /
 #    `aws elbv2 describe-load-balancers` / cost explorer.
+#  • GCP sweep: `gcloud compute forwarding-rules list`,
+#    `gcloud compute addresses list`, `gcloud compute disks list`,
+#    `gcloud compute routers nats list --router ROUTER` (Cloud NAT), and
+#    `gcloud container clusters list`.
 ```
 
 ## How it works under the hood
@@ -570,8 +635,8 @@ kubectl delete cluster bookstore        # CAPI controllers tear down the cloud i
   `eksctl create cluster -f` translates the `ClusterConfig` into
   CloudFormation stacks (VPC/subnets, the EKS control plane, each managed node
   group's autoscaling group + launch template, IAM roles, the OIDC provider if
-  `withOIDC`). `gcloud`/`az` call the GKE/AKS APIs directly with Deployment
-  Manager/ARM underneath. The control plane is created in the provider's
+  `withOIDC`). `gcloud`/`az` call the GKE/AKS APIs directly, with ARM
+  underneath AKS. The control plane is created in the provider's
   account ([ch.01](01-managed-kubernetes-model.md)); what `eksctl` *manages
   for you* is the **node-group autoscaling group + IAM + VPC** — i.e. the
   "your side of the boundary" plumbing.
@@ -653,6 +718,8 @@ kubectl delete cluster bookstore        # CAPI controllers tear down the cloud i
 > who can `apply`; gate `apply` behind a reviewed `plan` (Atlantis / Terraform
 > Cloud / a CI plan comment). A corrupted or lost state file detaches
 > Terraform from reality. Treat it with the same care as etcd ([Part 08 ch.02](../08-day-2-operations/02-backup-and-dr.md)).
+> The GKE example module at `examples/gke/terraform` keeps local state, so it
+> is fit for a single-operator lab only (checked 2026-11-04).
 
 > **In production: size node groups for AZ failure and surge upgrades.** Spread
 > node pools across AZs ([ch.01](01-managed-kubernetes-model.md)); set
@@ -694,7 +761,8 @@ kubectl delete cluster bookstore        # CAPI controllers tear down the cloud i
 eksctl create cluster -f cluster-eks.yaml          # AWS (declarative YAML)
 gcloud container clusters create $CLUSTER_NAME --region <R> \
   --release-channel regular --enable-ip-alias --enable-private-nodes \
-  --enable-private-endpoint
+  --enable-private-endpoint \
+  --workload-pool=$(gcloud config get-value project).svc.id.goog
 az aks create -g $RG -n $CLUSTER_NAME --zones 1 2 3 --enable-cluster-autoscaler \
   --enable-private-cluster --enable-oidc-issuer --enable-workload-identity
 
@@ -767,9 +835,9 @@ Checklist:
       its reason
 - [ ] Node pools **AZ-spread**, `maxUnavailable` set so an upgrade honors
       **PDBs** ([Part 06 ch.05](../06-production-readiness/05-reliability-and-disruptions.md))
-- [ ] OIDC issuer enabled before a workload needs it (`withOIDC` /
-      `--workload-pool` / `--enable-oidc-issuer`) for IRSA, GKE and Entra
-      ([ch.03](03-cloud-identity.md)); Pod Identity needs none
+- [ ] OIDC issuer enabled before a workload needs it: `withOIDC` for IRSA,
+      `--workload-pool=PROJECT.svc.id.goog` for GKE, `--enable-oidc-issuer`
+      for Entra ([ch.03](03-cloud-identity.md)); Pod Identity needs none
 - [ ] **Teardown by the same code path** + an orphan sweep (LBs/disks/
       snapshots/EIPs); resources tagged owner/TTL; cost-anomaly alert on
 - [ ] The **Bookstore manifests are unchanged** on the provisioned cluster
@@ -840,8 +908,9 @@ Background:
   vs Cluster API, and reproducibility as a production requirement).
 - **Lukša, _Kubernetes in Action_ 2e, ch.3** (how a cluster is composed — the
   structural basis for what these tools are actually creating).
-- Official: `eksctl` <https://eksctl.io/>, GKE cluster creation
-  <https://cloud.google.com/kubernetes-engine/docs/how-to/creating-a-zonal-cluster>,
+- Official: `eksctl` <https://eksctl.io/>, GKE zonal cluster creation (a
+  zonal example, unlike the regional steps above; checked 2026-11-04)
+  <https://docs.cloud.google.com/kubernetes-engine/docs/how-to/creating-a-zonal-cluster>,
   AKS cluster creation
   <https://learn.microsoft.com/en-us/azure/aks/learn/quick-kubernetes-deploy-cli>,
   Terraform on Kubernetes/EKS

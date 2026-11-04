@@ -79,8 +79,11 @@ chapter's planes cover storefront customers and cloud-bound workloads.
     amazonaws.com`; the AWS SDK auto-exchanges the token for STS
     credentials via `AssumeRoleWithWebIdentity`. (Or the newer **Pod
     Identity** model: an association, no annotation.)
-  - **GKE:** `iam.gke.io/gcp-service-account` annotation; the GKE
-    metadata server intercepts and exchanges.
+  - **GKE:** Workload Identity Federation for GKE. Google's best practice is
+    to grant IAM roles directly to the ServiceAccount's principal identifier,
+    which needs no annotation. The fallback for APIs that need it links a KSA
+    to a Google service account with the `iam.gke.io/gcp-service-account`
+    annotation. The GKE metadata server intercepts and exchanges.
   - **AKS:** `azure.workload.identity/client-id` annotation; AKS does
     the same exchange against Entra ID.
   No long-lived AWS / GCP / Azure key in the Pod, in source, or in a
@@ -616,12 +619,13 @@ token; no OIDC trust dance. Pod Identity is the newer / preferred path
 for greenfield EKS; IRSA stays widely deployed and still works.
 [Part 10 ch.03](../10-cloud-and-managed-kubernetes/03-cloud-identity.md) walks both.
 
-**GKE Workload Identity / Azure WI — the equivalent shape.** GKE
-intercepts the metadata server inside Pods and substitutes the
-SA-mapped Google service account's credentials. Azure WI federates an
-Entra ID identity to the projected SA token via a federated credential.
-Different mechanisms, identical contract: no static key in Pod / source /
-Secret.
+**GKE Workload Identity / Azure WI: the equivalent shape.** On GKE the
+metadata server intercepts credential requests inside Pods. With a KSA linked
+to a Google service account it substitutes that account's credentials. With
+the recommended direct IAM grant it uses the KSA's federated identity.
+Azure WI federates an Entra ID identity to the projected SA token via a
+federated credential. Different mechanisms, identical contract: no static
+key in Pod / source / Secret.
 
 ## Production notes
 

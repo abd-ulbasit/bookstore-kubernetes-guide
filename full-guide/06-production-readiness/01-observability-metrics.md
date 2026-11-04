@@ -1070,10 +1070,13 @@ derives them from an actual SLO and error budget.
 > **In production:** managed offerings change the *operator/scaler* you run,
 > not the model. **EKS**: Amazon Managed Service for Prometheus + the
 > CloudWatch agent / ADOT collector; **GKE**: Google Cloud Managed Service
-> for Prometheus (drop-in, keeps PromQL + ServiceMonitor-style config);
+> for Prometheus (PromQL is unchanged, but managed collection scrapes with
+> PodMonitoring, so ServiceMonitors must be converted unless you
+> self-deploy collection);
 > **AKS**: Azure Monitor managed Prometheus + Managed Grafana. They all
 > ingest the same exposition format — your app instrumentation and PromQL are
-> portable; only the install and long-term storage differ.
+> portable; the install and long-term storage differ, and GKE managed
+> collection also needs its scrape config converted.
 
 > **In production:** put **retention and long-term storage** in the design
 > from day one. Local Prometheus retention is days; for months/years and HA,

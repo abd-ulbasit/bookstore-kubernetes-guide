@@ -57,9 +57,12 @@ the credential rotates; the scope is per-workload. This is the [Access
 Control](#further-reading) pattern extended across the cluster/cloud trust
 boundary. The reference is *Production Kubernetes* (Identity).
 
-> **Nothing in this chapter runs on a cloud.** Cloud behaviour is cited
-> upstream, not run. Each source in [Further reading](#further-reading) has
-> its URL and the date it was checked, 2026-10-31. The Kubernetes-side objects
+> **Run on GKE 1.37.1-gke.1552000 (2026-11-04) for part of 2c.** The 2c
+> callout says which steps ran. The GKE metadata and NetworkPolicy
+> observations later in the chapter come from the same lab cluster. Other
+> cloud behaviour is cited upstream, not run. Each source in [Further
+> reading](#further-reading) has its URL and the date it was checked,
+> 2026-10-31 unless marked. The Kubernetes-side objects
 > were applied, or dry-run, on a kind cluster at the `restricted` Pod Security
 > level, and the output shown here was captured there. That lab cluster has a
 > different name from the one this chapter prints, and the lab used its own
@@ -73,16 +76,19 @@ boundary. The reference is *Production Kubernetes* (Identity).
 JWT; the cloud is told to trust that signer and hand back temporary
 credentials scoped to exactly X/Y. No shared, no static, no node-wide.**
 
-- **The cluster is an OIDC provider.** A managed cluster exposes an **OIDC
-  issuer URL** with a public JWKS (enabled before workloads need it, see
-  [ch.02](02-provisioning-and-iac.md): `eksctl … withOIDC` /
-  `--workload-pool` / `--enable-oidc-issuer`). The kubelet projects a
+- **The cluster is an OIDC provider.** On EKS and AKS the cluster exposes an
+  **OIDC issuer URL** with a public JWKS. On GKE the cluster is registered as
+  an identity provider in a **workload identity pool**
+  (`PROJECT.svc.id.goog`). Enable it before workloads need it (see
+  [ch.02](02-provisioning-and-iac.md): `eksctl … withOIDC`,
+  `--enable-oidc-issuer` and `--workload-pool`). The kubelet projects a
   **ServiceAccount token** into the Pod that is *signed by the cluster*,
   *time-limited*, *bound to the Pod*, and *audience-scoped*: the bound/
   projected token of [Part 05 ch.01](../05-security/01-authn-authz-rbac.md),
   now with the cloud's STS as the audience.
 - **The cloud trusts that issuer for specific subjects.** You register the
-  cluster's OIDC issuer as a federated identity provider in the cloud IAM and
+  cluster's OIDC issuer as a federated identity provider in the cloud IAM (on
+  GKE the workload pool plays that role) and
   write a **trust/condition** that says: *a token from this issuer whose
   `sub` claim is `system:serviceaccount:bookstore:catalog-sa` (and whose
   `aud` is the cloud STS) may assume **this** IAM role*. The
@@ -128,7 +134,7 @@ carries are explained once, in the
 | Threat | Control in this chapter | Goes deeper |
 |---|---|---|
 | A long-lived cloud key in a Secret, environment variable or file is copied and reused | Federation: no key is stored; credentials come from a projected token and expire | Token lifetimes and projection: [05.01](../05-security/01-authn-authz-rbac.md) |
-| A Pod takes the node's cloud role through the instance metadata service | Per-ServiceAccount roles; IMDSv2 with hop limit 1 on AWS; metadata concealment and Workload Identity Federation on GKE; a NetworkPolicy egress rule that leaves the metadata address out | The NetworkPolicy block: [02.06](../02-networking/06-network-policies.md) |
+| A Pod takes the node's cloud role through the instance metadata service | Per-ServiceAccount roles; IMDSv2 with hop limit 1 on AWS; Workload Identity Federation for GKE, not metadata concealment (its flag is deprecated); on AWS, a NetworkPolicy egress rule that leaves the metadata address out | The NetworkPolicy block: [02.06](../02-networking/06-network-policies.md) |
 | A token from another ServiceAccount, namespace or audience is accepted | Exact `sub`, `aud` and issuer conditions on every trust object | Mental model and How it works, below |
 | A cloud role grants wildcard actions or resources | One action on one resource per role; trust and policy changes reviewed like RBAC | Review of cloud permissions: [05.09](../05-security/09-running-security-on-a-platform-team.md) |
 | A removed workload keeps cloud access after its manifests are gone | Delete the trust object: role trust, association, binding or federated credential | Audit of who assumed which role: [05.08](../05-security/08-audit-detection-and-incident-response.md) |
@@ -169,7 +175,7 @@ sequenceDiagram
 
   aspect         EKS IRSA          EKS Pod Identity  GKE WI             Entra WI
   ────────────────────────────────────────────────────────────────────────────────
-  cluster side   OIDC provider     EKS Pod Identity  OIDC issuer        OIDC issuer
+  cluster side   OIDC provider     EKS Pod Identity  workload pool      OIDC issuer
    prerequisite   registered in     Agent (add-on)    (--workload-pool)  (--enable-
                   IAM (withOIDC)    on the cluster                       oidc-issuer)
   trust object   IAM role trust    IAM role trust    IAM policy on the  Entra federated
@@ -179,9 +185,9 @@ sequenceDiagram
   SA annotation  eks.amazonaws.    none: the         iam.gke.io/gcp-    azure.workload.
                  com/role-arn      association is    service-account    identity/client-id
                                     API-side
-  pod opt-in     webhook (auto)    EKS adds env      none (the KSA      pod label
-                                   (auto)            binding is enough) azure.workload.
-                                                                        identity/use
+  pod opt-in     webhook (auto)    EKS adds env      KSA binding plus   pod label
+                                   (auto)            a nodeSelector on  azure.workload.
+                                                     Standard only      identity/use
   credential     STS Assume-       agent serves      GKE metadata       Entra token
    path          RoleWithWebId...  creds at a link-  server answers     exchange
                                    local address
@@ -207,10 +213,11 @@ provider needs and the IAM/role side, as overlays on the existing
 (Part 05 ch.01). It does **not** edit that canonical file. The goal: give
 `catalog` read access to a cloud bucket with **zero static keys**.
 
-> **Cloud steps are cited, not run.** The IAM role, policy, association and
-> binding commands below are the provider's documented forms. They need an
-> account you own, so read them rather than running them against anything
-> shared. The Kubernetes steps are the ones the lab ran; their output is shown.
+> **Cloud steps in 2a, 2b and 2d are cited, not run.** The IAM role, policy,
+> association and binding commands in those parts are the provider's
+> documented forms. They need an account you own, so read them rather than
+> running them against anything shared. The Kubernetes steps are the ones the
+> lab ran; their output is shown.
 
 ### 1. The problem, made concrete
 
@@ -222,7 +229,9 @@ clean starting state to preserve while adding cloud access:
 kubectl apply -f examples/bookstore/raw-manifests/00-namespace.yaml
 kubectl apply -f examples/bookstore/raw-manifests/05-serviceaccounts-rbac.yaml
 # catalog-sa has automountServiceAccountToken:false and NO cloud annotation yet.
-kubectl get sa catalog-sa -n bookstore -o yaml | grep -A3 'annotations:' || echo "no annotations yet"
+kubectl get sa catalog-sa -n bookstore -o yaml | \
+  grep -E 'eks.amazonaws.com|iam.gke.io|azure.workload' || \
+  echo "no cloud annotations yet"
 # There is NO Secret with a cloud key anywhere in the app — verify (stays true):
 kubectl get secrets -n bookstore        # db-credentials (DEMO) only; NO cloud key
 ```
@@ -366,7 +375,13 @@ the ServiceAccount principal directly and needs no Google service account. The
 commands below use the Google service account method, which GKE still
 documents. The annotation belongs to that method.
 
+> **Run on GKE 1.37.1-gke.1552000 (2026-11-04)**: the service account
+> creation, the `roles/iam.workloadIdentityUser` binding and the annotation
+> ran on a Standard cluster, with a lab service account name and namespace.
+> The bucket grant was not run, and Autopilot was not tested.
+
 ```sh
+PROJECT=$(gcloud config get-value project)
 # Bind the Kubernetes SA to a Google service account (GSA) with bucket read:
 gcloud iam service-accounts create bookstore-catalog
 gcloud storage buckets add-iam-policy-binding gs://your-org-book-covers \
@@ -385,6 +400,31 @@ member name `PROJECT.svc.id.goog[NS/KSA]` names the cluster's workload identity
 pool and the one ServiceAccount inside it. `roles/storage.objectViewer` is a
 predefined role, not one action: it also lets the account list the bucket's
 objects.
+
+Google says IAM policy changes typically take 2 minutes to take effect and
+can take 7 minutes or longer (cited, checked 2026-11-04). If the Pod's first
+Google API call fails with a 401 or 403 right after this step, wait and retry
+before debugging. In the lab, the first probe, run soon after the binding, got
+401 and 403 responses, and a re-run shortly afterwards succeeded. Propagation
+is the likely cause, but the lab did not isolate it.
+
+On a Standard cluster the Pod should also carry a node selector, so that the
+scheduler places it on a node pool with Workload Identity enabled. Google's
+how-to asks for this on Standard clusters (cited). Add it under the catalog
+Deployment's pod template, and skip it on Autopilot, which rejects it (cited):
+
+```yaml
+# Fragment of the catalog Deployment. Standard clusters only.
+spec:
+  template:
+    spec:
+      nodeSelector:
+        iam.gke.io/gke-metadata-server-enabled: "true"
+```
+
+The lab cluster had one node pool, with Workload Identity enabled, so its probe
+Pods landed there without the selector. A cluster with mixed node pools was not
+tested.
 
 ### 2d. Microsoft Entra Workload ID on AKS (a federated credential)
 
@@ -602,13 +642,32 @@ first (cited).
 
 ### GKE: the metadata server and concealment
 
-On GKE the metadata server intercepts Pod requests to metadata endpoints, so a
-Pod reaches that server rather than the Compute Engine one (cited). Metadata
-concealment hides `kube-env`, which holds kubelet credentials, and the node's
-instance identity token. It does **not** hide the node's service account
-credentials, which stay exposed to workloads (cited). The GKE page marks the
-older concealment flag, `--workload-metadata=SECURE`, as deprecated, so check
-the metadata setting on each node pool in the console or with `gcloud`.
+On a node pool where GKE enables its metadata server, that server intercepts
+Pod requests to metadata endpoints, so a Pod reaches it rather than the Compute
+Engine one (cited). Metadata concealment hides `kube-env`, which holds kubelet
+credentials, and the node's instance identity token (cited). Check the mode of
+each node pool first:
+
+```sh
+gcloud container node-pools describe <POOL-NAME> \
+  --cluster $CLUSTER_NAME --location <LOCATION> \
+  --format='yaml(config.workloadMetadataConfig)'
+```
+
+The lab's pool printed `mode: GKE_METADATA`. On that pool, Pods did not get the
+node's service account. A Pod on the default ServiceAccount got a 404 when it
+asked for the node account's email, and the metadata server named the
+cluster's workload pool, `PROJECT.svc.id.goog`, as its identity.
+
+On a pool that serves the Compute Engine metadata server (`GCE_METADATA`), the
+node's service account credentials stay exposed to workloads, and concealment
+does not change that (cited). The lab did not test a `GCE_METADATA` pool, so
+that is not checked here.
+
+The GKE page marks `--workload-metadata=SECURE` as deprecated. SECURE is
+beta-only: `gcloud beta container node-pools create` takes it (cited), and
+`gcloud container node-pools create` (gcloud 575.0.1) accepts only
+`GCE_METADATA` or `GKE_METADATA`. Do not use it on the GA track.
 
 Two things follow. Keep the node service account to what the node needs; GKE's
 own logging and monitoring agents still use it (cited). And move Pods to
@@ -639,7 +698,15 @@ catalog egress, owned by [02.06](../02-networking/06-network-policies.md):
     - { protocol: TCP, port: 443 }   # STS and S3
 - to:
     - ipBlock:
-        cidr: 169.254.170.23/32   # the EKS Pod Identity agent
+        cidr: 169.254.170.23/32   # the EKS Pod Identity agent (AWS only)
+  ports:
+    - { protocol: TCP, port: 80 }
+# GKE Dataplane V2 only. There, the GKE metadata server that Workload
+# Identity uses answers at 169.254.169.254, port 80. Add this rule on such a
+# cluster, and never on EKS, where that address is IMDS.
+- to:
+    - ipBlock:
+        cidr: 169.254.169.254/32
   ports:
     - { protocol: TCP, port: 80 }
 ```
@@ -649,7 +716,20 @@ names, and the STS and S3 addresses are not fixed. The VPC endpoints in
 [14.08](../14-eks-in-production-a-to-z/08-vpc-endpoints-and-egress.md) narrow
 it. The metadata address stays excluded in the first rule. The EKS Pod Identity
 agent listens on `169.254.170.23`, not on the metadata address, so the second
-rule reaches it on port 80 (cited, checked 2026-10-31).
+rule reaches it on port 80 (cited, checked 2026-10-31). That rule is AWS only
+and does nothing on GKE.
+
+The GKE rule opens the metadata address on purpose. On a Dataplane V2 cluster,
+the metadata server that Workload Identity uses sits at `169.254.169.254`, the
+address the first rule leaves out, so without the GKE rule that path times out.
+Google's network policy page asks for egress to that address on ports 80 and
+8080 there, and to `169.254.169.252/32` on ports 988 and 987 on other clusters
+from GKE 1.21.0-gke.1000 (cited, checked 2026-11-04). The lab did not test the
+other-cluster rule, and its metadata call used only port 80. In the lab, a
+probe Pod that ran as `catalog-sa`, with a DNS rule and the first two rules
+applied, timed out on the metadata call. The same call returned the service
+account email once the GKE rule was added. The lab cluster ran Dataplane V2
+(`ADVANCED_DATAPATH`), which enforced the policy.
 
 ## How it works under the hood
 
@@ -663,7 +743,13 @@ rule reaches it on port 80 (cited, checked 2026-10-31).
   Google external-account file, and for Entra `AZURE_FEDERATED_TOKEN_FILE`,
   which Microsoft asks applications to read rather than hard-code (cited). The
   kubelet refreshes the file before it expires (cited), so the app code does
-  not change: the SDK does the exchange transparently.
+  not change: the SDK does the exchange transparently. GKE is the exception,
+  with or without a Google service account: the SDK reads no token file, and
+  asks the GKE metadata server instead. In the lab, that server answered Pods
+  with `automountServiceAccountToken: false`, including one with no Google
+  service account annotation. The projected-token route applies to IRSA, Pod
+  Identity, Entra and the Workload Identity Federation external-account
+  setups.
 - **The trust is `iss` + `aud` + `sub`, and it fails closed.** The cloud checks
   the JWT's signature against the cluster's public keys, fetched from the
   registered OIDC issuer. It then checks that `aud` is the expected audience
@@ -750,7 +836,11 @@ kubectl annotate sa <SA> -n <NS> eks.amazonaws.com/role-arn=arn:aws:iam::<ACCT>:
 aws eks create-addon --cluster-name $CLUSTER_NAME --addon-name eks-pod-identity-agent
 aws eks create-pod-identity-association --cluster-name $CLUSTER_NAME \
   --namespace <NS> --service-account <SA> --role-arn arn:aws:iam::<ACCT>:role/<R>
-# GKE Workload Identity (GSA method):
+# GKE Workload Identity (GSA method): the IAM binding, then the annotation
+gcloud iam service-accounts add-iam-policy-binding \
+  <GSA>@<PROJ>.iam.gserviceaccount.com \
+  --role roles/iam.workloadIdentityUser \
+  --member "serviceAccount:<PROJ>.svc.id.goog[<NS>/<KSA>]"
 kubectl annotate sa <SA> -n <NS> iam.gke.io/gcp-service-account=<GSA>@<PROJ>.iam.gserviceaccount.com
 # Microsoft Entra Workload ID on AKS:
 az identity federated-credential create --identity-name <ID> -g $RG --name <N> \
@@ -798,19 +888,20 @@ Checklist:
       read action or role, on the narrowest resource), not `*`
 - [ ] **One SA per workload** ([Part 05 ch.01](../05-security/01-authn-authz-rbac.md));
       annotate only those that need cloud
-- [ ] OIDC issuer enabled before any workload needs it
-      ([ch.02](02-provisioning-and-iac.md)) for IRSA, GKE and Entra; Pod
-      Identity needs none. For IRSA the webhook
-      fires after a Pod restart, and the automount setting is confirmed on your
-      cluster
+- [ ] Cluster identity enabled before any workload needs it
+      ([ch.02](02-provisioning-and-iac.md)): the OIDC issuer for IRSA and
+      Entra, and the workload pool (`PROJECT.svc.id.goog`) for GKE. Pod
+      Identity needs neither. For IRSA the webhook fires after a Pod restart,
+      and the automount setting is confirmed on your cluster
 - [ ] Entra Pods carry the `azure.workload.identity/use` label; Pod Identity
       associations exist in the AWS API
 - [ ] **AWS:** IMDSv2 required and hop limit 1 on the node template and the
       running nodes; the node role is minimal
-- [ ] **GKE:** Workload Identity Federation, or concealment with a minimal node
-      service account
-- [ ] Egress rules leave `169.254.169.254` out, with an enforcing CNI
-      ([02.06](../02-networking/06-network-policies.md))
+- [ ] **GKE:** Workload Identity Federation for GKE. The metadata concealment
+      flag is deprecated.
+- [ ] Egress rules leave `169.254.169.254` out on EKS. On GKE Dataplane V2, the
+      metadata server at that address must stay reachable on TCP 80. Use an
+      enforcing CNI ([02.06](../02-networking/06-network-policies.md))
 - [ ] `restricted` refuses host networking (the refusal in Hands-on step 3)
 - [ ] Revocation tested = delete the trust object (no key inventory to chase)
 
@@ -869,7 +960,8 @@ Checklist:
 - **Ibryam & Huß, _Kubernetes Patterns_ 2e, ch.26 — Access Control** (the
   authentication/authorization model and least-privilege identity as a
   pattern, extended here across the cloud trust boundary).
-- Checked 2026-10-31. Cloud behaviour cited, not run.
+- Checked 2026-10-31 unless marked. Cloud behaviour cited, not run, except
+  where the text names a lab run.
   - EKS IAM roles for service accounts (IRSA)
     <https://docs.aws.amazon.com/eks/latest/userguide/iam-roles-for-service-accounts.html>
   - EKS Pod Identity: association
@@ -885,12 +977,16 @@ Checklist:
     <https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/configuring-instance-metadata-options.html>
   - STS AssumeRoleWithWebIdentity
     <https://docs.aws.amazon.com/STS/latest/APIReference/API_AssumeRoleWithWebIdentity.html>
-  - GKE Workload Identity
+  - GKE Workload Identity (checked 2026-11-04)
     <https://docs.cloud.google.com/kubernetes-engine/docs/how-to/workload-identity>
     and its concepts
     <https://docs.cloud.google.com/kubernetes-engine/docs/concepts/workload-identity>
-  - GKE metadata concealment
+  - GKE metadata concealment (checked 2026-11-04)
     <https://docs.cloud.google.com/kubernetes-engine/docs/how-to/protecting-cluster-metadata>
+  - GKE network policy, metadata server egress (checked 2026-11-04)
+    <https://docs.cloud.google.com/kubernetes-engine/docs/how-to/network-policy>
+  - Google Cloud IAM, access change propagation (checked 2026-11-04)
+    <https://docs.cloud.google.com/iam/docs/access-change-propagation>
   - Microsoft Entra Workload ID on AKS
     <https://learn.microsoft.com/en-us/azure/aks/workload-identity-overview>
   - Kubernetes ServiceAccounts and token projection

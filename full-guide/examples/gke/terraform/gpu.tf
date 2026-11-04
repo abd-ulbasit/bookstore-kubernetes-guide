@@ -2,8 +2,9 @@
 #
 # Separate from the CPU pool on purpose, and autoscaled from ZERO so the pool can
 # exist permanently while costing nothing until a GPU workload actually lands.
-# That matters more here than anywhere else in this repo: a forgotten L4 is an
-# order of magnitude more expensive than a forgotten e2-standard-2.
+# That matters more here than anywhere else in this repo: a forgotten
+# g2-standard-4 with its L4 lists at roughly 8 to 9 times a forgotten
+# e2-standard-2 (Mumbai list prices, checked 2026-11-04).
 #
 # QUOTA, checked 2026-09-03 on this project: asia-south1 has NVIDIA_L4_GPUS = 1 and
 # PREEMPTIBLE_NVIDIA_L4_GPUS = 1. That is enough for labs G1, G2, G3, G5, G6 and G7.

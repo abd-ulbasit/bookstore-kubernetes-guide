@@ -556,8 +556,10 @@ can reach it, unless the request is hardened or blocked. The
 [AWS instance metadata documentation](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/configuring-instance-metadata-service.html)
 describes IMDSv2 and its hop limit. The
 [GKE documentation on protecting cluster metadata](https://docs.cloud.google.com/kubernetes-engine/docs/how-to/protecting-cluster-metadata)
-describes how metadata concealment keeps Pods away from node credentials. This
-lab cannot show either behaviour, and says so. It runs nothing on AWS or GCP.
+describes metadata concealment, an older option that hides the kubelet
+credentials in `kube-env` from Pods but does not restrict the node service
+account. This lab cannot show either behaviour, and says so. It runs nothing
+on AWS or GCP.
 
 #### The flat network
 
@@ -1012,13 +1014,16 @@ subject of the last section of the re-attack.
 On a managed cluster the reconnaissance above works the same way, with two
 differences a reader should expect. The first is the metadata address. On AWS
 the instance metadata service is reached at `169.254.169.254`, and its hop
-limit decides whether a Pod can reach it at all. On GKE, metadata concealment
-is the setting that keeps Pods away from node credentials. Both cited
-documents are linked in the lab section, and neither was run here. The second
-is the NetworkPolicy controller, which depends on the cluster's network
-plugin. A plugin that does not enforce policy lets every connection through,
-so the denied probes in steps 16 and 17 belong in any cluster's acceptance
-test.
+limit decides whether a Pod can reach it at all. On GKE, Google's metadata
+concealment page says Pods are stopped from reading `kube-env` (the kubelet
+credentials) and the node's instance identity token. It says concealment does
+not restrict the node service account or host-network Pods, and it describes
+an older option. The Part 16 GKE lab node pool uses `workloadMetadataConfig`
+`GKE_METADATA`, which runs the GKE metadata server. Both cited documents are
+linked in the lab section, and neither was run here. The second is the
+NetworkPolicy controller, which depends on the cluster's network plugin. A
+plugin that does not enforce policy lets every connection through, so the
+denied probes in steps 16 and 17 belong in any cluster's acceptance test.
 
 Operating these controls on a cloud is the subject of Parts 10, 11, 13, 14,
 and 15. Part 05 teaches the mechanism.

@@ -1,7 +1,7 @@
 # Part 16 — GKE in production, A to Z
 
 The GCP counterpart to [Part 14 (EKS)](../14-eks-in-production-a-to-z/), which
-is 17 chapters and 109,021 words.
+is 17 chapters and about 109,000 words.
 
 ## The rule for this Part, which is different from every other Part
 
@@ -42,22 +42,24 @@ cluster, spot nodes, Workload Identity on, `deletion_protection = false` so
 teardown actually works, and an optional budget alert. `make up`, `make
 status`, `make down`.
 
-**Applied, verified and destroyed on 2026-09-03** against GKE
-1.35.7-gke.1027000 in `asia-south1-a`, using `hashicorp/google v6.50.0` and
-Terraform 1.14.8. Nine of ten checks passed on the first run and both failures
-were defects in this repo, now fixed. See
+**Applied, verified and destroyed on 2026-09-03** in `asia-south1-a`, using
+`hashicorp/google v6.50.0` and Terraform 1.14.8. The create request and
+response in the audit log (checked 2026-11-04) carry no master version, so
+this page does not state one. Nine of ten checks passed on the first run and
+both failures were defects in this repo, now fixed. See
 [`examples/gke/README.md`](../examples/gke/README.md) for what broke.
 
 ## Chapter plan, mapped to Part 14
 
-Fourteen chapters mirror an EKS chapter. Four have no EKS counterpart because
-they are the parts of GKE that are genuinely different, and those four are
-where what you know about Kubernetes stops being portable.
+Fifteen chapters have an EKS counterpart (04 and 10 partly). Two have none,
+03 and 14. The four in bold, 03, 04, 10 and 14, are the parts of GKE that are
+genuinely different, and they are where what you know about Kubernetes stops
+being portable.
 
 | # | Chapter | Part 14 counterpart | The GCP-specific thing |
 |---|---|---|---|
 | 01 | Terraform state on GCS | 01 | GCS backend, object versioning, state locking |
-| 02 | Cluster lifecycle and release channels | 02 | RAPID/REGULAR/STABLE, maintenance windows, surge upgrades |
+| 02 | Cluster lifecycle and release channels | 02 | RAPID/REGULAR/STABLE/EXTENDED, maintenance windows, surge upgrades |
 | 03 | **Autopilot vs Standard** | none | The scale-to-zero-when-idle behaviour, and what Autopilot forbids |
 | 04 | **Workload Identity** | 03 (partly) | The IRSA equivalent, and why the node SA should stay bare |
 | 05 | Storage: PD CSI and StorageClasses | 04 | pd-balanced vs pd-ssd, regional PD, volume expansion |
@@ -65,7 +67,7 @@ where what you know about Kubernetes stops being portable.
 | 07 | Cost guardrails | 06 | Budgets alert but never cap. Spot preemption. The free-tier credit |
 | 08 | Infrastructure CI/CD and drift | 07 | Same shape, GCS backend |
 | 09 | Private clusters, Cloud NAT, egress | 08 | Private Google Access, and where egress actually bills |
-| 10 | **Dataplane V2 (eBPF)** | 15 (Cilium on EKS) | GKE ships Cilium as the managed dataplane. Network policy logging |
+| 10 | **Dataplane V2 (eBPF)** | 15 (partly; Cilium on EKS) | GKE ships Cilium as the managed dataplane. Network policy logging |
 | 11 | Arm nodes: Axion / T2A | 09 (Graviton) | Multi-arch images, taints and tolerations |
 | 12 | GitOps bootstrap on a fresh cluster | 10 | Argo CD, same as EKS |
 | 13 | Supply chain: Artifact Registry, Binary Authorization | 12 | Attestations, and the admission path |

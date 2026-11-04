@@ -996,8 +996,8 @@ kind delete cluster --name bookstore        # also removes everything above
 > A platform with no users is the most expensive way to add cognitive load.
 
 > **In production (managed — EKS/GKE/AKS):** providers ship platform building
-> blocks — **EKS Blueprints / GKE Enterprise (Config Controller is hosted
-> Crossplane) / AKS + Azure Service Operator**, plus managed Argo/fleet
+> blocks: **EKS Blueprints / GKE (Config Controller is hosted
+> Config Connector) / AKS + Azure Service Operator**, plus managed Argo/fleet
 > ([ch.06](06-multi-cluster-and-fleet.md)) and managed databases ([Part 08
 > ch.02](../08-day-2-operations/02-backup-and-dr.md)). The **golden-path model
 > is portable** (an XRD/Composition + a Backstage template + GitOps); the

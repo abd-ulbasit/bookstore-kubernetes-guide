@@ -1195,9 +1195,12 @@ kubectl get clusterrole,clusterrolebinding | grep -c argo-rollouts
 
 > **In production (managed — EKS/GKE/AKS):** Argo Rollouts and Flagger run
 > identically on managed clusters; the only variable is the **traffic
-> provider** — a cloud load balancer / mesh (App Mesh, Istio on GKE, AGIC) for
-> exact-weight routing, vs. the replica-based approximation used here. The
-> metric provider is portable (managed Prometheus speaks the same PromQL —
+> provider**: a cloud load balancer / mesh (AWS ALB, Cloud Service Mesh on
+> GKE, AGIC) for exact-weight routing, vs. the replica-based approximation used
+> here. GKE clusters on the Istio add-on can follow Google's migration guide
+> (v1.19 docs) at
+> <https://docs.cloud.google.com/service-mesh/v1.19/docs/migrate-service-mesh>.
+> The metric provider is portable (managed Prometheus speaks the same PromQL;
 > Part 06 ch.01); your AnalysisTemplates move unchanged.
 
 ## Quick Reference
